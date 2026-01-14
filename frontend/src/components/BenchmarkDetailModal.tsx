@@ -20,6 +20,7 @@ interface BenchmarkDetailModalProps {
   onClose: () => void;
   onDownloadCpu: () => void;
   onOpenPProf: () => void;
+  onTrendClick?: (runId: number, resultId: number) => void;
 }
 
 const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
@@ -118,9 +119,9 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                 </div>
             </div>
 
-            <div class="bg-bg-dark p-5 rounded-md border border-border mb-6 flex flex-col h-[400px]">
-                    <div class="flex justify-between items-center mb-4">
-                    <h3 class="text-[12px] font-bold text-text-muted uppercase">Performance Trend</h3>
+            <div class="mb-8 flex flex-col h-[450px]">
+                    <div class="flex justify-between items-center mb-6">
+                    <h3 class="text-[14px] font-bold text-text-main font-mono">PERFORMANCE TREND</h3>
                     <div class="flex gap-2 items-center">
                         <Button active={props.chartRange === 10} onClick={() => props.setChartRange(10)}>10</Button>
                         <Button active={props.chartRange === 30} onClick={() => props.setChartRange(30)}>30</Button>
@@ -129,8 +130,16 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                     </div>
                     <div class="flex-1 relative">
                     <Show when={props.trendData} fallback={<div>Loading trend...</div>}>
-                        <TrendChart data={props.trendData!} range={props.chartRange} />
+                        <TrendChart 
+                            data={props.trendData!} 
+                            range={props.chartRange} 
+                            onPointClick={props.onTrendClick}
+                        />
                     </Show>
+                    </div>
+                    <div class="mt-4 text-[11px] text-text-muted font-mono flex gap-4">
+                        <span>• Error bars: 95% CI</span>
+                        <span>• Shaded: ±1 SD</span>
                     </div>
             </div>
 

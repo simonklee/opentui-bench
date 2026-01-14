@@ -18,6 +18,7 @@ import (
 	"github.com/google/pprof/profile"
 
 	"opentui-bench/internal/db"
+	"opentui-bench/internal/stats"
 )
 
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
@@ -331,10 +332,14 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		MaxNs       int64  `json:"max_ns"`
 		StdDevNs    int64  `json:"std_dev_ns"`
 		SampleCount int64  `json:"sample_count"`
+		CiLowerNs   int64  `json:"ci_lower_ns"`
+		CiUpperNs   int64  `json:"ci_upper_ns"`
+		SemNs       int64  `json:"sem_ns"`
 	}
 
 	var points []trendPoint
 	for _, t := range trends {
+		ciLower, ciUpper, sem := stats.MeanCI95(t.Result.AvgNs, t.Result.StdDevNs, t.Result.SampleCount)
 		points = append(points, trendPoint{
 			RunID:       t.Run.ID,
 			ResultID:    t.Result.ID,
@@ -345,6 +350,9 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 			MaxNs:       t.Result.MaxNs,
 			StdDevNs:    t.Result.StdDevNs,
 			SampleCount: t.Result.SampleCount,
+			CiLowerNs:   ciLower,
+			CiUpperNs:   ciUpper,
+			SemNs:       sem,
 		})
 	}
 

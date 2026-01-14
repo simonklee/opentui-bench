@@ -4,47 +4,124 @@ import { Line } from 'solid-chartjs';
 import type { TrendPoint } from "../services/api";
 import { formatNs } from "../utils/format";
 
-Chart.register(Title, Tooltip, Legend, Colors, LineController, CategoryScale, LinearScale, PointElement, LineElement, Filler);
+
+const errorBarPlugin = {
+    id: 'errorBars',
+    afterDatasetsDraw(chart: any) {
+        const yScale = chart.scales?.y;
+        if (!yScale) {
+            return;
+        }
+
+        const datasets = chart.data?.datasets;
+        if (!datasets) {
+            return;
+        }
+
+        const avgIndex = datasets.findIndex((dataset: any) => dataset.label === 'Average');
+        if (avgIndex < 0) {
+            return;
+        }
+
+        const avgDataset = datasets[avgIndex] as any;
+        const ciLower = avgDataset.ciLower as number[] | undefined;
+        const ciUpper = avgDataset.ciUpper as number[] | undefined;
+        if (!ciLower || !ciUpper) {
+            return;
+        }
+
+        const meta = chart.getDatasetMeta(avgIndex);
+        const points = meta?.data || [];
+        const stroke = typeof avgDataset.borderColor === 'string' ? avgDataset.borderColor : '#000000';
+        const cap = 3;
+
+        const { ctx } = chart;
+        ctx.save();
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = 1;
+        points.forEach((pt: any, i: number) => {
+            const lower = ciLower[i];
+            const upper = ciUpper[i];
+            if (lower === undefined || upper === undefined) {
+                return;
+            }
+            const x = pt.x;
+            const yLow = yScale.getPixelForValue(lower);
+            const yHigh = yScale.getPixelForValue(upper);
+            ctx.beginPath();
+            ctx.moveTo(x, yLow);
+            ctx.lineTo(x, yHigh);
+            // Cap at the bottom
+            ctx.moveTo(x - cap, yLow);
+            ctx.lineTo(x + cap, yLow);
+            // Cap at the top
+            ctx.moveTo(x - cap, yHigh);
+            ctx.lineTo(x + cap, yHigh);
+            ctx.stroke();
+        });
+        ctx.restore();
+    }
+};
+
+Chart.register(Title, Tooltip, Legend, Colors, LineController, CategoryScale, LinearScale, PointElement, LineElement, Filler, errorBarPlugin);
 
 interface Props {
     data: TrendPoint[]; 
     range?: number;
+    onPointClick?: (runId: number, resultId: number) => void;
 }
 
 const TrendChart: Component<Props> = (props) => {
-    const chartData = () => {
+    const showData = () => {
         const limit = props.range || 100;
-        const showData = props.data.slice(0, limit).reverse();
-        
+        return (props.data || []).slice(0, limit).reverse();
+    };
+
+    const chartData = (): any => {
+        const data = showData();
+        const ciLower = data.map(d => d.ci_lower_ns ?? d.avg_ns);
+        const ciUpper = data.map(d => d.ci_upper_ns ?? d.avg_ns);
+        const sdLower = data.map(d => Math.max(d.avg_ns - d.std_dev_ns, 0));
+        const sdUpper = data.map(d => d.avg_ns + d.std_dev_ns);
+
         return {
-            labels: showData.map(d => new Date(d.run_date).toLocaleDateString()),
+            labels: data.map(d => {
+                const date = new Date(d.run_date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+                return [date, d.commit_hash.slice(0, 7)];
+            }),
             datasets: [
                 {
-                    label: 'Min',
-                    data: showData.map(d => d.min_ns),
+                    label: 'SD Lower',
+                    data: sdLower,
                     borderColor: 'transparent',
                     pointRadius: 0,
                     pointHoverRadius: 0,
                     fill: false,
                 },
                 {
-                    label: 'Max',
-                    data: showData.map(d => d.max_ns),
+                    label: 'SD Upper',
+                    data: sdUpper,
                     borderColor: 'transparent',
-                    backgroundColor: 'rgba(9, 105, 218, 0.15)',
+                    backgroundColor: 'rgba(0, 0, 0, 0.05)',
                     pointRadius: 0,
                     pointHoverRadius: 0,
                     fill: '-1',
                 },
                 {
                     label: 'Average',
-                    data: showData.map(d => d.avg_ns),
-                    borderColor: '#0969da',
-                    backgroundColor: 'transparent',
-                    borderWidth: 2,
+                    data: data.map(d => d.avg_ns),
+                    borderColor: '#24292f',
+                    backgroundColor: '#ffffff',
+                    borderWidth: 1.5,
                     tension: 0,
-                    pointRadius: 2,
+                    pointRadius: 3,
+                    pointHoverRadius: 5,
+                    pointBorderColor: '#24292f',
+                    pointBorderWidth: 1.5,
+                    pointBackgroundColor: '#ffffff',
                     fill: false,
+                    ciLower,
+                    ciUpper,
                 }
             ]
         };
@@ -58,19 +135,57 @@ const TrendChart: Component<Props> = (props) => {
             mode: 'index',
             intersect: false,
         },
+        onClick: (event: any, elements: any[]) => {
+            if (!elements || elements.length === 0) return;
+            // The interaction mode is index, so elements[0] is one of the points
+            // But we need to make sure we get the correct data index
+            const index = elements[0].index;
+            const d = showData()[index];
+            if (d && props.onPointClick) {
+                props.onPointClick(d.run_id, d.result_id);
+            }
+        },
         plugins: { 
             legend: { display: false },
             tooltip: {
+                backgroundColor: '#ffffff',
+                titleColor: '#24292f',
+                bodyColor: '#57606a',
+                borderColor: '#d0d7de',
+                borderWidth: 1,
+                padding: 10,
+                displayColors: false,
+                titleFont: {
+                    family: 'var(--font-mono)',
+                    size: 12
+                },
+                bodyFont: {
+                    family: 'var(--font-ui)',
+                    size: 12
+                },
+                filter: function(context: any) {
+                    return context.dataset?.label === 'Average';
+                },
                 callbacks: {
+                    title: function(context: any[]) {
+                        const d = showData()[context[0].dataIndex];
+                        if (!d) return '';
+                        const date = new Date(d.run_date).toLocaleString();
+                        return `${d.commit_hash.slice(0, 7)} (${date})`;
+                    },
                     label: function(context: any) {
-                        let label = context.dataset.label || '';
-                        if (label) {
-                            label += ': ';
+                        const d = showData()[context.dataIndex];
+                        if (!d) {
+                            return '';
                         }
-                        if (context.parsed.y !== null) {
-                            label += formatNs(context.parsed.y);
-                        }
-                        return label;
+                        const ciLower = d.ci_lower_ns ?? d.avg_ns;
+                        const ciUpper = d.ci_upper_ns ?? d.avg_ns;
+                        return [
+                            `Avg: ${formatNs(d.avg_ns)}`,
+                            `95% CI: ${formatNs(ciLower)} - ${formatNs(ciUpper)}`,
+                            `Range: ${formatNs(d.min_ns)} - ${formatNs(d.max_ns)}`,
+                            `Samples: ${d.sample_count}`
+                        ];
                     }
                 }
             }
@@ -78,16 +193,48 @@ const TrendChart: Component<Props> = (props) => {
         scales: {
             y: { 
                 beginAtZero: true, 
-                grid: { color: '#f3f4f6' },
+                grid: { 
+                    color: '#f0f0f0',
+                    borderDash: [4, 4],
+                    drawBorder: false,
+                },
+                border: { display: false },
                 ticks: {
+                    font: {
+                        family: 'var(--font-mono)',
+                        size: 11
+                    },
+                    color: '#57606a',
                     callback: function(value: any) {
                         return formatNs(value);
                     }
                 }
             },
-            x: { display: false }
+            x: { 
+                display: true,
+                grid: {
+                    display: false,
+                    drawBorder: false,
+                },
+                border: {
+                    display: true,
+                    color: '#24292f'
+                },
+                ticks: {
+                    font: {
+                        family: 'var(--font-mono)',
+                        size: 10
+                    },
+                    color: '#57606a',
+                    maxRotation: 45,
+                    minRotation: 0,
+                    autoSkip: true,
+                    maxTicksLimit: 10
+                }
+            }
         }
     };
+
 
     return (
         <div class="relative w-full h-full">

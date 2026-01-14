@@ -20,7 +20,8 @@ const BenchmarkDetail: Component = () => {
         selectedBenchmark,
         trendData,
         hasCpuProfile,
-        closeDetail
+        closeDetail,
+        navigate
     } = useBenchmarkDetail();
     
     // UI State that belongs to the view layer
@@ -72,6 +73,12 @@ const BenchmarkDetail: Component = () => {
         }
     });
 
+
+    const handleTrendClick = (runId: number, resultId: number) => {
+        // Navigate to the clicked run and select the same benchmark
+        navigate(`/runs/${runId}?bench_id=${resultId}`);
+    };
+
     return (
         <div class="flex flex-col h-full relative font-ui">
             <BenchmarkFilterBar 
@@ -108,6 +115,7 @@ const BenchmarkDetail: Component = () => {
                     onClose={closeDetail}
                     onDownloadCpu={downloadCpuProfile}
                     onOpenPProf={openPProfUI}
+                    onTrendClick={handleTrendClick}
                 />
             </Show>
 

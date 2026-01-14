@@ -36,6 +36,9 @@ export interface TrendPoint {
     max_ns: number;
     std_dev_ns: number;
     sample_count: number;
+    ci_lower_ns?: number;
+    ci_upper_ns?: number;
+    sem_ns?: number;
 }
 
 export interface CompareResult {
