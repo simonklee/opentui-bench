@@ -47,25 +47,28 @@ export interface CompareResult {
     }[];
 }
 
+async function fetchJson<T>(url: string): Promise<T> {
+    const res = await fetch(url);
+    if (!res.ok) {
+        throw new Error(`API call failed: ${res.status} ${res.statusText}`);
+    }
+    return await res.json() as T;
+}
+
 export const api = {
     getRuns: async (limit = 100) => {
-        const res = await fetch(`/api/runs?limit=${limit}`);
-        return await res.json() as Run[];
+        return fetchJson<Run[]>(`/api/runs?limit=${limit}`);
     },
     getRunDetails: async (id: number) => {
-        const res = await fetch(`/api/runs/${id}`);
-        return await res.json() as RunDetails;
+        return fetchJson<RunDetails>(`/api/runs/${id}`);
     },
     getCompare: async (baseId: number, currId: number) => {
-        const res = await fetch(`/api/compare?id_a=${baseId}&id_b=${currId}`);
-        return await res.json() as CompareResult;
+        return fetchJson<CompareResult>(`/api/compare?id_a=${baseId}&id_b=${currId}`);
     },
     getTrend: async (name: string, limit = 100) => {
-        const res = await fetch(`/api/trend?name=${encodeURIComponent(name)}&limit=${limit}`);
-        return await res.json() as TrendPoint[];
+        return fetchJson<TrendPoint[]>(`/api/trend?name=${encodeURIComponent(name)}&limit=${limit}`);
     },
     getFlamegraphs: async (runId: number) => {
-        const res = await fetch(`/api/runs/${runId}/flamegraphs`);
-        return await res.json() as { result_id: number, type: string }[];
+        return fetchJson<{ result_id: number, type: string }[]>(`/api/runs/${runId}/flamegraphs`);
     }
 };

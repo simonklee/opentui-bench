@@ -1,9 +1,18 @@
-import { createResource, Show } from "solid-js";
+import { createResource } from "solid-js";
 import type { Component } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import { api } from "../services/api";
 import { lastViewedRunId, isSidebarExpanded, setIsSidebarExpanded } from "../store";
 import { toggleHelp } from "../shortcuts";
+import { 
+    LayoutDashboard, 
+    List, 
+    GitCompare, 
+    PanelLeftClose, 
+    PanelLeftOpen, 
+    HelpCircle,
+    Activity
+} from "lucide-solid";
 
 const Sidebar: Component = () => {
   const location = useLocation();
@@ -31,7 +40,7 @@ const Sidebar: Component = () => {
                 class={`font-mono font-bold text-accent text-[14px] flex items-center cursor-pointer hover:opacity-80 overflow-hidden whitespace-nowrap transition-all duration-300 ${isSidebarExpanded() ? 'max-w-[200px] opacity-100' : 'max-w-0 opacity-0'}`} 
                 onClick={() => navigate('/')}
             >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="flex-shrink-0 mr-2"><path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M4.93 19.07l14.14-14.14"/></svg>
+                <Activity size={20} class="flex-shrink-0 mr-2" />
                 <span>OpenTUI <span class="text-text-muted font-normal">Bench</span></span>
             </div>
             
@@ -41,9 +50,9 @@ const Sidebar: Component = () => {
                 title={isSidebarExpanded() ? "Collapse sidebar" : "Expand sidebar"}
             >
                 {isSidebarExpanded() ? (
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><line x1="9" x2="9" y1="3" y2="21"/><path d="m15 14-2-2 2-2"/></svg>
+                    <PanelLeftClose size={18} />
                 ) : (
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><line x1="9" x2="9" y1="3" y2="21"/><path d="m15 10 2 2-2 2"/></svg>
+                    <PanelLeftOpen size={18} />
                 )}
             </button>
         </div>
@@ -54,7 +63,7 @@ const Sidebar: Component = () => {
                 onClick={() => navigate('/runs')}
                 title={!isSidebarExpanded() ? "Runs" : ""}
             >
-                <svg class="w-4 h-4 opacity-70 group-[.active]:opacity-100 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+                <List size={16} class="opacity-70 group-[.active]:opacity-100 flex-shrink-0" />
                 <span class={labelClass()}>Runs</span>
             </div>
             <div 
@@ -62,7 +71,7 @@ const Sidebar: Component = () => {
                 onClick={handleBenchmarksClick}
                 title={!isSidebarExpanded() ? "Benchmarks" : ""}
             >
-                <svg class="w-4 h-4 opacity-70 group-[.active]:opacity-100 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+                <LayoutDashboard size={16} class="opacity-70 group-[.active]:opacity-100 flex-shrink-0" />
                 <span class={labelClass()}>Benchmarks</span>
             </div>
             <A 
@@ -71,7 +80,7 @@ const Sidebar: Component = () => {
                 activeClass={activeClass}
                 title={!isSidebarExpanded() ? "Compare" : ""}
             >
-                <svg class="w-4 h-4 opacity-70 group-[.active]:opacity-100 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"></path><path d="M4 20L21 3"></path><path d="M21 16v5h-5"></path><path d="M15 15l5 5"></path><path d="M4 4l5 5"></path></svg>
+                <GitCompare size={16} class="opacity-70 group-[.active]:opacity-100 flex-shrink-0" />
                 <span class={labelClass()}>Compare</span>
             </A>
         </div>
@@ -83,7 +92,7 @@ const Sidebar: Component = () => {
             </div>
             <div class={`transition-all duration-300 ${isSidebarExpanded() ? 'opacity-0 w-0 overflow-hidden' : 'opacity-100 w-auto'}`}>
                  <button onClick={toggleHelp} title="Shortcuts" class="hover:text-accent p-1">
-                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+                     <HelpCircle size={16} />
                  </button>
             </div>
         </div>
