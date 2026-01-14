@@ -216,6 +216,13 @@ func (pm *PProfManager) serve(w http.ResponseWriter, r *http.Request, runID, res
 		subpath = "/"
 	}
 
+	// Disasm requires access to the original binary which we don't have.
+	// Return a helpful error instead of pprof's confusing "no matches found for regexp".
+	if subpath == "/disasm" {
+		http.Error(w, "Disassembly view requires the original binary file, which is not available. Use the flamegraph, top, or source views instead.", http.StatusNotImplemented)
+		return
+	}
+
 	handler, ok := sess.handlers[subpath]
 	if !ok {
 		// Try to find if pprof handles this path differently?
