@@ -23,7 +23,7 @@ import (
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, err := strconv.Atoi(l); err == nil {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
 			limit = n
 		}
 	}
@@ -310,7 +310,7 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, err := strconv.Atoi(l); err == nil {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
 			limit = n
 		}
 	}
@@ -349,7 +349,9 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(points)
+	if err := json.NewEncoder(w).Encode(points); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
@@ -1055,7 +1057,11 @@ func (s *Server) handleArtifactDownload(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	sanitizedName := strings.Map(sanitize, result.Name)
-	filename := fmt.Sprintf("%s_%d_%d.%s", sanitizedName, runID, resultID, kind)
+	sanitizedKind := strings.Map(sanitize, kind)
+	if sanitizedKind == "" {
+		sanitizedKind = "artifact"
+	}
+	filename := fmt.Sprintf("%s_%d_%d.%s", sanitizedName, runID, resultID, sanitizedKind)
 	filename = filepath.Base(filepath.Clean(filename))
 
 	w.Header().Set("Content-Type", "application/octet-stream")

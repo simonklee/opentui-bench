@@ -85,6 +85,7 @@ func hasSymbols(data []byte) bool {
 
 func perfScriptToProfile(script []byte) (*profile.Profile, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(script))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	p := &profile.Profile{
 		SampleType: []*profile.ValueType{
@@ -164,6 +165,10 @@ func perfScriptToProfile(script []byte) (*profile.Profile, error) {
 				currentStack = nil
 			}
 		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan perf script: %w", err)
 	}
 
 	if len(currentStack) > 0 {

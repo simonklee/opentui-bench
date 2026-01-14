@@ -591,7 +591,7 @@ Example:
 				cfg.Profile = runner.ProfileCPU
 			}
 
-			return runBackfill(database, count, start, dryRun, cfg)
+			return runBackfill(cmd.Context(), database, count, start, dryRun, cfg)
 		},
 	}
 
@@ -822,16 +822,14 @@ type commitInfo struct {
 	date    string
 }
 
-func runBackfill(database *db.DB, count int, start string, dryRun bool, cfg runner.RunConfig) error {
-	ctx := context.Background()
-
+func runBackfill(ctx context.Context, database *db.DB, count int, start string, dryRun bool, cfg runner.RunConfig) error {
 	zigDir := filepath.Join(cfg.RepoPath, "packages/core/src/zig")
 
 	if _, err := os.Stat(zigDir); os.IsNotExist(err) {
 		return fmt.Errorf("zig directory not found: %s", zigDir)
 	}
 
-	out, err := runGitCommand(cfg.RepoPath, "log", "--reverse", fmt.Sprintf("-%d", count), start, "--format=%H|%h|%s|%cI")
+	out, err := runGitCommand(ctx, cfg.RepoPath, "log", "--reverse", fmt.Sprintf("-%d", count), start, "--format=%H|%h|%s|%cI")
 	if err != nil {
 		return fmt.Errorf("git log: %w", err)
 	}
@@ -887,13 +885,13 @@ func runBackfill(database *db.DB, count int, start string, dryRun bool, cfg runn
 		return nil
 	}
 
-	origHead, err := runGitCommand(cfg.RepoPath, "rev-parse", "HEAD")
+	origHead, err := runGitCommand(ctx, cfg.RepoPath, "rev-parse", "HEAD")
 	if err != nil {
 		return fmt.Errorf("get HEAD: %w", err)
 	}
 	origHead = strings.TrimSpace(origHead)
 
-	status, _ := runGitCommand(cfg.RepoPath, "status", "--porcelain")
+	status, _ := runGitCommand(ctx, cfg.RepoPath, "status", "--porcelain")
 	if strings.TrimSpace(status) != "" {
 		return fmt.Errorf("opentui repo has uncommitted changes, please commit or stash first")
 	}
@@ -901,20 +899,20 @@ func runBackfill(database *db.DB, count int, start string, dryRun bool, cfg runn
 	for i, c := range unrecorded {
 		cyan.Printf("\n[%d/%d] Recording %s: %s\n", i+1, len(unrecorded), c.short, truncate(c.message, 50))
 
-		if _, err := runGitCommand(cfg.RepoPath, "checkout", c.hash); err != nil {
+		if _, err := runGitCommand(ctx, cfg.RepoPath, "checkout", c.hash); err != nil {
 			color.Red("  Failed to checkout: %v", err)
 			continue
 		}
 
 		// Apply tooling patch (benchmarks live in simonklee/local-dev)
-		out, err := runGitCommand(cfg.RepoPath, "cherry-pick", "simonklee/local-dev", "--no-commit")
+		out, err := runGitCommand(ctx, cfg.RepoPath, "cherry-pick", "simonklee/local-dev", "--no-commit")
 		if err != nil {
 			if strings.Contains(out, "previous cherry-pick is now empty") || strings.Contains(out, "nothing to commit") {
-				_, _ = runGitCommand(cfg.RepoPath, "cherry-pick", "--abort")
+				_, _ = runGitCommand(ctx, cfg.RepoPath, "cherry-pick", "--abort")
 			} else {
 				color.Yellow("  Warning: cherry-pick failed: %v", err)
-				_, _ = runGitCommand(cfg.RepoPath, "cherry-pick", "--abort")
-				_, _ = runGitCommand(cfg.RepoPath, "reset", "--hard", "HEAD")
+				_, _ = runGitCommand(ctx, cfg.RepoPath, "cherry-pick", "--abort")
+				_, _ = runGitCommand(ctx, cfg.RepoPath, "reset", "--hard", "HEAD")
 				continue
 			}
 		}
@@ -931,10 +929,10 @@ func runBackfill(database *db.DB, count int, start string, dryRun bool, cfg runn
 		}
 
 		// Reset repo to clean state
-		runGitCommand(cfg.RepoPath, "reset", "--hard", "HEAD")
+		runGitCommand(ctx, cfg.RepoPath, "reset", "--hard", "HEAD")
 	}
 
-	if _, err := runGitCommand(cfg.RepoPath, "checkout", origHead); err != nil {
+	if _, err := runGitCommand(ctx, cfg.RepoPath, "checkout", origHead); err != nil {
 		yellow.Printf("\nWarning: failed to restore HEAD to %s: %v\n", shortHash(origHead), err)
 	}
 
@@ -942,8 +940,8 @@ func runBackfill(database *db.DB, count int, start string, dryRun bool, cfg runn
 	return nil
 }
 
-func runGitCommand(repoPath string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+func runGitCommand(ctx context.Context, repoPath string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repoPath
 	out, err := cmd.CombinedOutput()
 	output := strings.TrimSpace(string(out))

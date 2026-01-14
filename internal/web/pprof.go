@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -14,15 +15,20 @@ import (
 	"github.com/google/pprof/driver"
 )
 
+var errProfileTooLarge = errors.New("profile too large")
+
 type pprofSession struct {
 	handlers   map[string]http.Handler
 	tempFile   string
 	lastAccess time.Time
+	active     int
 }
 
 type PProfManager struct {
-	mu       sync.Mutex
-	sessions map[string]*pprofSession
+	mu          sync.Mutex
+	loadMu      sync.Mutex
+	sessions    map[string]*pprofSession
+	lastCleanup time.Time
 }
 
 func NewPProfManager() *PProfManager {
@@ -30,6 +36,11 @@ func NewPProfManager() *PProfManager {
 		sessions: make(map[string]*pprofSession),
 	}
 }
+
+const (
+	pprofSessionTTL      = 30 * time.Minute
+	pprofCleanupInterval = 5 * time.Minute
+)
 
 func (s *Server) handlePProfUI(w http.ResponseWriter, r *http.Request) {
 	// Path: /api/runs/{run_id}/results/{result_id}/pprof/ui/...
@@ -100,6 +111,9 @@ func (s *Server) handlePProfUI(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
+		if len(artifact.DataBlob) > maxProfileSize {
+			return nil, errProfileTooLarge
+		}
 		return artifact.DataBlob, nil
 	}
 
@@ -109,10 +123,13 @@ func (s *Server) handlePProfUI(w http.ResponseWriter, r *http.Request) {
 func (pm *PProfManager) serve(w http.ResponseWriter, r *http.Request, runID, resultID int64, fetcher func() ([]byte, error)) {
 	key := fmt.Sprintf("%d:%d", runID, resultID)
 
+	now := time.Now()
 	pm.mu.Lock()
+	pm.cleanupLocked(now)
 	sess, exists := pm.sessions[key]
 	if exists {
-		sess.lastAccess = time.Now()
+		sess.lastAccess = now
+		sess.active++
 	}
 	pm.mu.Unlock()
 
@@ -122,6 +139,8 @@ func (pm *PProfManager) serve(w http.ResponseWriter, r *http.Request, runID, res
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				http.Error(w, "profile artifact not found", http.StatusNotFound)
+			} else if errors.Is(err, errProfileTooLarge) {
+				http.Error(w, "profile too large", http.StatusRequestEntityTooLarge)
 			} else {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			}
@@ -140,19 +159,26 @@ func (pm *PProfManager) serve(w http.ResponseWriter, r *http.Request, runID, res
 			http.Error(w, "failed to write profile", http.StatusInternalServerError)
 			return
 		}
-		tmp.Close()
+		if err := tmp.Close(); err != nil {
+			os.Remove(tmp.Name())
+			http.Error(w, "failed to finalize profile", http.StatusInternalServerError)
+			return
+		}
 
+		pm.loadMu.Lock()
 		handlers, err := loadPProfHandlers(tmp.Name())
+		pm.loadMu.Unlock()
 		if err != nil {
 			os.Remove(tmp.Name())
 			http.Error(w, fmt.Sprintf("failed to load pprof: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		sess = &pprofSession{
+		newSess := &pprofSession{
 			handlers:   handlers,
 			tempFile:   tmp.Name(),
-			lastAccess: time.Now(),
+			lastAccess: now,
+			active:     1,
 		}
 
 		pm.mu.Lock()
@@ -161,12 +187,22 @@ func (pm *PProfManager) serve(w http.ResponseWriter, r *http.Request, runID, res
 			// Race condition lost, use existing
 			os.Remove(tmp.Name()) // Clean up our unused temp
 			sess = existing
-			sess.lastAccess = time.Now()
+			sess.lastAccess = now
+			sess.active++
 		} else {
-			pm.sessions[key] = sess
+			pm.sessions[key] = newSess
+			sess = newSess
 		}
 		pm.mu.Unlock()
 	}
+
+	defer func() {
+		pm.mu.Lock()
+		if sess.active > 0 {
+			sess.active--
+		}
+		pm.mu.Unlock()
+	}()
 
 	prefix := fmt.Sprintf("/api/runs/%d/results/%d/pprof/ui", runID, resultID)
 	// Canonicalize path: if we are at prefix, redirect to prefix/
@@ -191,7 +227,30 @@ func (pm *PProfManager) serve(w http.ResponseWriter, r *http.Request, runID, res
 		return
 	}
 
-	handler.ServeHTTP(w, r)
+	req := r.Clone(r.Context())
+	req.URL.Path = subpath
+	req.URL.RawPath = ""
+	handler.ServeHTTP(w, req)
+}
+
+func (pm *PProfManager) cleanupLocked(now time.Time) {
+	if !pm.lastCleanup.IsZero() && now.Sub(pm.lastCleanup) < pprofCleanupInterval {
+		return
+	}
+	pm.lastCleanup = now
+
+	for key, sess := range pm.sessions {
+		if sess.active > 0 {
+			continue
+		}
+		if now.Sub(sess.lastAccess) <= pprofSessionTTL {
+			continue
+		}
+		delete(pm.sessions, key)
+		if sess.tempFile != "" {
+			_ = os.Remove(sess.tempFile)
+		}
+	}
 }
 
 func loadPProfHandlers(profilePath string) (map[string]http.Handler, error) {
@@ -206,6 +265,7 @@ func loadPProfHandlers(profilePath string) (map[string]http.Handler, error) {
 
 	options := &driver.Options{
 		Flagset: flags,
+		UI:      discardUI{},
 		HTTPServer: func(args *driver.HTTPServerArgs) error {
 			handlers = args.Handlers
 			return nil
@@ -213,15 +273,6 @@ func loadPProfHandlers(profilePath string) (map[string]http.Handler, error) {
 	}
 
 	flags.args = []string{profilePath}
-
-	oldStdout := os.Stdout
-	oldStderr := os.Stderr
-	os.Stdout, _ = os.Open(os.DevNull)
-	os.Stderr, _ = os.Open(os.DevNull)
-	defer func() {
-		os.Stdout = oldStdout
-		os.Stderr = oldStderr
-	}()
 
 	if err := driver.PProf(options); err != nil {
 		return nil, err
@@ -240,6 +291,16 @@ type mockFlagSet struct {
 	floats  map[string]*float64
 	strings map[string]*string
 	args    []string
+}
+
+type discardUI struct{}
+
+func (discardUI) ReadLine(string) (string, error) { return "", io.EOF }
+func (discardUI) Print(...interface{})            {}
+func (discardUI) PrintErr(...interface{})         {}
+func (discardUI) IsTerminal() bool                { return false }
+func (discardUI) WantBrowser() bool               { return false }
+func (discardUI) SetAutoComplete(func(string) string) {
 }
 
 func (f *mockFlagSet) Bool(name string, def bool, usage string) *bool {

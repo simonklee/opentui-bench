@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -89,7 +90,14 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
-	sqlDB, err := sql.Open("sqlite", dbPath)
+	dsn := dbPath
+	if strings.Contains(dbPath, "?") {
+		dsn += "&_pragma=foreign_keys(1)"
+	} else {
+		dsn += "?_pragma=foreign_keys(1)"
+	}
+
+	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

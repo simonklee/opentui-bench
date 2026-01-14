@@ -60,7 +60,7 @@ func FindBenchmarkBinary(zigDir string) (string, error) {
 	if newestPath != "" {
 		return newestPath, nil
 	}
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
 	return "", fmt.Errorf("opentui-bench binary not found in %s", cacheDir)

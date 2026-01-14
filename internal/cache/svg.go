@@ -53,8 +53,31 @@ func (c *SVGCache) Put(runID int64, benchmarkName string, svg []byte) error {
 	}
 
 	path := c.svgPath(runID, benchmarkName)
-	if err := os.WriteFile(path, svg, 0644); err != nil {
-		return fmt.Errorf("write svg: %w", err)
+	tmp, err := os.CreateTemp(dir, "svg-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp svg: %w", err)
+	}
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+	}()
+
+	if err := tmp.Chmod(0644); err != nil {
+		return fmt.Errorf("chmod temp svg: %w", err)
+	}
+	if n, err := tmp.Write(svg); err != nil {
+		return fmt.Errorf("write temp svg: %w", err)
+	} else if n < len(svg) {
+		return fmt.Errorf("write temp svg: short write")
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp svg: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		_ = os.Remove(path)
+		if err := os.Rename(tmp.Name(), path); err != nil {
+			return fmt.Errorf("rename svg: %w", err)
+		}
 	}
 	return nil
 }
