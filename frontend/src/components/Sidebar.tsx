@@ -1,6 +1,6 @@
 import { createResource } from "solid-js";
 import type { Component } from "solid-js";
-import { A, useLocation, useNavigate } from "@solidjs/router";
+import { useLocation, useNavigate } from "@solidjs/router";
 import { api } from "../services/api";
 import {
   lastViewedRunId,
@@ -35,6 +35,16 @@ const Sidebar: Component = () => {
     const id = lastViewedRunId() || (runs() && runs()![0]?.id);
     if (id) {
       navigate(`/benchmarks/${id}`);
+    }
+  };
+
+  const handleCompareClick = () => {
+    const currentRunId = lastViewedRunId();
+    if (currentRunId) {
+      // Pre-select the current run as "current" in compare
+      navigate(`/compare?curr=${currentRunId}`);
+    } else {
+      navigate('/compare');
     }
   };
 
@@ -89,10 +99,9 @@ const Sidebar: Component = () => {
           />
           <span class={labelClass()}>BENCHMARKS</span>
         </div>
-        <A
-          href="/compare"
-          class={`${navItemClass} ${isSidebarExpanded() ? "" : "justify-center"}`}
-          activeClass={activeClass}
+        <div
+          class={`${navItemClass} ${isSidebarExpanded() ? "" : "justify-center"} ${location.pathname === "/compare" ? activeClass + " active" : ""}`}
+          onClick={handleCompareClick}
           title={!isSidebarExpanded() ? "Compare" : ""}
         >
           <GitCompare
@@ -101,7 +110,7 @@ const Sidebar: Component = () => {
             class="opacity-70 group-[.active]:opacity-100 flex-shrink-0"
           />
           <span class={labelClass()}>COMPARE</span>
-        </A>
+        </div>
       </div>
 
       <div

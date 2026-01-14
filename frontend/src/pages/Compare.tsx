@@ -5,6 +5,7 @@ import { api } from "../services/api";
 import { formatNs } from "../utils/format";
 import { Button } from "../components/Button";
 import { copyTrigger } from "../shortcuts";
+import { lastViewedRunId } from "../store";
 
 const Compare: Component = () => {
     const [searchParams, setSearchParams] = useSearchParams();
@@ -17,7 +18,8 @@ const Compare: Component = () => {
     const hadUrlParamsOnMount = urlParams.has('base') || urlParams.has('curr');
     const [didAutoSelect, setDidAutoSelect] = createSignal(false);
 
-    // Auto-select latest two runs only on first load with no URL params
+    // Auto-select runs only on first load with no URL params
+    // Uses lastViewedRunId if available to maintain context
     createEffect(() => {
         const r = runs();
         // Skip if URL had params on mount, or we already auto-selected
@@ -25,8 +27,16 @@ const Compare: Component = () => {
 
         if (r && r.length > 0) {
             setDidAutoSelect(true);
-            const current = r[0]!.id;
-            const baseline = r.length > 1 ? r[1]!.id : current;
+            
+            // Use lastViewedRunId as "current" if available, otherwise use latest run
+            const contextRunId = lastViewedRunId();
+            const current = contextRunId ?? r[0]!.id;
+            
+            // Find the previous run relative to "current" for baseline
+            const currentIndex = r.findIndex(run => run.id === current);
+            const baseline = currentIndex >= 0 && currentIndex < r.length - 1 
+                ? r[currentIndex + 1]!.id  // previous run in chronological order
+                : (r.length > 1 ? r[1]!.id : current);
 
             setSearchParams({
                 base: baseline,

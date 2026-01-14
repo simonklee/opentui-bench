@@ -11,6 +11,7 @@ import TrendIndicator from "./TrendIndicator";
 interface BenchmarkDetailModalProps {
   benchmark: BenchmarkResult;
   runId: number;
+  commitHash: string;
   trendData: TrendPoint[] | undefined;
   flamegraphView: 'flamegraph' | 'callgraph';
   setFlamegraphView: (v: 'flamegraph' | 'callgraph') => void;
@@ -46,6 +47,8 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
             <nav class="flex items-center gap-2 md:gap-3 text-[13px] overflow-hidden">
                 <button onClick={props.onClose} class="text-text-muted hover:text-black uppercase tracking-wider font-bold cursor-pointer whitespace-nowrap text-[11px] md:text-[13px]">Benchmarks</button>
                 <span class="text-text-muted">/</span>
+                <span class="font-mono text-[11px] md:text-[13px] text-text-muted">#{props.commitHash.slice(0, 7)}</span>
+                <span class="text-text-muted">/</span>
                 <span class="font-mono font-bold text-black text-[13px] md:text-[15px] truncate">{props.benchmark.name}</span>
             </nav>
             <div class="flex-none ml-4">
@@ -58,7 +61,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
         <div class="flex-1 overflow-auto p-4 md:p-8 bg-white">
             
             {/* Stats Grid */}
-            <div class="grid grid-cols-3 lg:grid-cols-6 gap-y-4 gap-x-2 md:gap-8 mb-4 md:mb-12 pb-4 md:pb-8 border-b border-border">
+            <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-y-4 gap-x-2 md:gap-8 mb-4 md:mb-12 pb-4 md:pb-8 border-b border-border">
                 <StatBlock label="Average" value={formatNs(props.benchmark.avg_ns)} />
                 <StatBlock label="P50 / P99" value={formatNs(props.benchmark.p50_ns)} sub={formatNs(props.benchmark.p99_ns)} />
                 <StatBlock label="Min — Max" value={formatNs(props.benchmark.min_ns)} sub={formatNs(props.benchmark.max_ns)} />
@@ -70,6 +73,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                          <TrendIndicator 
                             trendData={props.trendData}
                             benchmarkName={props.benchmark.name}
+                            currentRunId={props.runId}
                             fromCompare={searchParams.from === 'compare'}
                             compareBaseRunId={searchParams.compare_base as string | undefined}
                         />
@@ -96,8 +100,8 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
 
             <div class="flex flex-col gap-12 pb-12">
                 {/* Trend Column */}
-                <div class="flex flex-col h-[400px]">
-                    <div class="flex justify-between items-center mb-6 border-b border-border pb-2">
+                <div class="flex flex-col h-auto md:h-[400px]">
+                    <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 sm:gap-0 mb-6 border-b border-border pb-2">
                         <div class="flex items-center gap-2 relative">
                             <h3 class="text-[12px] font-bold text-black uppercase tracking-widest">Performance History</h3>
                             <button 
@@ -136,17 +140,18 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                                 </div>
                             </Show>
                         </div>
-                        <div class="flex gap-2 items-center">
+                        <div class="flex gap-2 items-center self-start sm:self-auto">
                             <Button active={props.chartRange === 10} onClick={() => props.setChartRange(10)}>10</Button>
                             <Button active={props.chartRange === 30} onClick={() => props.setChartRange(30)}>30</Button>
                             <Button active={props.chartRange === 100} onClick={() => props.setChartRange(100)}>MAX</Button>
                         </div>
                     </div>
-                    <div class="flex-1 relative border border-border p-4">
+                    <div class="h-[300px] md:h-auto md:flex-1 relative border border-border p-4">
                         <Show when={props.trendData} fallback={<div class="flex items-center justify-center h-full text-text-muted font-mono text-xs">Loading trend data...</div>}>
                             <TrendChart 
                                 data={props.trendData!} 
                                 range={props.chartRange} 
+                                currentRunId={props.runId}
                                 onPointClick={props.onTrendClick}
                             />
                         </Show>
@@ -158,8 +163,8 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                 </div>
 
                 {/* Flamegraph Column */}
-                <div class="flex flex-col h-[600px]">
-                    <div class="flex justify-between items-center mb-6 border-b border-border pb-2">
+                <div class="flex flex-col h-auto md:h-[600px]">
+                    <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 sm:gap-0 mb-6 border-b border-border pb-2">
                         <div class="flex items-center gap-2 relative">
                             <h3 class="text-[12px] font-bold text-black uppercase tracking-widest">Execution Profile</h3>
                             <button 
@@ -194,7 +199,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                                 </div>
                             </Show>
                         </div>
-                        <div class="flex gap-2 items-center">
+                        <div class="flex gap-2 items-center self-start sm:self-auto flex-wrap">
                             <Button 
                                 active={props.flamegraphView === 'flamegraph'}
                                 onClick={() => props.setFlamegraphView('flamegraph')}
@@ -209,7 +214,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                             >Download</Button>
                         </div>
                     </div>
-                    <div class="flex-1 bg-white border border-border relative">
+                    <div class="h-[500px] md:h-auto md:flex-1 bg-white border border-border relative">
                         <FlamegraphViewer 
                             runId={props.runId} 
                             resultId={props.benchmark.id} 

@@ -41,7 +41,7 @@ const BenchmarkResultsTable: Component<BenchmarkResultsTableProps> = (props) => 
                             onClick={() => props.onSelect(item.id)}
                         >
                             <td class={`px-4 py-2 text-[11px] font-ui opacity-70 group-hover:opacity-100 hidden sm:table-cell ${props.selectedId === item.id ? 'opacity-100' : ''}`}>{item.category}</td>
-                            <td class="px-4 py-2 font-medium max-w-[300px] truncate font-ui" title={item.name}>{item.name}</td>
+                            <td class="px-4 py-2 font-medium max-w-[160px] sm:max-w-[300px] truncate font-ui" title={item.name}>{item.name}</td>
                             <td class="px-4 py-2 text-right font-bold">{formatNs(item.avg_ns)}</td>
                             <td class="px-4 py-2 text-right opacity-80 hidden lg:table-cell">{formatNs(item.p50_ns)}</td>
                             <td class="px-4 py-2 text-right opacity-80 hidden md:table-cell">{formatNs(item.p99_ns)}</td>

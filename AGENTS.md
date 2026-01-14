@@ -46,3 +46,62 @@ make help            # Show all available commands
 - `internal/web/` - HTTP handlers and embedded static files
 - `internal/runner/` - Benchmark execution and recording
 - `internal/record/` - Benchmark result parser and data structures
+
+## Using Playwright (playwriter tool)
+
+The `playwriter_execute` tool controls the user's Chrome browser for UI testing and
+exploration. The frontend runs at **localhost:3000**.
+
+### What Works Well
+
+- **Direct navigation with `page.goto()`** - Most reliable way to navigate
+- **`accessibilitySnapshot()`** - Fast way to read page structure and find elements
+- **`aria-ref` selectors** - Use refs from snapshots: `page.locator('aria-ref=e25')`
+- **Form interactions** - `selectOption()`, `fill()`, `click()` work reliably
+- **Evaluating page content** - `page.locator().allTextContents()` for extracting data
+
+### What Doesn't Work Well
+
+- **`screenshotWithAccessibilityLabels()`** - Often times out, even with 20s timeout
+- **Clicking navigation links** - Can timeout; use `page.goto()` directly instead
+- **`waitForLoadState('networkidle')`** - Unreliable with dev servers using HMR
+- **Complex chained operations** - Split into multiple smaller execute calls
+
+### Effective Patterns
+
+```js
+// Navigate directly (preferred over clicking links)
+await page.goto("http://localhost:3000/compare", {
+  waitUntil: "domcontentloaded",
+});
+
+// Get page structure
+console.log(await accessibilitySnapshot({ page }));
+
+// Search for specific elements
+const snapshot = await accessibilitySnapshot({
+  page,
+  search: /button|submit/i,
+});
+
+// Interact using aria-ref (no quotes around ref value)
+await page.locator("aria-ref=e49").selectOption({ index: 2 });
+
+// Extract table data
+const rows = await page.locator("table tbody tr").all();
+for (const row of rows) {
+  const cells = await row.locator("td").allTextContents();
+  console.log(cells);
+}
+
+// Paginate long snapshots
+console.log(snapshot.split("\n").slice(0, 50).join("\n")); // first 50 lines
+console.log(snapshot.split("\n").slice(50, 100).join("\n")); // next 50 lines
+```
+
+### Troubleshooting
+
+- **Timeout errors**: Use shorter operations, increase timeout to 10000-20000ms
+- **Element not found**: Re-fetch `accessibilitySnapshot()` as refs change after navigation
+- **Page not responding**: Use `playwriter_reset` tool to reconnect
+- **Strict mode violation**: Use `.first()`, `.last()`, or `.nth(n)` for multiple matches

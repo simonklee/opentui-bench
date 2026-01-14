@@ -6,6 +6,7 @@ import type { TrendPoint } from "../services/api";
 interface TrendIndicatorProps {
   trendData: TrendPoint[] | undefined;
   benchmarkName: string;
+  currentRunId: number;
   fromCompare: boolean;
   compareBaseRunId?: string;
 }
@@ -16,8 +17,16 @@ const TrendIndicator: Component<TrendIndicatorProps> = (props) => {
   return (
     <Show when={props.trendData && props.trendData.length > 1} fallback={<span>No history</span>}>
         {(() => {
-            const curr = props.trendData![0]!;
-            const prev = props.trendData![1]!;
+            // Find the current run in trend data (trend data is sorted most recent first)
+            const currIndex = props.trendData!.findIndex(t => t.run_id === props.currentRunId);
+            
+            // If current run not found or it's the last one (oldest), show no comparison
+            if (currIndex < 0 || currIndex >= props.trendData!.length - 1) {
+                return <span class="text-text-muted text-[12px]">No previous</span>;
+            }
+            
+            const curr = props.trendData![currIndex]!;
+            const prev = props.trendData![currIndex + 1]!;  // Previous is next in array (older)
             const diff = curr.avg_ns - prev.avg_ns;
             
             let pctStr = "0.0%";

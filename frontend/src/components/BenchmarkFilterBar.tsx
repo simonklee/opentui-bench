@@ -16,9 +16,9 @@ interface BenchmarkFilterBarProps {
 
 const BenchmarkFilterBar: Component<BenchmarkFilterBarProps> = (props) => {
   return (
-    <div class="flex-none p-4 px-6 border-b border-border bg-bg-dark flex flex-col md:flex-row md:justify-between md:items-center gap-4 min-h-[57px]">
+    <div class="flex-none p-3 sm:px-6 border-b border-border bg-bg-dark flex flex-col md:flex-row md:justify-between md:items-center gap-3 md:gap-4 min-h-[57px]">
         <div class="flex flex-col gap-1 overflow-hidden">
-            <h2 class="text-[14px] font-bold text-black uppercase tracking-widest flex items-center gap-3">
+            <h2 class="text-[14px] font-bold text-black uppercase tracking-widest flex items-center gap-2 sm:gap-3">
                 Benchmarks
                 {props.run && (
                     <span class="font-mono text-text-muted text-[11px] normal-case hidden sm:inline-block bg-bg-hover px-1.5 py-0.5 rounded-none">
@@ -33,11 +33,11 @@ const BenchmarkFilterBar: Component<BenchmarkFilterBarProps> = (props) => {
             )}
         </div>
 
-        <div class="flex gap-2 w-full md:w-auto">
+        <div class="flex gap-2 w-full md:w-auto overflow-x-auto pb-1 md:pb-0 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:'none'] [scrollbar-width:'none']">
             <input 
                 type="text" 
                 placeholder="FILTER..." 
-                class="flex-1 md:w-[200px] px-3 py-1.5 border border-border rounded-none text-[11px] bg-white text-black focus:border-black outline-none shadow-none uppercase tracking-wide placeholder:text-text-muted transition-colors font-medium"
+                class="flex-1 min-w-[120px] md:w-[200px] px-3 py-1.5 border border-border rounded-none text-[11px] bg-white text-black focus:border-black outline-none shadow-none uppercase tracking-wide placeholder:text-text-muted transition-colors font-medium"
                 value={props.filter}
                 onInput={(e) => props.setFilter(e.currentTarget.value)}
                 onKeyDown={(e) => { if (e.key === 'Escape') e.currentTarget.blur(); }}

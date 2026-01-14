@@ -106,6 +106,7 @@ const BenchmarkDetail: Component = () => {
                 <BenchmarkDetailModal 
                     benchmark={selectedBenchmark()!}
                     runId={run()!.id}
+                    commitHash={run()!.commit_hash}
                     trendData={trendData()}
                     flamegraphView={flamegraphView()}
                     setFlamegraphView={setFlamegraphView}

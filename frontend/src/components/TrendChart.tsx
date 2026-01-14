@@ -68,6 +68,7 @@ Chart.register(Title, Tooltip, Legend, Colors, LineController, CategoryScale, Li
 interface Props {
     data: TrendPoint[]; 
     range?: number;
+    currentRunId?: number;
     onPointClick?: (runId: number, resultId: number) => void;
 }
 
@@ -83,6 +84,15 @@ const TrendChart: Component<Props> = (props) => {
         const ciUpper = data.map(d => d.ci_upper_ns ?? d.avg_ns);
         const sdLower = data.map(d => Math.max(d.avg_ns - d.std_dev_ns, 0));
         const sdUpper = data.map(d => d.avg_ns + d.std_dev_ns);
+
+        // Highlight the current run's point
+        const currentRunId = props.currentRunId;
+        const pointBgColors = data.map(d => 
+            d.run_id === currentRunId ? '#24292f' : '#ffffff'
+        );
+        const pointRadii = data.map(d =>
+            d.run_id === currentRunId ? 5 : 3
+        );
 
         return {
             labels: data.map(d => {
@@ -114,11 +124,11 @@ const TrendChart: Component<Props> = (props) => {
                     backgroundColor: '#ffffff',
                     borderWidth: 1.5,
                     tension: 0,
-                    pointRadius: 3,
+                    pointRadius: pointRadii,
                     pointHoverRadius: 5,
                     pointBorderColor: '#24292f',
                     pointBorderWidth: 1.5,
-                    pointBackgroundColor: '#ffffff',
+                    pointBackgroundColor: pointBgColors,
                     fill: false,
                     ciLower,
                     ciUpper,
