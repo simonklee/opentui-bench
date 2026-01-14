@@ -1,0 +1,8 @@
+bench.db
+/bench
+tmp/
+notes/
+dev.log
+dev-prev.log
+.shoreman.pid
+internal/web/static/app/

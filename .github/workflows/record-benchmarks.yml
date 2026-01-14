@@ -1,0 +1,22 @@
+name: Record Benchmarks
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger benchmarks on Hetzner
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.BENCH_HOST }}
+          username: ${{ secrets.BENCH_USER }}
+          key: ${{ secrets.BENCH_SSH_KEY }}
+          envs: FLY_API_TOKEN
+          script: ~/repos/opentui-bench/scripts/trigger-benchmarks.sh
+          timeout: 30s
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
