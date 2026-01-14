@@ -16,42 +16,52 @@ interface BenchmarkFilterBarProps {
 
 const BenchmarkFilterBar: Component<BenchmarkFilterBarProps> = (props) => {
   return (
-    <div class="flex-none p-4 px-6 border-b border-border bg-bg-dark flex justify-between items-center h-[57px]">
-        <div>
-            <h2 class="text-[16px] font-semibold text-text-main flex items-center gap-3">
+    <div class="flex-none p-4 px-6 border-b border-border bg-bg-dark flex flex-col md:flex-row md:justify-between md:items-center gap-4 min-h-[57px]">
+        <div class="flex flex-col gap-1 overflow-hidden">
+            <h2 class="text-[14px] font-bold text-black uppercase tracking-widest flex items-center gap-3">
                 Benchmarks
                 {props.run && (
-                    <div class="text-[11px] text-text-muted flex gap-2 items-center font-normal">
-                        <span class="font-mono text-accent">#{props.run.commit_hash.substring(0,7)}</span>
-                        <span class="font-semibold text-text-main">{props.run.branch}</span>
-                        <span>• {props.run.commit_message}</span>
-                    </div>
+                    <span class="font-mono text-text-muted text-[11px] normal-case hidden sm:inline-block bg-bg-hover px-1.5 py-0.5 rounded-none">
+                        #{props.run.commit_hash.substring(0,7)}
+                    </span>
                 )}
             </h2>
+            {props.run && (
+                <div class="text-[11px] text-text-muted font-mono truncate hidden md:block max-w-[400px]">
+                    {props.run.commit_message}
+                </div>
+            )}
         </div>
-        <div class="flex gap-2">
+
+        <div class="flex gap-2 w-full md:w-auto">
             <input 
                 type="text" 
-                placeholder="Filter benchmarks..." 
-                class="w-[240px] px-3 py-1.5 border border-border rounded-md text-[12px] bg-bg-panel text-text-main focus:bg-bg-dark focus:border-accent outline-none shadow-none"
+                placeholder="FILTER..." 
+                class="flex-1 md:w-[200px] px-3 py-1.5 border border-border rounded-none text-[11px] bg-white text-black focus:border-black outline-none shadow-none uppercase tracking-wide placeholder:text-text-muted transition-colors font-medium"
                 value={props.filter}
                 onInput={(e) => props.setFilter(e.currentTarget.value)}
                 onKeyDown={(e) => { if (e.key === 'Escape') e.currentTarget.blur(); }}
             />
-            <select 
-                class="px-3 py-1.5 pr-8 border border-border rounded-md text-[12px] bg-bg-dark text-text-main outline-none cursor-pointer appearance-none bg-[url('data:image/svg+xml;charset=UTF-8,%3csvg%20xmlns=\'http://www.w3.org/2000/svg\'%20viewBox=\'0%200%2024%2024\'%20fill=\'none\'%20stroke=\'currentColor\'%20stroke-width=\'2\'%20stroke-linecap=\'round\'%20stroke-linejoin=\'round\'%3e%3cpolyline%20points=\'6%209%2012%2015%2018%209\'%3e%3c/polyline%3e%3c/svg%3e')] bg-[length:12px] bg-[right_8px_center] bg-no-repeat"
-                value={props.category}
-                onChange={(e) => props.setCategory(e.currentTarget.value)}
-            >
-                <option value="">All Categories</option>
-                <For each={props.categories}>
-                    {c => <option value={c}>{c}</option>}
-                </For>
-            </select>
-            <span class="text-[11px] font-semibold text-text-muted ml-2 flex items-center">{props.resultCount} RESULTS</span>
+            <div class="relative flex-none">
+                <select 
+                    class="appearance-none pl-3 pr-8 py-1.5 border border-border rounded-none text-[11px] bg-white text-black outline-none cursor-pointer uppercase tracking-wide font-medium hover:border-black transition-colors"
+                    value={props.category}
+                    onChange={(e) => props.setCategory(e.currentTarget.value)}
+                >
+                    <option value="">All Categories</option>
+                    <For each={props.categories}>
+                        {c => <option value={c}>{c}</option>}
+                    </For>
+                </select>
+                <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-black">
+                    <svg class="h-3 w-3 fill-current" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
+                </div>
+            </div>
+            
             <Button 
                 onClick={props.onCopy}
                 disabled={!props.hasResults}
+                class="hidden sm:flex"
             >
                 Copy
             </Button>

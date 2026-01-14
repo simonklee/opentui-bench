@@ -76,7 +76,7 @@ const BenchmarkDetail: Component = () => {
 
     const handleTrendClick = (runId: number, resultId: number) => {
         // Navigate to the clicked run and select the same benchmark
-        navigate(`/runs/${runId}?bench_id=${resultId}`);
+        navigate(`/benchmarks/${runId}?bench_id=${resultId}`);
     };
 
     return (
