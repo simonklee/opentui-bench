@@ -44,6 +44,7 @@ export interface TrendPoint {
 export interface CompareResult {
     comparisons: {
         name: string;
+        category: string;
         baseline_ns: number;
         current_ns: number;
         change_percent: number;

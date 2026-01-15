@@ -3,7 +3,10 @@ import type { Component } from "solid-js";
 import { Button } from "./Button";
 
 interface BenchmarkFilterBarProps {
-  run: any;
+  run?: {
+    commit_hash: string;
+    commit_message: string;
+  } | null;
   filter: string;
   setFilter: (v: string) => void;
   category: string;
@@ -12,21 +15,26 @@ interface BenchmarkFilterBarProps {
   resultCount: number;
   onCopy: () => void;
   hasResults: boolean;
+  showRunInfo?: boolean;
+  showCopy?: boolean;
 }
 
 const BenchmarkFilterBar: Component<BenchmarkFilterBarProps> = (props) => {
+  const showRunInfo = () => props.showRunInfo !== false;
+  const showCopy = () => props.showCopy !== false;
+
   return (
     <div class="flex-none p-3 sm:px-6 border-b border-border bg-bg-dark flex flex-col md:flex-row md:justify-between md:items-center gap-3 md:gap-4 min-h-[57px]">
         <div class="flex flex-col gap-1 overflow-hidden">
             <h2 class="text-[14px] font-bold text-black uppercase tracking-widest flex items-center gap-2 sm:gap-3">
                 Benchmarks
-                {props.run && (
+                {showRunInfo() && props.run && (
                     <span class="font-mono text-text-muted text-[11px] normal-case hidden sm:inline-block bg-bg-hover px-1.5 py-0.5 rounded-none">
                         #{props.run.commit_hash.substring(0,7)}
                     </span>
                 )}
             </h2>
-            {props.run && (
+            {showRunInfo() && props.run && (
                 <div class="text-[11px] text-text-muted font-mono truncate hidden md:block max-w-[400px]">
                     {props.run.commit_message}
                 </div>
@@ -58,13 +66,15 @@ const BenchmarkFilterBar: Component<BenchmarkFilterBarProps> = (props) => {
                 </div>
             </div>
             
-            <Button 
-                onClick={props.onCopy}
-                disabled={!props.hasResults}
-                class="hidden sm:flex"
-            >
-                Copy
-            </Button>
+            {showCopy() && (
+                <Button 
+                    onClick={props.onCopy}
+                    disabled={!props.hasResults}
+                    class="hidden sm:flex"
+                >
+                    Copy
+                </Button>
+            )}
         </div>
     </div>
   );

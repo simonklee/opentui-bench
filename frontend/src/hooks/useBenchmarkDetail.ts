@@ -2,11 +2,15 @@ import { createResource, createSignal, createMemo, createEffect } from "solid-js
 import { useParams, useSearchParams, useNavigate } from "@solidjs/router";
 import { api } from "../services/api";
 import type { BenchmarkResult } from "../services/api";
+import { globalCategory, globalFilter, setGlobalCategory, setGlobalFilter } from "../store";
+import { useFilteredBenchmarks } from "./useFilteredBenchmarks";
+import { useFilterParams } from "./useFilterParams";
 
 export function useBenchmarkDetail() {
     const params = useParams();
     const [searchParams, setSearchParams] = useSearchParams();
     const navigate = useNavigate();
+    useFilterParams(searchParams, setSearchParams);
 
     const [run] = createResource(() => {
         if (!params.id) return undefined;
@@ -14,8 +18,6 @@ export function useBenchmarkDetail() {
         return isNaN(id) ? undefined : id;
     }, api.getRunDetails);
 
-    const [filter, setFilter] = createSignal("");
-    const [category, setCategory] = createSignal("");
     const [selectedBenchmarkId, setSelectedBenchmarkId] = createSignal<number | null>(null);
     const [sortBy, setSortBy] = createSignal<keyof BenchmarkResult | 'mem_stats'>("avg_ns");
     const [sortDesc, setSortDesc] = createSignal(false);
@@ -40,6 +42,7 @@ export function useBenchmarkDetail() {
             if (found) {
                 setSelectedBenchmarkId(found.id);
                 setSearchParams({
+                    ...searchParams,
                     bench_id: found.id,
                     name: undefined
                 });
@@ -47,23 +50,12 @@ export function useBenchmarkDetail() {
         }
     });
 
-    const categories = createMemo(() => {
-        const r = run();
-        if (!r) return [];
-        return [...new Set(r.results.map(i => i.category))];
-    });
+    const { filteredResults: filteredData, categories } = useFilteredBenchmarks(
+        () => run()?.results
+    );
 
     const filteredResults = createMemo(() => {
-        const r = run();
-        if (!r) return [];
-        let data = r.results;
-        
-        if (category()) data = data.filter(i => i.category === category());
-        if (filter()) {
-            const term = filter().toLowerCase();
-            data = data.filter(i => i.name.toLowerCase().includes(term) || i.category.toLowerCase().includes(term));
-        }
-        
+        const data = filteredData();
         return [...data].sort((a, b) => {
             let va: number | string = 0;
             let vb: number | string = 0;
@@ -94,7 +86,7 @@ export function useBenchmarkDetail() {
 
     const selectBenchmark = (id: number) => {
         setSelectedBenchmarkId(id);
-        setSearchParams({ bench_id: id });
+        setSearchParams({ ...searchParams, bench_id: id });
     };
 
     const closeDetail = () => {
@@ -108,7 +100,7 @@ export function useBenchmarkDetail() {
             return;
         }
         setSelectedBenchmarkId(null);
-        setSearchParams({ bench_id: null });
+        setSearchParams({ ...searchParams, bench_id: null });
     };
 
     const selectedBenchmark = createMemo(() => {
@@ -147,8 +139,8 @@ export function useBenchmarkDetail() {
 
     return {
         run,
-        filter, setFilter,
-        category, setCategory,
+        filter: globalFilter, setFilter: setGlobalFilter,
+        category: globalCategory, setCategory: setGlobalCategory,
         categories,
         filteredResults,
         sortBy, sortDesc, handleSort,

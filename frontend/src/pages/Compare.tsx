@@ -2,14 +2,18 @@ import { createResource, createSignal, For, Show, createMemo, createEffect } fro
 import type { Component } from "solid-js";
 import { useSearchParams, useNavigate } from "@solidjs/router";
 import { api } from "../services/api";
-import { formatNs } from "../utils/format";
+import { formatDate, formatNs } from "../utils/format";
 import { Button } from "../components/Button";
+import BenchmarkFilterBar from "../components/BenchmarkFilterBar";
 import { copyTrigger } from "../shortcuts";
-import { lastViewedRunId } from "../store";
+import { globalCategory, globalFilter, lastViewedRunId, setGlobalCategory, setGlobalFilter } from "../store";
+import { useFilteredBenchmarks } from "../hooks/useFilteredBenchmarks";
+import { useFilterParams } from "../hooks/useFilterParams";
 
 const Compare: Component = () => {
     const [searchParams, setSearchParams] = useSearchParams();
     const navigate = useNavigate();
+    useFilterParams(searchParams, setSearchParams);
     const [runs] = createResource(() => api.getRuns(100));
     const [copyToast, setCopyToast] = createSignal(false);
     
@@ -39,6 +43,7 @@ const Compare: Component = () => {
                 : (r.length > 1 ? r[1]!.id : current);
 
             setSearchParams({
+                ...searchParams,
                 base: baseline,
                 curr: current
             }, { replace: true });
@@ -64,6 +69,27 @@ const Compare: Component = () => {
         },
         ({ baseId, currId }) => api.getCompare(baseId, currId)
     );
+    const { filteredResults: filteredComparisons, categories } = useFilteredBenchmarks(
+        () => compareData()?.comparisons ?? []
+    );
+
+    const selectedBaseRun = createMemo(() => {
+        const list = runs();
+        const base = baseId();
+        if (!list || !base) return null;
+        const baseNum = parseInt(base, 10);
+        if (Number.isNaN(baseNum)) return null;
+        return list.find((run) => run.id === baseNum) ?? null;
+    });
+
+    const selectedCurrRun = createMemo(() => {
+        const list = runs();
+        const curr = currId();
+        if (!list || !curr) return null;
+        const currNum = parseInt(curr, 10);
+        if (Number.isNaN(currNum)) return null;
+        return list.find((run) => run.id === currNum) ?? null;
+    });
 
     const handleBaseChange = (e: Event) => {
         const val = (e.target as HTMLSelectElement).value;
@@ -79,7 +105,7 @@ const Compare: Component = () => {
     const [sortDesc, setSortDesc] = createSignal(true);
 
     const sortedComparisons = createMemo(() => {
-        const data = compareData()?.comparisons;
+        const data = filteredComparisons();
         if (!data) return [];
         return [...data].sort((a: any, b: any) => {
             const va = a[sortBy()];
@@ -150,45 +176,101 @@ const Compare: Component = () => {
                 </Button>
             </div>
             
-            <div class="flex-none p-6 bg-bg-dark border-b border-border">
+            <div class="flex-none px-6 py-5 bg-bg-dark border-b border-border">
                 <Show when={runs()} fallback={
                     <div class="bg-bg-panel p-6 rounded-md border border-border text-center text-text-muted text-[13px]">
                         Loading runs...
                     </div>
                 }>
-                    <div class="grid grid-cols-[1fr_auto_1fr] gap-6 items-center bg-bg-panel p-6 rounded-md border border-border">
-                        <div class="flex flex-col gap-2">
-                            <label class="text-[11px] font-bold text-text-muted uppercase">Baseline</label>
-                            <select
-                                class="p-2 pr-8 border border-border rounded-md text-[12px] bg-bg-dark text-text-main outline-none focus:border-accent appearance-none bg-[url('data:image/svg+xml;charset=UTF-8,%3csvg%20xmlns=\'http://www.w3.org/2000/svg\'%20viewBox=\'0%200%2024%2024\'%20fill=\'none\'%20stroke=\'currentColor\'%20stroke-width=\'2\'%20stroke-linecap=\'round\'%20stroke-linejoin=\'round\'%3e%3cpolyline%20points=\'6%209%2012%2015%2018%209\'%3e%3c/polyline%3e%3c/svg%3e')] bg-[length:12px] bg-[right_8px_center] bg-no-repeat cursor-pointer"
-                                value={baseId()}
-                                onChange={handleBaseChange}
-                            >
-                                <option value="">Select Run</option>
-                                <For each={runs()}>
-                                    {r => <option value={String(r.id)}>#{r.commit_hash.substring(0,7)} - {r.commit_message?.substring(0, 50)}{r.commit_message?.length > 50 ? '...' : ''}{r.branch ? ` (${r.branch})` : ''}</option>}
-                                </For>
-                            </select>
+                    <div class="grid grid-cols-1 lg:grid-cols-[1fr_auto_1fr] gap-4 lg:gap-6 items-stretch bg-bg-panel p-4 sm:p-6 rounded-md border border-border">
+                        <div class="flex flex-col gap-3">
+                            <div class="flex items-center justify-between">
+                                <label class="text-[11px] font-bold text-text-muted uppercase tracking-widest">Baseline</label>
+                            </div>
+                            <div class="flex flex-col gap-2">
+                                <div class="flex flex-col gap-2">
+                                    <select
+                                        class="p-2.5 pr-9 border border-border rounded-none text-[12px] bg-bg-dark text-text-main outline-none focus:border-accent appearance-none bg-[url('data:image/svg+xml;charset=UTF-8,%3csvg%20xmlns=\'http://www.w3.org/2000/svg\'%20viewBox=\'0%200%2024%2024\'%20fill=\'none\'%20stroke=\'currentColor\'%20stroke-width=\'2\'%20stroke-linecap=\'round\'%20stroke-linejoin=\'round\'%3e%3cpolyline%20points=\'6%209%2012%2015%2018%209\'%3e%3c/polyline%3e%3c/svg%3e')] bg-[length:12px] bg-[right_8px_center] bg-no-repeat cursor-pointer hover:border-black transition-colors"
+                                        value={baseId()}
+                                        onChange={handleBaseChange}
+                                    >
+                                        <option value="">Select Run</option>
+                                        <For each={runs()}>
+                                            {r => <option value={String(r.id)}>#{r.commit_hash.substring(0,7)} · {r.commit_message?.substring(0, 50)}{r.commit_message?.length > 50 ? '...' : ''}{r.branch ? ` (${r.branch})` : ''}</option>}
+                                        </For>
+                                    </select>
+                                    <Show when={selectedBaseRun()}>
+                                        {(run) => (
+                                            <div class="flex items-center justify-between text-[10px] text-text-muted">
+                                                <a
+                                                    href={`https://github.com/anomalyco/opentui/commit/${run().commit_hash}`}
+                                                    target="_blank"
+                                                    class="font-mono text-text-main underline decoration-dotted underline-offset-2 hover:decoration-solid"
+                                                >
+                                                    #{run().commit_hash.substring(0, 7)}
+                                                </a>
+                                                <span>{formatDate(run().run_date)}</span>
+                                            </div>
+                                        )}
+                                    </Show>
+                                </div>
+                            </div>
                         </div>
 
-                        <div class="text-text-muted font-bold text-xl">➔</div>
+                        <div class="hidden lg:flex flex-col items-center justify-center text-text-muted font-semibold text-[11px] uppercase tracking-widest">
+                            <div class="w-8 h-[1px] bg-border"></div>
+                            <span class="my-3">VS</span>
+                            <div class="w-8 h-[1px] bg-border"></div>
+                        </div>
 
-                        <div class="flex flex-col gap-2">
-                            <label class="text-[11px] font-bold text-text-muted uppercase">Current</label>
-                            <select
-                                class="p-2 pr-8 border border-border rounded-md text-[12px] bg-bg-dark text-text-main outline-none focus:border-accent appearance-none bg-[url('data:image/svg+xml;charset=UTF-8,%3csvg%20xmlns=\'http://www.w3.org/2000/svg\'%20viewBox=\'0%200%2024%2024\'%20fill=\'none\'%20stroke=\'currentColor\'%20stroke-width=\'2\'%20stroke-linecap=\'round\'%20stroke-linejoin=\'round\'%3e%3cpolyline%20points=\'6%209%2012%2015%2018%209\'%3e%3c/polyline%3e%3c/svg%3e')] bg-[length:12px] bg-[right_8px_center] bg-no-repeat cursor-pointer"
-                                value={currId()}
-                                onChange={handleCurrChange}
-                            >
-                                <option value="">Select Run</option>
-                                <For each={runs()}>
-                                    {r => <option value={String(r.id)}>#{r.commit_hash.substring(0,7)} - {r.commit_message?.substring(0, 50)}{r.commit_message?.length > 50 ? '...' : ''}{r.branch ? ` (${r.branch})` : ''}</option>}
-                                </For>
-                            </select>
+                        <div class="flex flex-col gap-3">
+                            <div class="flex items-center justify-between">
+                                <label class="text-[11px] font-bold text-text-muted uppercase tracking-widest">Current</label>
+                            </div>
+                            <div class="flex flex-col gap-2">
+                                <select
+                                    class="p-2.5 pr-9 border border-border rounded-none text-[12px] bg-bg-dark text-text-main outline-none focus:border-accent appearance-none bg-[url('data:image/svg+xml;charset=UTF-8,%3csvg%20xmlns=\'http://www.w3.org/2000/svg\'%20viewBox=\'0%200%2024%2024\'%20fill=\'none\'%20stroke=\'currentColor\'%20stroke-width=\'2\'%20stroke-linecap=\'round\'%20stroke-linejoin=\'round\'%3e%3cpolyline%20points=\'6%209%2012%2015%2018%209\'%3e%3c/polyline%3e%3c/svg%3e')] bg-[length:12px] bg-[right_8px_center] bg-no-repeat cursor-pointer hover:border-black transition-colors"
+                                    value={currId()}
+                                    onChange={handleCurrChange}
+                                >
+                                    <option value="">Select Run</option>
+                                    <For each={runs()}>
+                                        {r => <option value={String(r.id)}>#{r.commit_hash.substring(0,7)} · {r.commit_message?.substring(0, 50)}{r.commit_message?.length > 50 ? '...' : ''}{r.branch ? ` (${r.branch})` : ''}</option>}
+                                    </For>
+                                </select>
+                                <Show when={selectedCurrRun()}>
+                                    {(run) => (
+                                        <div class="flex items-center justify-between text-[10px] text-text-muted">
+                                            <a
+                                                href={`https://github.com/anomalyco/opentui/commit/${run().commit_hash}`}
+                                                target="_blank"
+                                                class="font-mono text-text-main underline decoration-dotted underline-offset-2 hover:decoration-solid"
+                                            >
+                                                #{run().commit_hash.substring(0, 7)}
+                                            </a>
+                                            <span>{formatDate(run().run_date)}</span>
+                                        </div>
+                                    )}
+                                </Show>
+                            </div>
                         </div>
                     </div>
                 </Show>
             </div>
+
+            <BenchmarkFilterBar 
+                run={null}
+                filter={globalFilter()}
+                setFilter={setGlobalFilter}
+                category={globalCategory()}
+                setCategory={setGlobalCategory}
+                categories={categories()}
+                resultCount={filteredComparisons().length}
+                onCopy={copyCompareResults}
+                hasResults={filteredComparisons().length > 0}
+                showRunInfo={false}
+                showCopy={false}
+            />
 
             <div class="flex-1 overflow-auto bg-bg-dark">
                 <Show when={compareData()} fallback={
