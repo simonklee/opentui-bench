@@ -132,6 +132,14 @@ const Sidebar: Component = () => {
           class={`overflow-hidden whitespace-nowrap transition-all duration-300 flex items-center ${isSidebarExpanded() ? "max-w-[200px] opacity-100" : "max-w-0 opacity-0"}`}
         >
           <span class="font-mono">v0.2.1</span>
+          <a
+            href="/api/database/download"
+            download="bench.db"
+            class="cursor-pointer hover:text-black hover:underline ml-4"
+            title="Download SQLite database"
+          >
+            Export
+          </a>
           <span
             class="cursor-pointer hover:text-black hover:underline ml-4"
             onClick={toggleHelp}

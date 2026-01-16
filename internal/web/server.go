@@ -81,6 +81,7 @@ func (s *Server) Start(openBrowser bool) error {
 	mux.HandleFunc("/api/trend", s.handleTrend)
 	mux.HandleFunc("/api/benchmarks", s.handleBenchmarks)
 	mux.HandleFunc("/api/regressions", s.handleRegressions)
+	mux.HandleFunc("/api/database/download", s.handleDatabaseDownload)
 
 	if openBrowser {
 		url := fmt.Sprintf("http://localhost%s", s.addr)

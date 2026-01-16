@@ -82,6 +82,11 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_result_kind ON artifacts(result_id, kin
 
 type DB struct {
 	*sql.DB
+	path string
+}
+
+func (db *DB) Path() string {
+	return db.path
 }
 
 func Open(dbPath string) (*DB, error) {
@@ -111,7 +116,7 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
-	database := &DB{sqlDB}
+	database := &DB{DB: sqlDB, path: dbPath}
 
 	if err := database.migrate(); err != nil {
 		sqlDB.Close()

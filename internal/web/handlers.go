@@ -1164,6 +1164,35 @@ const (
 	defaultAlpha     = 0.01
 )
 
+func (s *Server) handleDatabaseDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	dbPath := s.db.Path()
+
+	// Checkpoint WAL for consistency
+	s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+
+	f, err := os.Open(dbPath)
+	if err != nil {
+		http.Error(w, "Failed to open database", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		http.Error(w, "Failed to stat database", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-sqlite3")
+	w.Header().Set("Content-Disposition", `attachment; filename="bench.db"`)
+	http.ServeContent(w, r, "bench.db", stat.ModTime(), f)
+}
+
 func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	// Parse optional run_id parameter (defaults to latest run)
 	var runID int64
