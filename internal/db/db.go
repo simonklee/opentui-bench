@@ -827,3 +827,131 @@ func (db *DB) ListArtifactsForResult(resultID int64) ([]Artifact, error) {
 	}
 	return artifacts, rows.Err()
 }
+
+// ComparableRunsWindow fetches a window of runs comparable to the given run.
+// Comparable means same branch, machine_id, and zig_optimize.
+// Returns runs in reverse chronological order (most recent first).
+// The window parameter controls how many runs to return (including the reference run if found).
+func (db *DB) GetComparableRunsWindow(runID int64, window int) ([]Run, error) {
+	// First get the reference run to find its comparison criteria
+	refRun, err := db.GetRun(runID)
+	if err != nil {
+		return nil, err
+	}
+
+	query := `
+		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
+		FROM runs
+		WHERE (branch = ? OR (branch IS NULL AND ? = ''))
+		  AND (machine_id = ? OR (machine_id IS NULL AND ? = ''))
+		  AND (zig_optimize = ? OR (zig_optimize IS NULL AND ? = ''))
+		  AND run_date <= ?
+		ORDER BY run_date DESC
+		LIMIT ?`
+
+	rows, err := db.Query(query,
+		refRun.Branch, refRun.Branch,
+		refRun.MachineID, refRun.MachineID,
+		refRun.ZigOptimize, refRun.ZigOptimize,
+		refRun.RunDate,
+		window)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []Run
+	for rows.Next() {
+		var r Run
+		var commitHashFull, commitMessage, commitDate, branch, machineID, notes, zigOptimize sql.NullString
+		if err := rows.Scan(&r.ID, &r.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branch, &r.RunDate, &machineID, &notes, &zigOptimize); err != nil {
+			return nil, err
+		}
+		r.CommitHashFull = commitHashFull.String
+		r.CommitMessage = commitMessage.String
+		r.CommitDate = commitDate.String
+		r.Branch = branch.String
+		r.MachineID = machineID.String
+		r.Notes = notes.String
+		r.ZigOptimize = zigOptimize.String
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
+}
+
+// GetResultsForBenchmarkInRuns fetches all results for a specific benchmark name across multiple runs.
+// Returns a map of runID -> Result.
+func (db *DB) GetResultsForBenchmarkInRuns(benchmarkName string, runIDs []int64) (map[int64]Result, error) {
+	if len(runIDs) == 0 {
+		return make(map[int64]Result), nil
+	}
+
+	// Build placeholders for IN clause
+	placeholders := make([]string, len(runIDs))
+	args := make([]interface{}, len(runIDs)+1)
+	args[0] = benchmarkName
+	for i, id := range runIDs {
+		placeholders[i] = "?"
+		args[i+1] = id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, run_id, category, name, min_ns, avg_ns, max_ns,
+		       COALESCE(std_dev_ns, 0), COALESCE(p50_ns, 0), COALESCE(p95_ns, 0), COALESCE(p99_ns, 0),
+		       total_ns, iterations, COALESCE(sample_count, 1)
+		FROM results
+		WHERE name = ? AND run_id IN (%s)`, strings.Join(placeholders, ","))
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make(map[int64]Result)
+	for rows.Next() {
+		var r Result
+		if err := rows.Scan(&r.ID, &r.RunID, &r.Category, &r.Name, &r.MinNs, &r.AvgNs, &r.MaxNs,
+			&r.StdDevNs, &r.P50Ns, &r.P95Ns, &r.P99Ns,
+			&r.TotalNs, &r.Iterations, &r.SampleCount); err != nil {
+			return nil, err
+		}
+		results[r.RunID] = r
+	}
+	return results, rows.Err()
+}
+
+// GetDistinctBenchmarkNames returns all unique benchmark names from a set of runs.
+func (db *DB) GetDistinctBenchmarkNames(runIDs []int64) ([]string, error) {
+	if len(runIDs) == 0 {
+		return []string{}, nil
+	}
+
+	placeholders := make([]string, len(runIDs))
+	args := make([]interface{}, len(runIDs))
+	for i, id := range runIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT DISTINCT name FROM results
+		WHERE run_id IN (%s)
+		ORDER BY name`, strings.Join(placeholders, ","))
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}

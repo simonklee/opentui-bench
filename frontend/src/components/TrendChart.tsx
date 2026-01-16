@@ -4,6 +4,28 @@ import { Line } from 'solid-chartjs';
 import type { TrendPoint } from "../services/api";
 import { formatNs } from "../utils/format";
 
+// Plugin to draw baseline band
+const baselineBandPlugin = {
+    id: 'baselineBand',
+    beforeDatasetsDraw(chart: any) {
+        const yScale = chart.scales?.y;
+        if (!yScale) return;
+        
+        const options = chart.options?.plugins?.baselineBand;
+        if (options?.lower === undefined || options?.upper === undefined) return;
+        
+        const { ctx } = chart;
+        const chartArea = chart.chartArea;
+        
+        const yLower = yScale.getPixelForValue(options.lower);
+        const yUpper = yScale.getPixelForValue(options.upper);
+        
+        ctx.save();
+        ctx.fillStyle = 'rgba(34, 197, 94, 0.1)'; // light green
+        ctx.fillRect(chartArea.left, yUpper, chartArea.right - chartArea.left, yLower - yUpper);
+        ctx.restore();
+    }
+};
 
 const errorBarPlugin = {
     id: 'errorBars',
@@ -63,13 +85,15 @@ const errorBarPlugin = {
     }
 };
 
-Chart.register(Title, Tooltip, Legend, Colors, LineController, CategoryScale, LinearScale, PointElement, LineElement, Filler, errorBarPlugin);
+Chart.register(Title, Tooltip, Legend, Colors, LineController, CategoryScale, LinearScale, PointElement, LineElement, Filler, errorBarPlugin, baselineBandPlugin);
 
 interface Props {
     data: TrendPoint[]; 
     range?: number;
     currentRunId?: number;
     onPointClick?: (runId: number, resultId: number) => void;
+    baselineCILowerNs?: number;
+    baselineCIUpperNs?: number;
 }
 
 const TrendChart: Component<Props> = (props) => {
@@ -85,14 +109,28 @@ const TrendChart: Component<Props> = (props) => {
         const sdLower = data.map(d => Math.max(d.avg_ns - d.std_dev_ns, 0));
         const sdUpper = data.map(d => d.avg_ns + d.std_dev_ns);
 
-        // Highlight the current run's point
+        // Determine point colors based on regression status
         const currentRunId = props.currentRunId;
-        const pointBgColors = data.map(d => 
-            d.run_id === currentRunId ? '#24292f' : '#ffffff'
-        );
-        const pointRadii = data.map(d =>
-            d.run_id === currentRunId ? 5 : 3
-        );
+        const pointBgColors = data.map(d => {
+            if (d.regression_status === 'regressed') return '#ef4444'; // red for regressed
+            if (d.regression_status === 'baseline') return '#22c55e'; // green for baseline
+            if (d.run_id === currentRunId) return '#24292f';
+            if (d.regression_status === 'insufficient') return '#d1d5db';
+            return '#ffffff';
+        });
+        const pointBorderColors = data.map(d => {
+            if (d.regression_status === 'regressed') return '#ef4444';
+            if (d.regression_status === 'baseline') return '#22c55e';
+            if (d.regression_status === 'insufficient') return '#9ca3af';
+            return '#24292f';
+        });
+        const pointRadii = data.map(d => {
+            if (d.regression_status === 'regressed') return 6;
+            if (d.regression_status === 'baseline') return 5;
+            if (d.run_id === currentRunId) return 5;
+            if (d.regression_status === 'insufficient') return 4;
+            return 3;
+        });
 
         return {
             labels: data.map(d => {
@@ -125,8 +163,8 @@ const TrendChart: Component<Props> = (props) => {
                     borderWidth: 1.5,
                     tension: 0,
                     pointRadius: pointRadii,
-                    pointHoverRadius: 5,
-                    pointBorderColor: '#24292f',
+                    pointHoverRadius: 6,
+                    pointBorderColor: pointBorderColors,
                     pointBorderWidth: 1.5,
                     pointBackgroundColor: pointBgColors,
                     fill: false,
@@ -137,7 +175,7 @@ const TrendChart: Component<Props> = (props) => {
         };
     };
 
-    const chartOptions = {
+    const chartOptions = (): any => ({
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
@@ -157,6 +195,10 @@ const TrendChart: Component<Props> = (props) => {
         },
         plugins: { 
             legend: { display: false },
+            baselineBand: {
+                lower: props.baselineCILowerNs,
+                upper: props.baselineCIUpperNs,
+            },
             tooltip: {
                 backgroundColor: '#ffffff',
                 titleColor: '#24292f',
@@ -190,12 +232,19 @@ const TrendChart: Component<Props> = (props) => {
                         }
                         const ciLower = d.ci_lower_ns ?? d.avg_ns;
                         const ciUpper = d.ci_upper_ns ?? d.avg_ns;
-                        return [
+                        const lines = [
                             `Avg: ${formatNs(d.avg_ns)}`,
                             `95% CI: ${formatNs(ciLower)} - ${formatNs(ciUpper)}`,
                             `Range: ${formatNs(d.min_ns)} - ${formatNs(d.max_ns)}`,
                             `Samples: ${d.sample_count}`
                         ];
+                        // Add regression info if present
+                        if (d.regression_status === 'regressed' && d.change_percent !== undefined) {
+                            lines.push(`Regression: +${d.change_percent.toFixed(1)}% vs baseline`);
+                        } else if (d.regression_status === 'baseline') {
+                            lines.push(`Status: Baseline`);
+                        }
+                        return lines;
                     }
                 }
             }
@@ -243,12 +292,12 @@ const TrendChart: Component<Props> = (props) => {
                 }
             }
         }
-    };
+    });
 
 
     return (
         <div class="relative w-full h-full">
-            <Line data={chartData()} options={chartOptions} width={500} height={300} />
+            <Line data={chartData()} options={chartOptions()} width={500} height={300} />
         </div>
     );
 };

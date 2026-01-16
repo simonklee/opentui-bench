@@ -76,7 +76,19 @@ const Sidebar: Component = () => {
 
       <div class="py-4 flex flex-col gap-1 flex-1">
         <div
-          class={`${navItemClass} ${isSidebarExpanded() ? "" : "justify-center"} ${location.pathname === "/runs" || location.pathname === "/" ? activeClass + " active" : ""}`}
+          class={`${navItemClass} ${isSidebarExpanded() ? "" : "justify-center"} ${location.pathname === "/" ? activeClass + " active" : ""}`}
+          onClick={() => navigate("/")}
+          title={!isSidebarExpanded() ? "Regressions" : ""}
+        >
+          <Activity
+            size={18}
+            strokeWidth={2}
+            class="opacity-70 group-[.active]:opacity-100 flex-shrink-0"
+          />
+          <span class={labelClass()}>REGRESSIONS</span>
+        </div>
+        <div
+          class={`${navItemClass} ${isSidebarExpanded() ? "" : "justify-center"} ${location.pathname === "/runs" ? activeClass + " active" : ""}`}
           onClick={() => navigate("/runs")}
           title={!isSidebarExpanded() ? "Runs" : ""}
         >

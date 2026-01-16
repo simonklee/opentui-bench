@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -323,24 +324,58 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type trendPoint struct {
-		RunID       int64  `json:"run_id"`
-		ResultID    int64  `json:"result_id"`
-		CommitHash  string `json:"commit_hash"`
-		RunDate     string `json:"run_date"`
-		AvgNs       int64  `json:"avg_ns"`
-		MinNs       int64  `json:"min_ns"`
-		MaxNs       int64  `json:"max_ns"`
-		StdDevNs    int64  `json:"std_dev_ns"`
-		SampleCount int64  `json:"sample_count"`
-		CiLowerNs   int64  `json:"ci_lower_ns"`
-		CiUpperNs   int64  `json:"ci_upper_ns"`
-		SemNs       int64  `json:"sem_ns"`
+		RunID            int64    `json:"run_id"`
+		ResultID         int64    `json:"result_id"`
+		CommitHash       string   `json:"commit_hash"`
+		RunDate          string   `json:"run_date"`
+		AvgNs            int64    `json:"avg_ns"`
+		MinNs            int64    `json:"min_ns"`
+		MaxNs            int64    `json:"max_ns"`
+		StdDevNs         int64    `json:"std_dev_ns"`
+		SampleCount      int64    `json:"sample_count"`
+		CiLowerNs        int64    `json:"ci_lower_ns"`
+		CiUpperNs        int64    `json:"ci_upper_ns"`
+		SemNs            int64    `json:"sem_ns"`
+		RegressionStatus string   `json:"regression_status"`
+		BaselineRunID    *int64   `json:"baseline_run_id,omitempty"`
+		ChangePercent    *float64 `json:"change_percent,omitempty"`
+	}
+
+	type trendResponse struct {
+		Points            []trendPoint `json:"points"`
+		BaselineRunID     *int64       `json:"baseline_run_id,omitempty"`
+		BaselineCILowerNs *int64       `json:"baseline_ci_lower_ns,omitempty"`
+		BaselineCIUpperNs *int64       `json:"baseline_ci_upper_ns,omitempty"`
+	}
+
+	// Build history for baseline computation
+	// trends are ordered newest-first, so we need to process accordingly
+	var history []stats.RunStat
+	for _, t := range trends {
+		sem := float64(0)
+		if t.Result.SampleCount >= 2 {
+			sem = float64(t.Result.StdDevNs) / math.Sqrt(float64(t.Result.SampleCount))
+		}
+		history = append(history, stats.RunStat{
+			RunID:       t.Run.ID,
+			Mean:        float64(t.Result.AvgNs),
+			Sem:         sem,
+			SampleCount: t.Result.SampleCount,
+			StdDev:      float64(t.Result.StdDevNs),
+		})
+	}
+
+	// Compute baseline from all history except the latest run
+	var baseline *stats.BaselineStats
+	if len(history) > 1 {
+		baseline, _ = stats.ComputeBaseline(history[1:], defaultMinPoints)
 	}
 
 	var points []trendPoint
-	for _, t := range trends {
+	for i, t := range trends {
 		ciLower, ciUpper, sem := stats.MeanCI95(t.Result.AvgNs, t.Result.StdDevNs, t.Result.SampleCount)
-		points = append(points, trendPoint{
+
+		point := trendPoint{
 			RunID:       t.Run.ID,
 			ResultID:    t.Result.ID,
 			CommitHash:  t.Run.CommitHash,
@@ -353,11 +388,44 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 			CiLowerNs:   ciLower,
 			CiUpperNs:   ciUpper,
 			SemNs:       sem,
-		})
+		}
+
+		// Determine regression status
+		if baseline == nil {
+			point.RegressionStatus = "insufficient"
+		} else if i < len(history) && history[i].RunID == baseline.RunID {
+			point.RegressionStatus = "baseline"
+			point.BaselineRunID = &baseline.RunID
+			point.ChangePercent = nil
+		} else if i < len(history) {
+			result := stats.DetectRegression(history[i], baseline, defaultAlpha)
+			point.RegressionStatus = result.Status
+			point.BaselineRunID = result.BaselineRunID
+			point.ChangePercent = result.ChangePercent
+		} else {
+			point.RegressionStatus = "ok"
+		}
+		if baseline != nil && point.BaselineRunID == nil {
+			point.BaselineRunID = &baseline.RunID
+		}
+
+		points = append(points, point)
+	}
+
+	response := trendResponse{
+		Points: points,
+	}
+
+	if baseline != nil {
+		response.BaselineRunID = &baseline.RunID
+		ciLower := int64(baseline.CILower)
+		ciUpper := int64(baseline.CIUpper)
+		response.BaselineCILowerNs = &ciLower
+		response.BaselineCIUpperNs = &ciUpper
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(points); err != nil {
+	if err := json.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -1087,4 +1155,245 @@ func (s *Server) ensureResultBelongsToRun(runID int64, resultID int64) error {
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+// Default parameters for regression detection
+const (
+	defaultWindow    = 20
+	defaultMinPoints = 5
+	defaultAlpha     = 0.01
+)
+
+func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
+	// Parse optional run_id parameter (defaults to latest run)
+	var runID int64
+	if idStr := r.URL.Query().Get("run_id"); idStr != "" {
+		var err error
+		runID, err = strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid run_id", http.StatusBadRequest)
+			return
+		}
+	} else {
+		latestRun, err := s.db.GetLatestRun()
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				// No runs yet, return empty response
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"run_id":      nil,
+					"window":      defaultWindow,
+					"min_points":  defaultMinPoints,
+					"regressions": []interface{}{},
+				})
+
+				return
+			}
+
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		runID = latestRun.ID
+	}
+
+	// Parse optional parameters
+	window := defaultWindow
+	if w := r.URL.Query().Get("window"); w != "" {
+		if n, err := strconv.Atoi(w); err == nil && n > 0 {
+			window = n
+		}
+	}
+
+	minPoints := defaultMinPoints
+	if mp := r.URL.Query().Get("min_points"); mp != "" {
+		if n, err := strconv.Atoi(mp); err == nil && n > 0 {
+			minPoints = n
+		}
+	}
+
+	// Get comparable runs window
+	runs, err := s.db.GetComparableRunsWindow(runID, window)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if len(runs) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"run_id":               runID,
+			"window":               window,
+			"min_points":           minPoints,
+			"insufficient_history": true,
+			"regressions":          []interface{}{},
+		})
+		return
+	}
+
+	// Collect run IDs
+	runIDs := make([]int64, len(runs))
+	runByID := make(map[int64]db.Run)
+	for i, run := range runs {
+		runIDs[i] = run.ID
+		runByID[run.ID] = run
+	}
+
+	// Get all benchmark names across these runs
+	benchmarkNames, err := s.db.GetDistinctBenchmarkNames(runIDs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Find the latest run (first in the list since it's sorted DESC)
+	latestRunID := runs[0].ID
+
+	type regression struct {
+		Name                 string   `json:"name"`
+		Category             string   `json:"category"`
+		LatestResultID       int64    `json:"latest_result_id"`
+		LatestCILowerNs      int64    `json:"latest_ci_lower_ns"`
+		LatestCIUpperNs      int64    `json:"latest_ci_upper_ns"`
+		BaselineRunID        int64    `json:"baseline_run_id"`
+		BaselineCommitHash   string   `json:"baseline_commit_hash"`
+		BaselineCILowerNs    int64    `json:"baseline_ci_lower_ns"`
+		BaselineCIUpperNs    int64    `json:"baseline_ci_upper_ns"`
+		ChangePercent        float64  `json:"change_percent"`
+		MinEffectPercent     float64  `json:"min_effect_percent"`
+		PValue               *float64 `json:"p_value,omitempty"`
+		Alpha                float64  `json:"alpha"`
+		IntroducedRunID      *int64   `json:"introduced_run_id,omitempty"`
+		IntroducedCommitHash *string  `json:"introduced_commit_hash,omitempty"`
+		IntroducedRunDate    *string  `json:"introduced_run_date,omitempty"`
+	}
+
+	type regressionsResponse struct {
+		RunID               *int64       `json:"run_id"`
+		Window              int          `json:"window"`
+		MinPoints           int          `json:"min_points"`
+		InsufficientHistory bool         `json:"insufficient_history"`
+		Regressions         []regression `json:"regressions"`
+	}
+
+	var regressions []regression
+
+	insufficientHistory := false
+
+	// Analyze each benchmark
+	for _, benchName := range benchmarkNames {
+		// Get results for this benchmark across all runs
+		resultsMap, err := s.db.GetResultsForBenchmarkInRuns(benchName, runIDs)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Check if latest run has this benchmark
+		latestResult, hasLatest := resultsMap[latestRunID]
+		if !hasLatest {
+			continue
+		}
+
+		// Build history for baseline computation (exclude latest)
+		var history []stats.RunStat
+		for _, run := range runs {
+			if run.ID == latestRunID {
+				continue
+			}
+			if result, ok := resultsMap[run.ID]; ok {
+				sem := float64(0)
+				if result.SampleCount >= 2 {
+					sem = float64(result.StdDevNs) / math.Sqrt(float64(result.SampleCount))
+				}
+				history = append(history, stats.RunStat{
+					RunID:       run.ID,
+					Mean:        float64(result.AvgNs),
+					Sem:         sem,
+					SampleCount: result.SampleCount,
+					StdDev:      float64(result.StdDevNs),
+				})
+			}
+		}
+
+		// Compute baseline
+		baseline, err := stats.ComputeBaseline(history, minPoints)
+		if err != nil {
+			// Insufficient data for this benchmark
+			insufficientHistory = true
+			continue
+		}
+
+		// Build latest RunStat
+		latestSem := float64(0)
+		if latestResult.SampleCount >= 2 {
+			latestSem = float64(latestResult.StdDevNs) / math.Sqrt(float64(latestResult.SampleCount))
+		}
+		latestStat := stats.RunStat{
+			RunID:       latestRunID,
+			Mean:        float64(latestResult.AvgNs),
+			Sem:         latestSem,
+			SampleCount: latestResult.SampleCount,
+			StdDev:      float64(latestResult.StdDevNs),
+		}
+
+		// Detect regression
+		result := stats.DetectRegression(latestStat, baseline, defaultAlpha)
+
+		if result.Status == "regressed" {
+			// Find introducing run
+			// Reverse history to chronological order for FindIntroducingRun
+			chronoHistory := make([]stats.RunStat, len(history))
+			for i, h := range history {
+				chronoHistory[len(history)-1-i] = h
+			}
+			introducingID := stats.FindIntroducingRun(chronoHistory, baseline, defaultAlpha)
+
+			// Build CI for latest
+			ciLower, ciUpper, _ := stats.MeanCI95(latestResult.AvgNs, latestResult.StdDevNs, latestResult.SampleCount)
+
+			reg := regression{
+				Name:              latestResult.Name,
+				Category:          latestResult.Category,
+				LatestResultID:    latestResult.ID,
+				LatestCILowerNs:   ciLower,
+				LatestCIUpperNs:   ciUpper,
+				BaselineRunID:     baseline.RunID,
+				BaselineCILowerNs: int64(baseline.CILower),
+				BaselineCIUpperNs: int64(baseline.CIUpper),
+				ChangePercent:     *result.ChangePercent,
+				MinEffectPercent:  result.MinEffectPercent,
+				PValue:            result.PValue,
+				Alpha:             defaultAlpha,
+			}
+
+			// Add baseline commit hash
+			if baselineRun, ok := runByID[baseline.RunID]; ok {
+				reg.BaselineCommitHash = baselineRun.CommitHash
+			}
+
+			// Add introducing run info
+			if introducingID != nil {
+				reg.IntroducedRunID = introducingID
+				if introRun, ok := runByID[*introducingID]; ok {
+					reg.IntroducedCommitHash = &introRun.CommitHash
+					reg.IntroducedRunDate = &introRun.RunDate
+				}
+			}
+
+			regressions = append(regressions, reg)
+		}
+	}
+
+	response := regressionsResponse{
+		RunID:               &runID,
+		Window:              window,
+		MinPoints:           minPoints,
+		InsufficientHistory: insufficientHistory,
+		Regressions:         regressions,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }

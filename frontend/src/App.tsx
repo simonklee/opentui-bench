@@ -2,6 +2,7 @@ import { onCleanup, onMount } from "solid-js";
 import type { Component, ParentComponent } from "solid-js";
 import { Router, Route } from "@solidjs/router";
 import Sidebar from "./components/Sidebar";
+import Regressions from "./pages/Regressions";
 import RunsList from "./pages/RunsList";
 import BenchmarkDetail from "./pages/BenchmarkDetail";
 import Compare from "./pages/Compare";
@@ -45,7 +46,7 @@ const routerBase = baseUrl.replace(/\/$/, "") || "/";
 const App: Component = () => {
   return (
     <Router root={Layout} base={routerBase}>
-      <Route path="/" component={RunsList} />
+      <Route path="/" component={Regressions} />
       <Route path="/runs" component={RunsList} />
       <Route path="/benchmarks/:id" component={BenchmarkDetail} />
       <Route path="/compare" component={Compare} />

@@ -5,14 +5,14 @@ import { formatNs, formatBytes } from "../utils/format";
 import { Button } from "./Button";
 import TrendChart from "./TrendChart";
 import FlamegraphViewer from "./FlamegraphViewer";
-import type { BenchmarkResult, TrendPoint } from "../services/api";
+import type { BenchmarkResult, TrendResponse } from "../services/api";
 import TrendIndicator from "./TrendIndicator";
 
 interface BenchmarkDetailModalProps {
   benchmark: BenchmarkResult;
   runId: number;
   commitHash: string;
-  trendData: TrendPoint[] | undefined;
+  trendData: TrendResponse | undefined;
   flamegraphView: 'flamegraph' | 'callgraph';
   setFlamegraphView: (v: 'flamegraph' | 'callgraph') => void;
   hasCpuProfile: boolean;
@@ -70,13 +70,14 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                 <div class="flex flex-col gap-0.5 md:gap-1">
                     <div class="text-[9px] md:text-[10px] uppercase tracking-widest text-text-muted font-bold">Trend</div>
                     <div class="h-[21px] md:h-[24px] flex items-center">
-                         <TrendIndicator 
-                            trendData={props.trendData}
+                            <TrendIndicator 
+                            trendData={props.trendData?.points}
                             benchmarkName={props.benchmark.name}
                             currentRunId={props.runId}
                             fromCompare={searchParams.from === 'compare'}
                             compareBaseRunId={searchParams.compare_base as string | undefined}
                         />
+
                     </div>
                 </div>
 
@@ -146,12 +147,14 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                             <Button active={props.chartRange === 100} onClick={() => props.setChartRange(100)}>MAX</Button>
                         </div>
                     </div>
-                    <div class="h-[300px] md:h-auto md:flex-1 relative border border-border p-4">
+                    <div class="h-[300px] md:flex-1 md:min-h-0 relative border border-border p-4">
                         <Show when={props.trendData} fallback={<div class="flex items-center justify-center h-full text-text-muted font-mono text-xs">Loading trend data...</div>}>
                             <TrendChart 
-                                data={props.trendData!} 
+                                data={props.trendData!.points} 
                                 range={props.chartRange} 
                                 currentRunId={props.runId}
+                                baselineCILowerNs={props.trendData!.baseline_ci_lower_ns}
+                                baselineCIUpperNs={props.trendData!.baseline_ci_upper_ns}
                                 onPointClick={props.onTrendClick}
                             />
                         </Show>

@@ -112,7 +112,9 @@ export function useBenchmarkDetail() {
             const name = selectedBenchmark()?.name;
             return name ? { name, limit: 100 } : null;
         },
-        ({ name, limit }) => api.getTrend(name, limit)
+        async ({ name, limit }) => {
+            return api.getTrend(name, limit);
+        }
     );
 
     // Check artifacts
