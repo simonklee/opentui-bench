@@ -84,6 +84,7 @@ export interface RegressionsResponse {
     run_id: number | null;
     window: number;
     min_points: number;
+    baseline_offset: number;
     insufficient_history?: boolean;
     regressions: Regression[];
 }
@@ -112,8 +113,22 @@ export const api = {
     getFlamegraphs: async (runId: number) => {
         return fetchJson<{ result_id: number, type: string }[]>(`/api/runs/${runId}/flamegraphs`);
     },
-    getRegressions: async (runId?: number) => {
-        const url = runId ? `/api/regressions?run_id=${runId}` : '/api/regressions';
+    getRegressions: async (runId?: number, options?: { window?: number; minPoints?: number; baselineOffset?: number }) => {
+        const params = new URLSearchParams();
+        if (runId) {
+            params.set('run_id', String(runId));
+        }
+        if (options?.window) {
+            params.set('window', String(options.window));
+        }
+        if (options?.minPoints) {
+            params.set('min_points', String(options.minPoints));
+        }
+        if (options?.baselineOffset !== undefined) {
+            params.set('baseline_offset', String(options.baselineOffset));
+        }
+        const query = params.toString();
+        const url = query ? `/api/regressions?${query}` : '/api/regressions';
         return fetchJson<RegressionsResponse>(url);
     }
 };

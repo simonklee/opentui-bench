@@ -368,7 +368,7 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 	// Compute baseline from all history except the latest run
 	var baseline *stats.BaselineStats
 	if len(history) > 1 {
-		baseline, _ = stats.ComputeBaseline(history[1:], defaultMinPoints)
+		baseline, _ = stats.ComputeBaseline(history[1:], defaultMinPoints, defaultBaselineOffset)
 	}
 
 	var points []trendPoint
@@ -1159,9 +1159,10 @@ func (s *Server) ensureResultBelongsToRun(runID int64, resultID int64) error {
 
 // Default parameters for regression detection
 const (
-	defaultWindow    = 20
-	defaultMinPoints = 5
-	defaultAlpha     = 0.01
+	defaultWindow         = 30
+	defaultMinPoints      = 5
+	defaultBaselineOffset = 3
+	defaultAlpha          = 0.01
 )
 
 func (s *Server) handleDatabaseDownload(w http.ResponseWriter, r *http.Request) {
@@ -1210,10 +1211,11 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 				// No runs yet, return empty response
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"run_id":      nil,
-					"window":      defaultWindow,
-					"min_points":  defaultMinPoints,
-					"regressions": []interface{}{},
+					"run_id":          nil,
+					"window":          defaultWindow,
+					"min_points":      defaultMinPoints,
+					"baseline_offset": defaultBaselineOffset,
+					"regressions":     []interface{}{},
 				})
 
 				return
@@ -1240,6 +1242,13 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	baselineOffset := defaultBaselineOffset
+	if bo := r.URL.Query().Get("baseline_offset"); bo != "" {
+		if n, err := strconv.Atoi(bo); err == nil && n >= 0 {
+			baselineOffset = n
+		}
+	}
+
 	// Get comparable runs window
 	runs, err := s.db.GetComparableRunsWindow(runID, window)
 	if err != nil {
@@ -1253,6 +1262,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			"run_id":               runID,
 			"window":               window,
 			"min_points":           minPoints,
+			"baseline_offset":      baselineOffset,
 			"insufficient_history": true,
 			"regressions":          []interface{}{},
 		})
@@ -1300,6 +1310,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		RunID               *int64       `json:"run_id"`
 		Window              int          `json:"window"`
 		MinPoints           int          `json:"min_points"`
+		BaselineOffset      int          `json:"baseline_offset"`
 		InsufficientHistory bool         `json:"insufficient_history"`
 		Regressions         []regression `json:"regressions"`
 	}
@@ -1328,23 +1339,25 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			if run.ID == latestRunID {
 				continue
 			}
-			if result, ok := resultsMap[run.ID]; ok {
-				sem := float64(0)
-				if result.SampleCount >= 2 {
-					sem = float64(result.StdDevNs) / math.Sqrt(float64(result.SampleCount))
-				}
-				history = append(history, stats.RunStat{
-					RunID:       run.ID,
-					Mean:        float64(result.AvgNs),
-					Sem:         sem,
-					SampleCount: result.SampleCount,
-					StdDev:      float64(result.StdDevNs),
-				})
+			result, ok := resultsMap[run.ID]
+			if !ok {
+				continue
 			}
+			sem := float64(0)
+			if result.SampleCount >= 2 {
+				sem = float64(result.StdDevNs) / math.Sqrt(float64(result.SampleCount))
+			}
+			history = append(history, stats.RunStat{
+				RunID:       run.ID,
+				Mean:        float64(result.AvgNs),
+				Sem:         sem,
+				SampleCount: result.SampleCount,
+				StdDev:      float64(result.StdDevNs),
+			})
 		}
 
 		// Compute baseline
-		baseline, err := stats.ComputeBaseline(history, minPoints)
+		baseline, err := stats.ComputeBaseline(history, minPoints, baselineOffset)
 		if err != nil {
 			// Insufficient data for this benchmark
 			continue
@@ -1416,6 +1429,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		RunID:               &runID,
 		Window:              window,
 		MinPoints:           minPoints,
+		BaselineOffset:      baselineOffset,
 		InsufficientHistory: analyzableBenchmarks == 0,
 		Regressions:         regressions,
 	}

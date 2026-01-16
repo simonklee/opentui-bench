@@ -97,13 +97,28 @@ func TCriticalOneSided(df int, alpha float64) float64 {
 // This captures both within-run variance (SEM) and run-to-run variance (machine noise).
 // Returns nil if there are fewer than minPoints valid runs.
 //
+// baselineOffset skips the most recent N runs in history. history must be ordered
+// newest-first when baselineOffset > 0.
+//
 // The returned BaselineStats contains:
 // - Mean: weighted mean from the random-effects model (used for detection)
 // - Variance: combined variance from the random-effects model (used for detection)
 // - CILower/CIUpper: 95% CI around the weighted mean (used for visualization)
 // - RunID: ID of the selected baseline reference run
 // - CV: coefficient of variation for sensitivity tuning
-func ComputeBaseline(history []RunStat, minPoints int) (*BaselineStats, error) {
+func ComputeBaseline(history []RunStat, minPoints int, baselineOffset int) (*BaselineStats, error) {
+	if baselineOffset < 0 {
+		baselineOffset = 0
+	}
+	if baselineOffset > 0 && !isOrderedNewestFirst(history) {
+		return nil, ErrInsufficientData
+	}
+	if baselineOffset >= len(history) {
+		return nil, ErrInsufficientData
+	}
+	if baselineOffset > 0 {
+		history = history[baselineOffset:]
+	}
 	if len(history) < minPoints {
 		return nil, ErrInsufficientData
 	}
@@ -295,6 +310,18 @@ func FindIntroducingRun(history []RunStat, baseline *BaselineStats, alpha float6
 }
 
 // Helper functions
+
+func isOrderedNewestFirst(history []RunStat) bool {
+	if len(history) < 2 {
+		return true
+	}
+	for i := 1; i < len(history); i++ {
+		if history[i].RunID > history[i-1].RunID {
+			return false
+		}
+	}
+	return true
+}
 
 func mean(values []float64) float64 {
 	if len(values) == 0 {
