@@ -1305,8 +1305,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var regressions []regression
-
-	insufficientHistory := false
+	analyzableBenchmarks := 0
 
 	// Analyze each benchmark
 	for _, benchName := range benchmarkNames {
@@ -1348,9 +1347,9 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		baseline, err := stats.ComputeBaseline(history, minPoints)
 		if err != nil {
 			// Insufficient data for this benchmark
-			insufficientHistory = true
 			continue
 		}
+		analyzableBenchmarks++
 
 		// Build latest RunStat
 		latestSem := float64(0)
@@ -1417,7 +1416,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		RunID:               &runID,
 		Window:              window,
 		MinPoints:           minPoints,
-		InsufficientHistory: insufficientHistory,
+		InsufficientHistory: analyzableBenchmarks == 0,
 		Regressions:         regressions,
 	}
 
