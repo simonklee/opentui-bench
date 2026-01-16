@@ -40,8 +40,8 @@ noise. Each run records multiple iterations to average out variability.
 
 ## Database
 
-Data is stored in a SQLite database but is currently not versioned or available
-for download. I will add ability to get the raw database in future.
+Data is stored in a SQLite database. You can download it via the "Export" link
+in the web UI sidebar, or directly at `/api/database/download`.
 
 ## Development
 
