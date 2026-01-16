@@ -112,17 +112,17 @@ const TrendChart: Component<Props> = (props) => {
         // Determine point colors based on regression status
         const currentRunId = props.currentRunId;
         const pointBgColors = data.map(d => {
-            if (d.regression_status === 'regressed') return '#ef4444'; // red for regressed
-            if (d.regression_status === 'baseline') return '#22c55e'; // green for baseline
-            if (d.run_id === currentRunId) return '#24292f';
+            if (d.regression_status === 'regressed') return '#cf222e';
+            if (d.regression_status === 'baseline') return '#1a7f37';
+            if (d.run_id === currentRunId) return '#000000';
             if (d.regression_status === 'insufficient') return '#d1d5db';
             return '#ffffff';
         });
         const pointBorderColors = data.map(d => {
-            if (d.regression_status === 'regressed') return '#ef4444';
-            if (d.regression_status === 'baseline') return '#22c55e';
+            if (d.regression_status === 'regressed') return '#cf222e';
+            if (d.regression_status === 'baseline') return '#1a7f37';
             if (d.regression_status === 'insufficient') return '#9ca3af';
-            return '#24292f';
+            return '#000000';
         });
         const pointRadii = data.map(d => {
             if (d.regression_status === 'regressed') return 6;
@@ -158,7 +158,7 @@ const TrendChart: Component<Props> = (props) => {
                 {
                     label: 'Average',
                     data: data.map(d => d.avg_ns),
-                    borderColor: '#24292f',
+                    borderColor: '#000000',
                     backgroundColor: '#ffffff',
                     borderWidth: 1.5,
                     tension: 0,
@@ -201,9 +201,9 @@ const TrendChart: Component<Props> = (props) => {
             },
             tooltip: {
                 backgroundColor: '#ffffff',
-                titleColor: '#24292f',
-                bodyColor: '#57606a',
-                borderColor: '#d0d7de',
+                 titleColor: '#111111',
+                 bodyColor: '#666666',
+                 borderColor: '#e5e5e5',
                 borderWidth: 1,
                 padding: 10,
                 displayColors: false,
@@ -263,8 +263,8 @@ const TrendChart: Component<Props> = (props) => {
                         family: 'var(--font-mono)',
                         size: 11
                     },
-                    color: '#57606a',
-                    callback: function(value: any) {
+                     color: '#666666',
+                     callback: function(value: any) {
                         return formatNs(value);
                     }
                 }
@@ -275,17 +275,17 @@ const TrendChart: Component<Props> = (props) => {
                     display: false,
                     drawBorder: false,
                 },
-                border: {
-                    display: true,
-                    color: '#24292f'
-                },
+                 border: {
+                     display: true,
+                     color: '#000000'
+                 },
                 ticks: {
                     font: {
                         family: 'var(--font-mono)',
                         size: 10
                     },
-                    color: '#57606a',
-                    maxRotation: 45,
+                     color: '#666666',
+                     maxRotation: 45,
                     minRotation: 0,
                     autoSkip: true,
                     maxTicksLimit: 10

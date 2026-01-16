@@ -1,4 +1,5 @@
 bench.db
+bench-backup.db
 /bench
 tmp/
 notes/

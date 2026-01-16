@@ -167,7 +167,7 @@ const Compare: Component = () => {
     return (
         <div class="flex flex-col h-full font-ui">
             <div class="flex-none p-6 border-b border-border bg-bg-dark h-[57px] flex items-center justify-between">
-                <h2 class="text-[16px] font-semibold text-text-main">Compare Runs</h2>
+                <h2 class="text-[14px] font-bold text-black uppercase tracking-widest">COMPARE</h2>
                 <Button 
                     onClick={copyCompareResults}
                     disabled={!sortedComparisons().length}
@@ -279,7 +279,7 @@ const Compare: Component = () => {
                     </div>
                 }>
                     <table class="w-full text-left border-collapse text-[12px] font-mono">
-                        <thead class="bg-bg-panel sticky top-0 z-10 border-b border-border font-ui text-[11px] uppercase tracking-wider text-text-muted select-none">
+                        <thead class="bg-bg-dark sticky top-0 z-10 border-b-2 border-black font-ui text-[10px] uppercase tracking-widest text-text-main">
                             <tr>
                                 <th class="px-4 py-2.5 font-semibold cursor-pointer hover:bg-bg-hover hover:text-text-main" onClick={() => handleSort('name')}>Benchmark</th>
                                 <th class="px-4 py-2.5 font-semibold text-right cursor-pointer hover:bg-bg-hover hover:text-text-main" onClick={() => handleSort('baseline_ns')}>Baseline</th>
