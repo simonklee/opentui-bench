@@ -84,11 +84,6 @@ func Record(database *db.DB, reader io.Reader, meta RunMetadata) (int64, int, er
 		_ = database.DeleteRun(runID)
 	}
 
-	sampleCount := meta.SampleCount
-	if sampleCount < 1 {
-		sampleCount = 1
-	}
-
 	samples := make(map[benchmarkKey][]sample)
 	keyOrder := []benchmarkKey{}
 

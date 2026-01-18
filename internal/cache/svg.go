@@ -18,7 +18,7 @@ type SVGCache struct {
 }
 
 func NewSVGCache(cacheDir string, maxRuns int) (*SVGCache, error) {
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
 	return &SVGCache{
@@ -48,7 +48,7 @@ func (c *SVGCache) Get(runID int64, benchmarkName string) ([]byte, bool) {
 
 func (c *SVGCache) Put(runID int64, benchmarkName string, svg []byte) error {
 	dir := c.runDir(runID)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create run cache dir: %w", err)
 	}
 
@@ -62,7 +62,7 @@ func (c *SVGCache) Put(runID int64, benchmarkName string, svg []byte) error {
 		_ = os.Remove(tmp.Name())
 	}()
 
-	if err := tmp.Chmod(0644); err != nil {
+	if err := tmp.Chmod(0o644); err != nil {
 		return fmt.Errorf("chmod temp svg: %w", err)
 	}
 	if n, err := tmp.Write(svg); err != nil {

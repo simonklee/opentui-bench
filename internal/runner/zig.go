@@ -47,7 +47,7 @@ func FindBenchmarkBinary(zigDir string) (string, error) {
 		}
 		if d.Name() == "opentui-bench" {
 			info, err := d.Info()
-			if err == nil && info.Mode()&0111 != 0 {
+			if err == nil && info.Mode()&0o111 != 0 {
 				if info.ModTime().After(newestTime) {
 					newestTime = info.ModTime()
 					newestPath = path

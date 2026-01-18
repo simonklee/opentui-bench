@@ -91,7 +91,7 @@ func (db *DB) Path() string {
 
 func Open(dbPath string) (*DB, error) {
 	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
@@ -623,7 +623,8 @@ func (db *DB) CountResultsForRun(runID int64) (int, error) {
 func (db *DB) GetTrend(namePattern string, limit int) ([]struct {
 	Run    Run
 	Result Result
-}, error) {
+}, error,
+) {
 	query := `
 		SELECT 
 			ru.id, ru.commit_hash, ru.commit_hash_full, ru.commit_message, ru.commit_date, ru.branch, ru.run_date, ru.machine_id, ru.notes, ru.zig_optimize,

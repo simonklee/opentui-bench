@@ -315,21 +315,25 @@ func (f *mockFlagSet) Bool(name string, def bool, usage string) *bool {
 	f.bools[name] = &b
 	return &b
 }
+
 func (f *mockFlagSet) Int(name string, def int, usage string) *int {
 	i := def
 	f.ints[name] = &i
 	return &i
 }
+
 func (f *mockFlagSet) Float64(name string, def float64, usage string) *float64 {
 	fl := def
 	f.floats[name] = &fl
 	return &fl
 }
+
 func (f *mockFlagSet) String(name string, def string, usage string) *string {
 	s := def
 	f.strings[name] = &s
 	return &s
 }
+
 func (f *mockFlagSet) StringList(name string, def string, usage string) *[]*string {
 	v := []*string{}
 	return &v

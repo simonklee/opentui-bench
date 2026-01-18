@@ -30,14 +30,27 @@ frontend-build: ## Build frontend assets for embedding
 backend-build: ## Build the backend binary
 	$(GO) build -o $(BINARY) ./cmd/bench
 
-fmt: ## Format frontend code with oxfmt
+fmt: fmt-frontend fmt-backend ## Format code
+
+fmt-frontend: ## Format frontend code with oxfmt
 	cd $(FRONTEND_DIR) && $(BUN) run fmt
+
+fmt-backend: ## Format backend code with gofumpt
+	gofumpt -w .
 
 fmt-check: ## Check frontend code formatting
 	cd $(FRONTEND_DIR) && $(BUN) run fmt:check
 
-lint: ## Lint frontend code with oxlint
+lint: lint-frontend lint-backend ## Lint code
+
+lint-frontend: ## Lint frontend code with oxlint
 	cd $(FRONTEND_DIR) && $(BUN) run lint
 
-lint-fix: ## Lint and fix frontend code
+lint-backend: ## Lint backend code with golangci-lint and gofumpt check
+	golangci-lint run
+	gofumpt -l .
+
+lint-fix: lint-fix-frontend fmt-backend ## Lint and fix code
+
+lint-fix-frontend: ## Lint and fix frontend code
 	cd $(FRONTEND_DIR) && $(BUN) run lint:fix
