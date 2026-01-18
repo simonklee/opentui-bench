@@ -103,7 +103,7 @@ func openURL(url string) {
 		cmd = exec.Command("cmd", "/c", "start", url)
 	}
 	if cmd != nil {
-		cmd.Start()
+		_ = cmd.Start()
 	}
 }
 
@@ -129,7 +129,7 @@ func spaFileServer(appFS fs.FS) http.Handler {
 			http.Error(w, "index.html missing", http.StatusInternalServerError)
 			return
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 
 		stat, err := f.Stat()
 		if err != nil {

@@ -70,7 +70,11 @@ func recordCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			cfg.Profile = runner.ProfileMode(profileStr)
 			switch cfg.Profile {
@@ -118,7 +122,11 @@ func listCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			runs, err := database.ListRuns(limit, branch, since)
 			if err != nil {
@@ -133,8 +141,8 @@ func listCmd() *cobra.Command {
 			cyan := color.New(color.FgCyan)
 			dim := color.New(color.Faint)
 
-			cyan.Printf("%-6s %-10s %-12s %-20s %s\n", "ID", "Commit", "Branch", "Date", "Notes")
-			dim.Println(strings.Repeat("-", 70))
+			_, _ = cyan.Printf("%-6s %-10s %-12s %-20s %s\n", "ID", "Commit", "Branch", "Date", "Notes")
+			_, _ = dim.Println(strings.Repeat("-", 70))
 
 			for _, r := range runs {
 				count, err := database.CountResultsForRun(r.ID)
@@ -174,7 +182,11 @@ func showCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			var run *db.Run
 			if id, err := strconv.ParseInt(args[0], 10, 64); err == nil {
@@ -192,8 +204,8 @@ func showCmd() *cobra.Command {
 			cyan := color.New(color.FgCyan)
 			dim := color.New(color.Faint)
 
-			cyan.Printf("Run #%d\n", run.ID)
-			dim.Println(strings.Repeat("-", 50))
+			_, _ = cyan.Printf("Run #%d\n", run.ID)
+			_, _ = dim.Println(strings.Repeat("-", 50))
 			fmt.Printf("Commit:  %s\n", run.CommitHash)
 			fmt.Printf("Message: %s\n", run.CommitMessage)
 			fmt.Printf("Branch:  %s\n", run.Branch)
@@ -229,7 +241,11 @@ func compareCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			var run1, run2 *db.Run
 
@@ -268,10 +284,10 @@ func compareCmd() *cobra.Command {
 			green := color.New(color.FgGreen)
 			yellow := color.New(color.FgYellow)
 
-			cyan.Printf("Comparing %s vs %s\n", run1.CommitHash, run2.CommitHash)
-			dim.Printf("Baseline: %s (%s)\n", run1.CommitHash, shortDate(run1.RunDate))
-			dim.Printf("Current:  %s (%s)\n", run2.CommitHash, shortDate(run2.RunDate))
-			dim.Printf("Threshold: %.1f%%\n\n", threshold)
+			_, _ = cyan.Printf("Comparing %s vs %s\n", run1.CommitHash, run2.CommitHash)
+			_, _ = dim.Printf("Baseline: %s (%s)\n", run1.CommitHash, shortDate(run1.RunDate))
+			_, _ = dim.Printf("Current:  %s (%s)\n", run2.CommitHash, shortDate(run2.RunDate))
+			_, _ = dim.Printf("Threshold: %.1f%%\n\n", threshold)
 
 			type resultKey struct {
 				Category string
@@ -282,8 +298,8 @@ func compareCmd() *cobra.Command {
 				results2Map[resultKey{Category: r.Category, Name: r.Name}] = r
 			}
 
-			cyan.Printf("%-50s %12s %12s %10s\n", "Benchmark", "Baseline", "Current", "Change")
-			dim.Println(strings.Repeat("-", 90))
+			_, _ = cyan.Printf("%-50s %12s %12s %10s\n", "Benchmark", "Baseline", "Current", "Change")
+			_, _ = dim.Println(strings.Repeat("-", 90))
 
 			regressions := 0
 			improvements := 0
@@ -316,29 +332,29 @@ func compareCmd() *cobra.Command {
 					formatDuration(r2.AvgNs))
 
 				if !changeValid {
-					yellow.Printf("n/a\n")
+					_, _ = yellow.Printf("n/a\n")
 					continue
 				}
 
 				if change > threshold {
-					red.Printf("+%.1f%% REGRESSION\n", change)
+					_, _ = red.Printf("+%.1f%% REGRESSION\n", change)
 					regressions++
 				} else if change < -5 {
-					green.Printf("%.1f%%\n", change)
+					_, _ = green.Printf("%.1f%%\n", change)
 					improvements++
 				} else {
-					yellow.Printf("%+.1f%%\n", change)
+					_, _ = yellow.Printf("%+.1f%%\n", change)
 				}
 			}
 
-			dim.Println(strings.Repeat("-", 90))
+			_, _ = dim.Println(strings.Repeat("-", 90))
 			fmt.Printf("\nSummary: %d regressions, %d improvements\n", regressions, improvements)
 
 			if regressions > 0 {
-				red.Println("Performance regressions detected!")
+				_, _ = red.Println("Performance regressions detected!")
 				return nil
 			}
-			green.Println("No regressions detected")
+			_, _ = green.Println("No regressions detected")
 			return nil
 		},
 	}
@@ -361,7 +377,11 @@ func trendCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			trends, err := database.GetTrend(args[0], limit)
 			if err != nil {
@@ -376,9 +396,9 @@ func trendCmd() *cobra.Command {
 			cyan := color.New(color.FgCyan)
 			dim := color.New(color.Faint)
 
-			cyan.Printf("Trend for: %s\n\n", trends[0].Result.Name)
-			cyan.Printf("%-10s %-12s %12s %s\n", "Commit", "Date", "Avg", "Trend")
-			dim.Println(strings.Repeat("-", 60))
+			_, _ = cyan.Printf("Trend for: %s\n\n", trends[0].Result.Name)
+			_, _ = cyan.Printf("%-10s %-12s %12s %s\n", "Commit", "Date", "Avg", "Trend")
+			_, _ = dim.Println(strings.Repeat("-", 60))
 
 			var maxNs int64
 			for _, t := range trends {
@@ -432,9 +452,14 @@ func deleteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			if before != "" {
+
 				count, err := database.DeleteRunsBefore(before)
 				if err != nil {
 					return err
@@ -478,7 +503,11 @@ func serveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			addr := fmt.Sprintf(":%d", port)
 			server := web.NewServer(database, addr)
@@ -502,7 +531,11 @@ func hasCommitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			exists, err := database.HasCommit(args[0])
 			if err != nil {
@@ -530,7 +563,11 @@ func latestCommitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			run, err := database.GetLatestRun()
 			if err != nil {
@@ -578,7 +615,11 @@ Example:
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			cfg.Profile = runner.ProfileMode(profileStr)
 			switch cfg.Profile {
@@ -640,7 +681,11 @@ func flamegraphListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			run, err := database.GetRunByCommit(args[0])
 			if err != nil {
@@ -658,7 +703,7 @@ func flamegraphListCmd() *cobra.Command {
 			}
 
 			cyan := color.New(color.FgCyan)
-			cyan.Printf("Flamegraphs for %s (%d benchmarks):\n", run.CommitHash, len(benchmarks))
+			_, _ = cyan.Printf("Flamegraphs for %s (%d benchmarks):\n", run.CommitHash, len(benchmarks))
 			for _, name := range benchmarks {
 				fmt.Printf("  - %s\n", name)
 			}
@@ -681,7 +726,11 @@ func flamegraphSVGCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			run, err := database.GetRunByCommit(args[0])
 			if err != nil {
@@ -706,7 +755,7 @@ func flamegraphSVGCmd() *cobra.Command {
 				return nil
 			}
 
-			os.Stdout.Write(svg)
+			_, _ = os.Stdout.Write(svg)
 			return nil
 		},
 	}
@@ -726,7 +775,11 @@ func flamegraphStacksCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			run, err := database.GetRunByCommit(args[0])
 			if err != nil {
@@ -756,7 +809,11 @@ func flamegraphDiffCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer database.Close()
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
 
 			run1, err := database.GetRunByCommit(args[0])
 			if err != nil {
@@ -782,7 +839,7 @@ func flamegraphDiffCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer os.RemoveAll(tmpDir)
+			defer func() { _ = os.RemoveAll(tmpDir) }()
 
 			stacks1 := filepath.Join(tmpDir, "stacks1.folded")
 			stacks2 := filepath.Join(tmpDir, "stacks2.folded")
@@ -807,7 +864,7 @@ func flamegraphDiffCmd() *cobra.Command {
 				return fmt.Errorf("inferno-flamegraph: %w", err)
 			}
 
-			os.Stdout.Write(svg)
+			_, _ = os.Stdout.Write(svg)
 			return nil
 		},
 	}
@@ -870,7 +927,7 @@ func runBackfill(ctx context.Context, database *db.DB, count int, start string, 
 	cyan := color.New(color.FgCyan)
 	yellow := color.New(color.FgYellow)
 
-	cyan.Printf("Found %d unrecorded commits (of %d checked):\n\n", len(unrecorded), len(commits))
+	_, _ = cyan.Printf("Found %d unrecorded commits (of %d checked):\n\n", len(unrecorded), len(commits))
 	for i, c := range unrecorded {
 		msg := c.message
 		if len(msg) > 50 {
@@ -881,7 +938,7 @@ func runBackfill(ctx context.Context, database *db.DB, count int, start string, 
 	fmt.Println()
 
 	if dryRun {
-		yellow.Println("Dry run - no benchmarks recorded")
+		_, _ = yellow.Println("Dry run - no benchmarks recorded")
 		return nil
 	}
 
@@ -897,7 +954,7 @@ func runBackfill(ctx context.Context, database *db.DB, count int, start string, 
 	}
 
 	for i, c := range unrecorded {
-		cyan.Printf("\n[%d/%d] Recording %s: %s\n", i+1, len(unrecorded), c.short, truncate(c.message, 50))
+		_, _ = cyan.Printf("\n[%d/%d] Recording %s: %s\n", i+1, len(unrecorded), c.short, truncate(c.message, 50))
 
 		if _, err := runGitCommand(ctx, cfg.RepoPath, "checkout", c.hash); err != nil {
 			color.Red("  Failed to checkout: %v", err)
@@ -929,11 +986,11 @@ func runBackfill(ctx context.Context, database *db.DB, count int, start string, 
 		}
 
 		// Reset repo to clean state
-		runGitCommand(ctx, cfg.RepoPath, "reset", "--hard", "HEAD")
+		_, _ = runGitCommand(ctx, cfg.RepoPath, "reset", "--hard", "HEAD")
 	}
 
 	if _, err := runGitCommand(ctx, cfg.RepoPath, "checkout", origHead); err != nil {
-		yellow.Printf("\nWarning: failed to restore HEAD to %s: %v\n", shortHash(origHead), err)
+		_, _ = yellow.Printf("\nWarning: failed to restore HEAD to %s: %v\n", shortHash(origHead), err)
 	}
 
 	color.Green("\nBackfill complete")
@@ -975,14 +1032,14 @@ func printResults(results []db.Result) {
 		maxNameLen = 50
 	}
 
-	cyan.Printf("%-*s %12s %12s %12s\n", maxNameLen, "Benchmark", "Min", "Avg", "Max")
-	dim.Println(strings.Repeat("-", maxNameLen+40))
+	_, _ = cyan.Printf("%-*s %12s %12s %12s\n", maxNameLen, "Benchmark", "Min", "Avg", "Max")
+	_, _ = dim.Println(strings.Repeat("-", maxNameLen+40))
 
 	currentCategory := ""
 	for _, r := range results {
 		if r.Category != currentCategory {
 			currentCategory = r.Category
-			cyan.Printf("\n%s\n", currentCategory)
+			_, _ = cyan.Printf("\n%s\n", currentCategory)
 		}
 
 		name := r.Name

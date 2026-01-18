@@ -154,13 +154,13 @@ func (pm *PProfManager) serve(w http.ResponseWriter, r *http.Request, runID, res
 			return
 		}
 		if _, err := tmp.Write(data); err != nil {
-			tmp.Close()
-			os.Remove(tmp.Name())
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
 			http.Error(w, "failed to write profile", http.StatusInternalServerError)
 			return
 		}
 		if err := tmp.Close(); err != nil {
-			os.Remove(tmp.Name())
+			_ = os.Remove(tmp.Name())
 			http.Error(w, "failed to finalize profile", http.StatusInternalServerError)
 			return
 		}
@@ -169,7 +169,7 @@ func (pm *PProfManager) serve(w http.ResponseWriter, r *http.Request, runID, res
 		handlers, err := loadPProfHandlers(tmp.Name())
 		pm.loadMu.Unlock()
 		if err != nil {
-			os.Remove(tmp.Name())
+			_ = os.Remove(tmp.Name())
 			http.Error(w, fmt.Sprintf("failed to load pprof: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -185,7 +185,7 @@ func (pm *PProfManager) serve(w http.ResponseWriter, r *http.Request, runID, res
 		// Double check locking
 		if existing, ok := pm.sessions[key]; ok {
 			// Race condition lost, use existing
-			os.Remove(tmp.Name()) // Clean up our unused temp
+			_ = os.Remove(tmp.Name()) // Clean up our unused temp
 			sess = existing
 			sess.lastAccess = now
 			sess.active++

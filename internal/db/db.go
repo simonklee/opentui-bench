@@ -107,24 +107,24 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	if err := sqlDB.Ping(); err != nil {
-		sqlDB.Close()
+		_ = sqlDB.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
 	if _, err := sqlDB.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		sqlDB.Close()
+		_ = sqlDB.Close()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 
 	database := &DB{DB: sqlDB, path: dbPath}
 
 	if err := database.migrate(); err != nil {
-		sqlDB.Close()
+		_ = sqlDB.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
 
 	if _, err := sqlDB.Exec(schemaSQL); err != nil {
-		sqlDB.Close()
+		_ = sqlDB.Close()
 		return nil, fmt.Errorf("initialize schema: %w", err)
 	}
 
@@ -181,14 +181,14 @@ func (db *DB) checkOldFlamegraphSchema() (bool, error) {
 		var notNull, pk int
 		var dfltValue sql.NullString
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return false, err
 		}
 		if name == "folded_stacks" || name == "svg" {
 			hasOldSchema = true
 		}
 	}
-	rows.Close()
+	_ = rows.Close()
 	if err := rows.Err(); err != nil {
 		return false, err
 	}
@@ -214,12 +214,13 @@ func (db *DB) readOldFlamegraphs() ([]oldFlamegraph, error) {
 	for rows.Next() {
 		var fg oldFlamegraph
 		if err := rows.Scan(&fg.id, &fg.runID, &fg.benchmarkName, &fg.foldedStacks, &fg.samplingFreq, &fg.createdAt); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("scan old flamegraph: %w", err)
 		}
 		oldData = append(oldData, fg)
 	}
-	rows.Close()
+	_ = rows.Close()
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read old flamegraphs: %w", err)
 	}
@@ -231,7 +232,7 @@ func (db *DB) performFlamegraphMigration(oldData []oldFlamegraph) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.Exec(`DROP TABLE flamegraphs`); err != nil {
 		return fmt.Errorf("drop old table: %w", err)
@@ -332,7 +333,7 @@ func gzipDecompress(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 	return io.ReadAll(r)
 }
 
@@ -393,7 +394,11 @@ func (db *DB) ListRuns(limit int, branch string, since string) ([]Run, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	var runs []Run
 	for rows.Next() {
@@ -492,7 +497,11 @@ func (db *DB) GetResultsForRun(runID int64) ([]Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	var results []Result
 	for rows.Next() {
@@ -551,7 +560,11 @@ func (db *DB) ListProfiledResults(runID int64) ([]ProfiledResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	var results []ProfiledResult
 	for rows.Next() {
@@ -578,7 +591,11 @@ func (db *DB) ListFlamegraphResults(runID int64) ([]ProfiledResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	var results []ProfiledResult
 	for rows.Next() {
@@ -601,7 +618,11 @@ func (db *DB) GetMemStatsForResult(resultID int64) ([]MemStat, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	var stats []MemStat
 	for rows.Next() {
@@ -646,7 +667,11 @@ func (db *DB) GetTrend(namePattern string, limit int) ([]struct {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	var results []struct {
 		Run    Run
@@ -733,7 +758,11 @@ func (db *DB) ListFlamegraphBenchmarks(runID int64) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	names := []string{}
 	for rows.Next() {
@@ -760,7 +789,11 @@ func (db *DB) GetRecentRunIDs(limit int) ([]int64, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	var ids []int64
 	for rows.Next() {
@@ -821,7 +854,11 @@ func (db *DB) ListArtifactsForResult(resultID int64) ([]Artifact, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	var artifacts []Artifact
 	for rows.Next() {
@@ -864,7 +901,11 @@ func (db *DB) GetComparableRunsWindow(runID int64, window int) ([]Run, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	var runs []Run
 	for rows.Next() {
@@ -912,7 +953,11 @@ func (db *DB) GetResultsForBenchmarkInRuns(benchmarkName string, runIDs []int64)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	results := make(map[int64]Result)
 	for rows.Next() {
@@ -949,7 +994,11 @@ func (db *DB) GetDistinctBenchmarkNames(runIDs []int64) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
 	var names []string
 	for rows.Next() {

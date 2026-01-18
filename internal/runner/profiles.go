@@ -19,7 +19,7 @@ func CaptureCPUProfile(ctx context.Context, r CmdRunner, benchBin string, benchN
 	if err != nil {
 		return nil, "", err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 
 	perfData := filepath.Join(tmp, "perf.data")
 	pbGz := filepath.Join(tmp, "profile.pb.gz")

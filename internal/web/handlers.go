@@ -436,7 +436,7 @@ func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var names []string
 	for rows.Next() {
@@ -473,7 +473,7 @@ func (s *Server) handleCategories(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var categories []string
 	for rows.Next() {
@@ -570,7 +570,7 @@ func generateCallgraphSVG(ctx context.Context, profileData []byte) ([]byte, erro
 		_ = os.Remove(tmp.Name())
 		return nil, fmt.Errorf("close temp profile: %w", err)
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
 
 	cmd := exec.CommandContext(ctx, "go", "tool", "pprof", "-svg", tmp.Name())
 	output, err := cmd.CombinedOutput()
@@ -760,14 +760,14 @@ func (s *Server) handleFlamegraphSVG(w http.ResponseWriter, r *http.Request) {
 	if s.svgCache != nil {
 		if svg, ok := s.svgCache.Get(runID, cacheKey); ok {
 			w.Header().Set("Content-Type", "image/svg+xml")
-			w.Write(svg)
+			_, _ = w.Write(svg)
 			return
 		}
 		if legacyCacheKey != cacheKey {
 			if svg, ok := s.svgCache.Get(runID, legacyCacheKey); ok {
 				_ = s.svgCache.Put(runID, cacheKey, svg)
 				w.Header().Set("Content-Type", "image/svg+xml")
-				w.Write(svg)
+				_, _ = w.Write(svg)
 				return
 			}
 		}
@@ -779,9 +779,10 @@ func (s *Server) handleFlamegraphSVG(w http.ResponseWriter, r *http.Request) {
 			_ = s.svgCache.Put(runID, cacheKey, cached.DataBlob)
 		}
 		w.Header().Set("Content-Type", "image/svg+xml")
-		w.Write(cached.DataBlob)
+		_, _ = w.Write(cached.DataBlob)
 		return
 	}
+
 	if !errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -816,11 +817,12 @@ func (s *Server) handleFlamegraphSVG(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
 		if s.svgCache != nil {
 			_ = s.svgCache.Put(runID, cacheKey, svg)
 		}
 		w.Header().Set("Content-Type", "image/svg+xml")
-		w.Write(svg)
+		_, _ = w.Write(svg)
 		return
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -875,7 +877,7 @@ func (s *Server) handleFlamegraphSVG(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "image/svg+xml")
-	w.Write(svg)
+	_, _ = w.Write(svg)
 }
 
 func (s *Server) handleCallgraphSVG(w http.ResponseWriter, r *http.Request) {
@@ -923,14 +925,14 @@ func (s *Server) handleCallgraphSVG(w http.ResponseWriter, r *http.Request) {
 	if s.svgCache != nil {
 		if svg, ok := s.svgCache.Get(runID, cacheKey); ok {
 			w.Header().Set("Content-Type", "image/svg+xml")
-			w.Write(svg)
+			_, _ = w.Write(svg)
 			return
 		}
 		if legacyCacheKey != cacheKey {
 			if svg, ok := s.svgCache.Get(runID, legacyCacheKey); ok {
 				_ = s.svgCache.Put(runID, cacheKey, svg)
 				w.Header().Set("Content-Type", "image/svg+xml")
-				w.Write(svg)
+				_, _ = w.Write(svg)
 				return
 			}
 		}
@@ -942,9 +944,10 @@ func (s *Server) handleCallgraphSVG(w http.ResponseWriter, r *http.Request) {
 			_ = s.svgCache.Put(runID, cacheKey, cached.DataBlob)
 		}
 		w.Header().Set("Content-Type", "image/svg+xml")
-		w.Write(cached.DataBlob)
+		_, _ = w.Write(cached.DataBlob)
 		return
 	}
+
 	if !errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1001,7 +1004,7 @@ func (s *Server) handleCallgraphSVG(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "image/svg+xml")
-	w.Write(svg)
+	_, _ = w.Write(svg)
 }
 
 func (s *Server) handleArtifactList(w http.ResponseWriter, r *http.Request) {
@@ -1142,7 +1145,7 @@ func (s *Server) handleArtifactDownload(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
-	w.Write(artifact.DataBlob)
+	_, _ = w.Write(artifact.DataBlob)
 }
 
 func (s *Server) ensureResultBelongsToRun(runID int64, resultID int64) error {
@@ -1174,14 +1177,14 @@ func (s *Server) handleDatabaseDownload(w http.ResponseWriter, r *http.Request) 
 	dbPath := s.db.Path()
 
 	// Checkpoint WAL for consistency
-	s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	_, _ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 
 	f, err := os.Open(dbPath)
 	if err != nil {
 		http.Error(w, "Failed to open database", http.StatusInternalServerError)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	stat, err := f.Stat()
 	if err != nil {
@@ -1210,7 +1213,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(err, sql.ErrNoRows) {
 				// No runs yet, return empty response
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"run_id":          nil,
 					"window":          defaultWindow,
 					"min_points":      defaultMinPoints,
@@ -1258,7 +1261,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 
 	if len(runs) == 0 {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"run_id":               runID,
 			"window":               window,
 			"min_points":           minPoints,

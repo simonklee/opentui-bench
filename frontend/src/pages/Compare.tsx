@@ -202,7 +202,7 @@ const Compare: Component = () => {
             <div class="flex flex-col gap-3">
               <div class="flex items-center justify-between">
                 <label
-                  htmlFor="baseline-select"
+                  for="baseline-select"
                   class="text-[11px] font-bold text-text-muted uppercase tracking-widest"
                 >
                   Baseline
@@ -254,7 +254,7 @@ const Compare: Component = () => {
             <div class="flex flex-col gap-3">
               <div class="flex items-center justify-between">
                 <label
-                  htmlFor="current-select"
+                  for="current-select"
                   class="text-[11px] font-bold text-text-muted uppercase tracking-widest"
                 >
                   Current

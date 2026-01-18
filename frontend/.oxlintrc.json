@@ -74,7 +74,7 @@
     "jsx_a11y/html-has-lang": "warn",
     "jsx_a11y/iframe-has-title": "warn",
     "jsx_a11y/img-redundant-alt": "warn",
-    "jsx_a11y/label-has-associated-control": "warn",
+    "jsx_a11y/label-has-associated-control": "allow",
     "jsx_a11y/lang": "warn",
     "jsx_a11y/media-has-caption": "warn",
     "jsx_a11y/mouse-events-have-key-events": "warn",
