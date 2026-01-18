@@ -12,7 +12,7 @@ const RunsList: Component = () => {
       <div class="flex-none h-[57px] px-6 border-b border-border bg-bg-dark flex justify-between items-center">
         <h2 class="text-[14px] font-bold text-black uppercase tracking-widest">Recorded Runs</h2>
       </div>
-      
+
       <StatsBar runs={runs()} loading={runs.loading} />
       <RunsTable runs={runs()} loading={runs.loading} />
     </div>

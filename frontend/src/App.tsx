@@ -20,21 +20,19 @@ const Layout: ParentComponent = (props) => {
     else setIsSidebarExpanded(true);
   };
 
-  onMount(() => window.addEventListener('resize', handleResize));
-  onCleanup(() => window.removeEventListener('resize', handleResize));
+  onMount(() => window.addEventListener("resize", handleResize));
+  onCleanup(() => window.removeEventListener("resize", handleResize));
 
   return (
-    <div 
-        class="grid h-screen w-screen overflow-hidden transition-all duration-300 ease-in-out"
-        classList={{
-            "grid-cols-[240px_1fr]": isSidebarExpanded(),
-            "grid-cols-[60px_1fr]": !isSidebarExpanded()
-        }}
+    <div
+      class="grid h-screen w-screen overflow-hidden transition-all duration-300 ease-in-out"
+      classList={{
+        "grid-cols-[240px_1fr]": isSidebarExpanded(),
+        "grid-cols-[60px_1fr]": !isSidebarExpanded(),
+      }}
     >
       <Sidebar />
-      <main class="bg-bg-dark relative flex flex-col overflow-hidden">
-        {props.children}
-      </main>
+      <main class="bg-bg-dark relative flex flex-col overflow-hidden">{props.children}</main>
       <HelpModal isOpen={isHelpOpen()} onClose={toggleHelp} />
     </div>
   );

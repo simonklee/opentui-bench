@@ -29,3 +29,15 @@ frontend-build: ## Build frontend assets for embedding
 
 backend-build: ## Build the backend binary
 	$(GO) build -o $(BINARY) ./cmd/bench
+
+fmt: ## Format frontend code with oxfmt
+	cd $(FRONTEND_DIR) && $(BUN) run fmt
+
+fmt-check: ## Check frontend code formatting
+	cd $(FRONTEND_DIR) && $(BUN) run fmt:check
+
+lint: ## Lint frontend code with oxlint
+	cd $(FRONTEND_DIR) && $(BUN) run lint
+
+lint-fix: ## Lint and fix frontend code
+	cd $(FRONTEND_DIR) && $(BUN) run lint:fix

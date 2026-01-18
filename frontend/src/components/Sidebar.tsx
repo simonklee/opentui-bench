@@ -2,11 +2,7 @@ import { createResource } from "solid-js";
 import type { Component } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 import { api } from "../services/api";
-import {
-  lastViewedRunId,
-  isSidebarExpanded,
-  setIsSidebarExpanded,
-} from "../store";
+import { lastViewedRunId, isSidebarExpanded, setIsSidebarExpanded } from "../store";
 import { toggleHelp } from "../shortcuts";
 import {
   LayoutDashboard,
@@ -44,7 +40,7 @@ const Sidebar: Component = () => {
       // Pre-select the current run as "current" in compare
       navigate(`/compare?curr=${currentRunId}`);
     } else {
-      navigate('/compare');
+      navigate("/compare");
     }
   };
 
@@ -66,11 +62,7 @@ const Sidebar: Component = () => {
           class="text-text-muted hover:text-black p-1 transition-colors"
           title={isSidebarExpanded() ? "Collapse sidebar" : "Expand sidebar"}
         >
-          {isSidebarExpanded() ? (
-            <PanelLeftClose size={18} />
-          ) : (
-            <PanelLeftOpen size={18} />
-          )}
+          {isSidebarExpanded() ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
         </button>
       </div>
 
@@ -140,21 +132,14 @@ const Sidebar: Component = () => {
           >
             Export
           </a>
-          <span
-            class="cursor-pointer hover:text-black hover:underline ml-4"
-            onClick={toggleHelp}
-          >
+          <span class="cursor-pointer hover:text-black hover:underline ml-4" onClick={toggleHelp}>
             Shortcuts
           </span>
         </div>
         <div
           class={`transition-all duration-300 ${isSidebarExpanded() ? "opacity-0 w-0 overflow-hidden" : "opacity-100 w-auto"}`}
         >
-          <button
-            onClick={toggleHelp}
-            title="Shortcuts"
-            class="hover:text-black p-1"
-          >
+          <button onClick={toggleHelp} title="Shortcuts" class="hover:text-black p-1">
             <HelpCircle size={16} />
           </button>
         </div>

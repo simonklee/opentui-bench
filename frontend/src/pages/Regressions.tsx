@@ -11,7 +11,7 @@ const formatRelativeDate = (dateStr: string): string => {
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-  
+
   if (diffDays === 0) return "today";
   if (diffDays === 1) return "yesterday";
   if (diffDays < 7) return `${diffDays}d ago`;
@@ -30,7 +30,7 @@ const RegressionRow: Component<{ regression: Regression; runId?: number | null }
   };
 
   return (
-    <tr 
+    <tr
       class="border-b border-border hover:bg-bg-hover cursor-pointer transition-colors"
       onClick={handleClick}
     >
@@ -50,9 +50,10 @@ const RegressionRow: Component<{ regression: Regression; runId?: number | null }
         </div>
       </td>
       <td class="py-3 px-4">
-        <Show when={reg().introduced_commit_hash} fallback={
-          <span class="text-text-muted text-[12px]">-</span>
-        }>
+        <Show
+          when={reg().introduced_commit_hash}
+          fallback={<span class="text-text-muted text-[12px]">-</span>}
+        >
           <div class="font-mono text-[12px] text-accent hover:underline">
             {reg().introduced_commit_hash?.slice(0, 7)}
           </div>
@@ -95,21 +96,27 @@ const Regressions: Component = () => {
         </Show>
 
         <Show when={!data.loading && data()}>
-          <Show when={showInsufficientHistory()} fallback={
-            <Show when={hasRegressions()} fallback={
-              <div class="flex items-center gap-2 text-success">
-                <Check size={18} strokeWidth={3} />
-                <span class="text-[14px] font-medium">All benchmarks healthy</span>
-              </div>
-            }>
-              <div class="flex items-center gap-2 text-danger">
-                <AlertTriangle size={18} />
-                <span class="text-[14px] font-medium">
-                  {regressionCount()} regression{regressionCount() !== 1 ? 's' : ''} detected
-                </span>
-              </div>
-            </Show>
-          }>
+          <Show
+            when={showInsufficientHistory()}
+            fallback={
+              <Show
+                when={hasRegressions()}
+                fallback={
+                  <div class="flex items-center gap-2 text-success">
+                    <Check size={18} strokeWidth={3} />
+                    <span class="text-[14px] font-medium">All benchmarks healthy</span>
+                  </div>
+                }
+              >
+                <div class="flex items-center gap-2 text-danger">
+                  <AlertTriangle size={18} />
+                  <span class="text-[14px] font-medium">
+                    {regressionCount()} regression{regressionCount() !== 1 ? "s" : ""} detected
+                  </span>
+                </div>
+              </Show>
+            }
+          >
             <div class="flex items-center gap-2 text-warning">
               <AlertTriangle size={18} />
               <span class="text-[14px] font-medium">Not enough history for analysis</span>
@@ -146,13 +153,13 @@ const Regressions: Component = () => {
           </table>
         </Show>
 
-        <Show when={!data.loading && !hasRegressions() && !data.error && !showInsufficientHistory()}>
+        <Show
+          when={!data.loading && !hasRegressions() && !data.error && !showInsufficientHistory()}
+        >
           <div class="flex items-center justify-center h-full text-text-muted">
             <div class="text-center">
               <div class="text-[14px] mb-2">No regressions to show</div>
-              <div class="text-[12px]">
-                Performance is stable across recent runs
-              </div>
+              <div class="text-[12px]">Performance is stable across recent runs</div>
             </div>
           </div>
         </Show>

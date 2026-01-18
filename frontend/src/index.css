@@ -13,10 +13,12 @@
   --color-success: #1a7f37;
   --color-danger: #cf222e;
   --color-warning: #9a6700;
-  
+
   --font-mono: "JetBrains Mono", "SF Mono", "Segoe UI Mono", "Roboto Mono", monospace;
-  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
-  
+  --font-ui:
+    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial,
+    sans-serif;
+
   --shadow-nav-active: none;
 }
 
