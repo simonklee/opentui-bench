@@ -54,7 +54,7 @@ const BenchmarkFilterBar: Component<BenchmarkFilterBarProps> = (props) => {
         />
         <div class="relative flex-none">
           <select
-            class="appearance-none pl-3 pr-8 py-1.5 border border-border rounded-none text-[11px] bg-white text-black outline-none cursor-pointer uppercase tracking-wide font-medium hover:border-black transition-colors"
+            class="appearance-none pl-3 pr-8 py-1.5 border border-border rounded-none text-[11px] bg-white text-black outline-none cursor-pointer tracking-wide font-medium hover:border-black transition-colors"
             value={props.category}
             onChange={(e) => props.setCategory(e.currentTarget.value)}
           >
