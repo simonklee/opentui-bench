@@ -6,6 +6,8 @@ import type { Regression } from "../services/api";
 import { formatNs } from "../utils/format";
 import { Check, AlertTriangle, Loader2, ArrowRight } from "lucide-solid";
 
+const GITHUB_REPO_URL = "https://github.com/anomalyco/opentui";
+
 const formatRelativeDate = (dateStr: string): string => {
   const date = new Date(dateStr);
   const now = new Date();
@@ -19,14 +21,41 @@ const formatRelativeDate = (dateStr: string): string => {
   return `${Math.floor(diffDays / 30)}mo ago`;
 };
 
+const truncateMessage = (msg: string, maxLen = 50): string => {
+  const firstLine = msg.split("\n")[0] ?? "";
+  if (firstLine.length <= maxLen) return firstLine;
+  return firstLine.slice(0, maxLen - 1) + "…";
+};
+
+const CommitLink: Component<{ hash?: string; hashFull?: string }> = (props) => {
+  const handleClick = (e: MouseEvent) => {
+    e.stopPropagation();
+  };
+
+  return (
+    <Show when={props.hash && props.hashFull}>
+      <a
+        href={`${GITHUB_REPO_URL}/commit/${props.hashFull}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        class="font-mono text-[12px] text-accent hover:underline"
+        onClick={handleClick}
+      >
+        {props.hash?.slice(0, 7)}
+      </a>
+    </Show>
+  );
+};
+
 const RegressionRow: Component<{ regression: Regression; runId?: number | null }> = (props) => {
   const navigate = useNavigate();
   const reg = () => props.regression;
 
   const handleClick = () => {
-    const targetRunId = props.runId ?? reg().baseline_run_id;
-    // Navigate to the run that contains the latest result
-    navigate(`/benchmarks/${targetRunId}?bench_id=${reg().latest_result_id}`);
+    // Navigate to the run that introduced the regression
+    const targetRunId = reg().introduced_run_id ?? props.runId ?? reg().baseline_run_id;
+    const targetResultId = reg().introduced_result_id ?? reg().latest_result_id;
+    navigate(`/benchmarks/${targetRunId}?bench_id=${targetResultId}`);
   };
 
   return (
@@ -42,9 +71,7 @@ const RegressionRow: Component<{ regression: Regression; runId?: number | null }
         +{reg().change_percent.toFixed(1)}%
       </td>
       <td class="py-3 px-4">
-        <div class="font-mono text-[12px] text-accent hover:underline">
-          {reg().baseline_commit_hash?.slice(0, 7)}
-        </div>
+        <CommitLink hash={reg().baseline_commit_hash} hashFull={reg().baseline_commit_hash_full} />
         <div class="text-[11px] text-text-muted">
           {formatNs(reg().baseline_ci_lower_ns)} - {formatNs(reg().baseline_ci_upper_ns)}
         </div>
@@ -54,8 +81,16 @@ const RegressionRow: Component<{ regression: Regression; runId?: number | null }
           when={reg().introduced_commit_hash}
           fallback={<span class="text-text-muted text-[12px]">-</span>}
         >
-          <div class="font-mono text-[12px] text-accent hover:underline">
-            {reg().introduced_commit_hash?.slice(0, 7)}
+          <div class="flex items-baseline gap-1.5">
+            <CommitLink
+              hash={reg().introduced_commit_hash}
+              hashFull={reg().introduced_commit_hash_full}
+            />
+            <Show when={reg().introduced_commit_message}>
+              <span class="text-[11px] text-text-muted truncate max-w-[200px]">
+                {truncateMessage(reg().introduced_commit_message!)}
+              </span>
+            </Show>
           </div>
           <Show when={reg().introduced_run_date}>
             <div class="text-[11px] text-text-muted">

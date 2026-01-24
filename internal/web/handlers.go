@@ -1291,22 +1291,26 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	latestRunID := runs[0].ID
 
 	type regression struct {
-		Name                 string   `json:"name"`
-		Category             string   `json:"category"`
-		LatestResultID       int64    `json:"latest_result_id"`
-		LatestCILowerNs      int64    `json:"latest_ci_lower_ns"`
-		LatestCIUpperNs      int64    `json:"latest_ci_upper_ns"`
-		BaselineRunID        int64    `json:"baseline_run_id"`
-		BaselineCommitHash   string   `json:"baseline_commit_hash"`
-		BaselineCILowerNs    int64    `json:"baseline_ci_lower_ns"`
-		BaselineCIUpperNs    int64    `json:"baseline_ci_upper_ns"`
-		ChangePercent        float64  `json:"change_percent"`
-		MinEffectPercent     float64  `json:"min_effect_percent"`
-		PValue               *float64 `json:"p_value,omitempty"`
-		Alpha                float64  `json:"alpha"`
-		IntroducedRunID      *int64   `json:"introduced_run_id,omitempty"`
-		IntroducedCommitHash *string  `json:"introduced_commit_hash,omitempty"`
-		IntroducedRunDate    *string  `json:"introduced_run_date,omitempty"`
+		Name                     string   `json:"name"`
+		Category                 string   `json:"category"`
+		LatestResultID           int64    `json:"latest_result_id"`
+		LatestCILowerNs          int64    `json:"latest_ci_lower_ns"`
+		LatestCIUpperNs          int64    `json:"latest_ci_upper_ns"`
+		BaselineRunID            int64    `json:"baseline_run_id"`
+		BaselineCommitHash       string   `json:"baseline_commit_hash"`
+		BaselineCommitHashFull   string   `json:"baseline_commit_hash_full"`
+		BaselineCILowerNs        int64    `json:"baseline_ci_lower_ns"`
+		BaselineCIUpperNs        int64    `json:"baseline_ci_upper_ns"`
+		ChangePercent            float64  `json:"change_percent"`
+		MinEffectPercent         float64  `json:"min_effect_percent"`
+		PValue                   *float64 `json:"p_value,omitempty"`
+		Alpha                    float64  `json:"alpha"`
+		IntroducedRunID          *int64   `json:"introduced_run_id,omitempty"`
+		IntroducedResultID       *int64   `json:"introduced_result_id,omitempty"`
+		IntroducedCommitHash     *string  `json:"introduced_commit_hash,omitempty"`
+		IntroducedCommitHashFull *string  `json:"introduced_commit_hash_full,omitempty"`
+		IntroducedCommitMessage  *string  `json:"introduced_commit_message,omitempty"`
+		IntroducedRunDate        *string  `json:"introduced_run_date,omitempty"`
 	}
 
 	type regressionsResponse struct {
@@ -1413,6 +1417,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			// Add baseline commit hash
 			if baselineRun, ok := runByID[baseline.RunID]; ok {
 				reg.BaselineCommitHash = baselineRun.CommitHash
+				reg.BaselineCommitHashFull = baselineRun.CommitHashFull
 			}
 
 			// Add introducing run info
@@ -1420,7 +1425,12 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 				reg.IntroducedRunID = introducingID
 				if introRun, ok := runByID[*introducingID]; ok {
 					reg.IntroducedCommitHash = &introRun.CommitHash
+					reg.IntroducedCommitHashFull = &introRun.CommitHashFull
+					reg.IntroducedCommitMessage = &introRun.CommitMessage
 					reg.IntroducedRunDate = &introRun.RunDate
+				}
+				if introResult, ok := resultsMap[*introducingID]; ok {
+					reg.IntroducedResultID = &introResult.ID
 				}
 			}
 

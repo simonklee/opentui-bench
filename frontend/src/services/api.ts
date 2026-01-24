@@ -69,6 +69,7 @@ export interface Regression {
   latest_ci_upper_ns: number;
   baseline_run_id: number;
   baseline_commit_hash: string;
+  baseline_commit_hash_full: string;
   baseline_ci_lower_ns: number;
   baseline_ci_upper_ns: number;
   change_percent: number;
@@ -76,7 +77,10 @@ export interface Regression {
   p_value?: number;
   alpha: number;
   introduced_run_id?: number;
+  introduced_result_id?: number;
   introduced_commit_hash?: string;
+  introduced_commit_hash_full?: string;
+  introduced_commit_message?: string;
   introduced_run_date?: string;
 }
 
