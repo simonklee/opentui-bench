@@ -27,11 +27,11 @@ const TrendIndicator: Component<TrendIndicatorProps> = (props) => {
 
         const curr = props.trendData![currIndex]!;
         const prev = props.trendData![currIndex + 1]!; // Previous is next in array (older)
-        const diff = curr.avg_ns - prev.avg_ns;
+        const diff = curr.median_ns - prev.median_ns;
 
         let pctStr = "0.0%";
-        if (prev.avg_ns > 0) {
-          const pct = (diff / prev.avg_ns) * 100;
+        if (prev.median_ns > 0) {
+          const pct = (diff / prev.median_ns) * 100;
           pctStr = pct.toFixed(1) + "%";
         }
 

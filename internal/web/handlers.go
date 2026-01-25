@@ -253,16 +253,17 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 		Category string
 		Name     string
 	}
+	// Use P50Ns (median) for comparison - more robust to outliers
 	resultsBMap := make(map[resultKey]int64)
 	for _, r := range resultsB {
-		resultsBMap[resultKey{Category: r.Category, Name: r.Name}] = r.AvgNs
+		resultsBMap[resultKey{Category: r.Category, Name: r.Name}] = r.P50Ns
 	}
 
 	type comparison struct {
 		Name          string  `json:"name"`
 		Category      string  `json:"category"`
-		BaselineNs    int64   `json:"baseline_ns"`
-		CurrentNs     int64   `json:"current_ns"`
+		BaselineNs    int64   `json:"baseline_ns"` // Median of baseline
+		CurrentNs     int64   `json:"current_ns"`  // Median of current
 		ChangePercent float64 `json:"change_percent"`
 		IsRegression  bool    `json:"is_regression"`
 	}
@@ -271,16 +272,16 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 	threshold := 10.0
 
 	for _, rA := range resultsA {
-		if avgB, ok := resultsBMap[resultKey{Category: rA.Category, Name: rA.Name}]; ok {
+		if medianB, ok := resultsBMap[resultKey{Category: rA.Category, Name: rA.Name}]; ok {
 			var change float64
-			if rA.AvgNs != 0 {
-				change = float64(avgB-rA.AvgNs) / float64(rA.AvgNs) * 100
+			if rA.P50Ns != 0 {
+				change = float64(medianB-rA.P50Ns) / float64(rA.P50Ns) * 100
 			}
 			comparisons = append(comparisons, comparison{
 				Name:          rA.Name,
 				Category:      rA.Category,
-				BaselineNs:    rA.AvgNs,
-				CurrentNs:     avgB,
+				BaselineNs:    rA.P50Ns,
+				CurrentNs:     medianB,
 				ChangePercent: change,
 				IsRegression:  change > threshold,
 			})
@@ -328,7 +329,8 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		ResultID         int64    `json:"result_id"`
 		CommitHash       string   `json:"commit_hash"`
 		RunDate          string   `json:"run_date"`
-		AvgNs            int64    `json:"avg_ns"`
+		AvgNs            int64    `json:"avg_ns"`    // Mean (kept for backwards compatibility)
+		MedianNs         int64    `json:"median_ns"` // Median (p50) - primary metric for regression
 		MinNs            int64    `json:"min_ns"`
 		MaxNs            int64    `json:"max_ns"`
 		StdDevNs         int64    `json:"std_dev_ns"`
@@ -358,7 +360,7 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		}
 		history = append(history, stats.RunStat{
 			RunID:       t.Run.ID,
-			Mean:        float64(t.Result.AvgNs),
+			Median:      float64(t.Result.P50Ns),
 			Sem:         sem,
 			SampleCount: t.Result.SampleCount,
 			StdDev:      float64(t.Result.StdDevNs),
@@ -373,7 +375,7 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 
 	var points []trendPoint
 	for i, t := range trends {
-		ciLower, ciUpper, sem := stats.MeanCI95(t.Result.AvgNs, t.Result.StdDevNs, t.Result.SampleCount)
+		ciLower, ciUpper, sem := stats.CI95(t.Result.P50Ns, t.Result.StdDevNs, t.Result.SampleCount)
 
 		point := trendPoint{
 			RunID:       t.Run.ID,
@@ -381,6 +383,7 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 			CommitHash:  t.Run.CommitHash,
 			RunDate:     t.Run.RunDate,
 			AvgNs:       t.Result.AvgNs,
+			MedianNs:    t.Result.P50Ns,
 			MinNs:       t.Result.MinNs,
 			MaxNs:       t.Result.MaxNs,
 			StdDevNs:    t.Result.StdDevNs,
@@ -1356,7 +1359,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			}
 			history = append(history, stats.RunStat{
 				RunID:       run.ID,
-				Mean:        float64(result.AvgNs),
+				Median:      float64(result.P50Ns),
 				Sem:         sem,
 				SampleCount: result.SampleCount,
 				StdDev:      float64(result.StdDevNs),
@@ -1378,7 +1381,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		}
 		latestStat := stats.RunStat{
 			RunID:       latestRunID,
-			Mean:        float64(latestResult.AvgNs),
+			Median:      float64(latestResult.P50Ns),
 			Sem:         latestSem,
 			SampleCount: latestResult.SampleCount,
 			StdDev:      float64(latestResult.StdDevNs),
@@ -1397,7 +1400,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			introducingID := stats.FindIntroducingRun(chronoHistory, baseline, defaultAlpha)
 
 			// Build CI for latest
-			ciLower, ciUpper, _ := stats.MeanCI95(latestResult.AvgNs, latestResult.StdDevNs, latestResult.SampleCount)
+			ciLower, ciUpper, _ := stats.CI95(latestResult.P50Ns, latestResult.StdDevNs, latestResult.SampleCount)
 
 			reg := regression{
 				Name:              latestResult.Name,

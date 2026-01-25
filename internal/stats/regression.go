@@ -6,19 +6,21 @@ import (
 )
 
 // RunStat represents the statistical summary of a single benchmark run.
+// Median is the primary metric for regression detection (robust to outliers).
 type RunStat struct {
 	RunID       int64
-	Mean        float64
-	Sem         float64 // Standard error of the mean
+	Median      float64 // Primary metric: p50 of sample measurements
+	Sem         float64 // Standard error (based on sample variance)
 	SampleCount int64
 	StdDev      float64
 }
 
 // BaselineStats represents the computed baseline from historical runs.
+// Uses median-based statistics for robustness against outliers.
 type BaselineStats struct {
 	RunID    int64   // ID of the run chosen as baseline reference
-	Mean     float64 // Weighted mean from random-effects model
-	Variance float64 // Combined variance from random-effects model
+	Median   float64 // Baseline median (median of run medians)
+	Variance float64 // Run-to-run variance of medians
 	CILower  float64 // 95% CI lower bound
 	CIUpper  float64 // 95% CI upper bound
 	CV       float64 // Coefficient of variation (run-to-run noise)
@@ -93,17 +95,19 @@ func TCriticalOneSided(df int, alpha float64) float64 {
 	return 2.326 // asymptotic z for 99% one-sided
 }
 
-// ComputeBaseline computes a stable baseline from historical runs using a random-effects model.
-// This captures both within-run variance (SEM) and run-to-run variance (machine noise).
+// ComputeBaseline computes a stable baseline from historical runs using median-based statistics.
+// Medians are inherently robust to outliers (GC pauses, OS scheduling), making this approach
+// more reliable than mean-based methods for benchmark comparison.
+//
 // Returns nil if there are fewer than minPoints valid runs.
 //
 // baselineOffset skips the most recent N runs in history. history must be ordered
 // newest-first when baselineOffset > 0.
 //
 // The returned BaselineStats contains:
-// - Mean: weighted mean from the random-effects model (used for detection)
-// - Variance: combined variance from the random-effects model (used for detection)
-// - CILower/CIUpper: 95% CI around the weighted mean (used for visualization)
+// - Median: median of run medians (doubly robust to outliers)
+// - Variance: run-to-run variance of medians (used for t-test)
+// - CILower/CIUpper: 95% CI around the baseline median
 // - RunID: ID of the selected baseline reference run
 // - CV: coefficient of variation for sensitivity tuning
 func ComputeBaseline(history []RunStat, minPoints int, baselineOffset int) (*BaselineStats, error) {
@@ -135,63 +139,56 @@ func ComputeBaseline(history []RunStat, minPoints int, baselineOffset int) (*Bas
 		return nil, ErrInsufficientData
 	}
 
-	// Compute random-effects model
-	means := make([]float64, len(valid))
+	// Collect medians from all valid runs
+	medians := make([]float64, len(valid))
 	sem2s := make([]float64, len(valid))
 	for i, s := range valid {
-		means[i] = s.Mean
+		medians[i] = s.Median
 		sem2s[i] = s.Sem * s.Sem
 	}
 
-	// Sample variance of means (between-run variance estimate)
-	meanOfMeans := mean(means)
-	s2 := variance(means, meanOfMeans)
+	// Compute median of medians (doubly robust to outliers)
+	baselineMedian := medianOfSlice(medians)
+
+	// Run-to-run variance of medians
+	meanOfMedians := mean(medians)
+	s2 := variance(medians, meanOfMedians)
 
 	// Mean of squared SEMs (within-run variance estimate)
 	meanSem2 := mean(sem2s)
 
-	// Between-run variance (tau^2) using DerSimonian-Laird estimator
+	// Combined variance estimate (similar to random-effects model)
+	// tau^2 represents between-run variance
 	tau2 := math.Max(0, s2-meanSem2)
+	combinedVar := meanSem2 + tau2
 
-	// Weighted mean using inverse-variance weights
-	var sumW, sumWM float64
-	for i, m := range means {
-		w := 1.0 / (sem2s[i] + tau2)
-		sumW += w
-		sumWM += w * m
+	// For small samples, use s2 directly as it's more conservative
+	if len(valid) < 10 {
+		combinedVar = s2 / float64(len(valid))
 	}
-
-	if sumW == 0 {
-		return nil, ErrInsufficientData
-	}
-
-	weightedMean := sumWM / sumW
-	weightedVar := 1.0 / sumW
 
 	// Coefficient of variation (CV) based on run-to-run variance
 	cv := 0.0
-	if meanOfMeans > 0 {
-		cv = math.Sqrt(s2) / meanOfMeans
+	if meanOfMedians > 0 {
+		cv = math.Sqrt(s2) / meanOfMedians
 	}
 
-	// Compute 95% CI around the weighted mean for visualization
-	// This CI represents the uncertainty in our baseline estimate
-	se := math.Sqrt(weightedVar)
-	// Use t-critical for df = len(valid) - 1, or z for large samples
+	// Compute 95% CI around the baseline median
+	se := math.Sqrt(combinedVar)
 	df := len(valid) - 1
 	tCrit := 1.96 // default z-value for large samples
 	if df > 0 && df < len(tCritical95) {
 		tCrit = tCritical95[df]
 	}
-	ciLower := weightedMean - tCrit*se
-	ciUpper := weightedMean + tCrit*se
+	ciLower := baselineMedian - tCrit*se
+	ciUpper := baselineMedian + tCrit*se
 
 	// Select a stable baseline run as reference (for identifying introducing runs)
-	// Pick the run whose mean is closest to the weighted mean
+	// Pick the run whose median is closest to the baseline median
 	var baselineRunID int64
 	minDist := math.MaxFloat64
 	for _, s := range valid {
-		dist := math.Abs(s.Mean - weightedMean)
+		dist := math.Abs(s.Median - baselineMedian)
 		if dist < minDist {
 			minDist = dist
 			baselineRunID = s.RunID
@@ -200,8 +197,8 @@ func ComputeBaseline(history []RunStat, minPoints int, baselineOffset int) (*Bas
 
 	return &BaselineStats{
 		RunID:    baselineRunID,
-		Mean:     weightedMean,
-		Variance: weightedVar,
+		Median:   baselineMedian,
+		Variance: combinedVar,
 		CILower:  ciLower,
 		CIUpper:  ciUpper,
 		CV:       cv,
@@ -209,7 +206,8 @@ func ComputeBaseline(history []RunStat, minPoints int, baselineOffset int) (*Bas
 }
 
 // DetectRegression tests if the latest run is statistically slower than the baseline.
-// Uses a one-sided t-test with the specified alpha level and a variance-tuned effect size gate.
+// Uses median-based comparison with a one-sided t-test and a variance-tuned effect size gate.
+// Medians are robust to outliers from GC pauses and OS scheduling.
 func DetectRegression(latest RunStat, baseline *BaselineStats, alpha float64) RegressionResult {
 	// Check if latest has valid data
 	if latest.SampleCount < 2 || latest.StdDev <= 0 {
@@ -228,8 +226,8 @@ func DetectRegression(latest RunStat, baseline *BaselineStats, alpha float64) Re
 	// Noisy benchmarks need larger effect to flag; stable ones can detect smaller changes
 	minEffectPct := math.Max(1.0, 2.0*baseline.CV*100.0)
 
-	// Compute the difference
-	diff := latest.Mean - baseline.Mean
+	// Compute the difference using medians
+	diff := latest.Median - baseline.Median
 
 	// Standard error of the difference
 	// Combines latest SEM with baseline variance
@@ -260,8 +258,8 @@ func DetectRegression(latest RunStat, baseline *BaselineStats, alpha float64) Re
 
 	// Effect size as percentage
 	effectPct := 0.0
-	if baseline.Mean > 0 {
-		effectPct = (diff / baseline.Mean) * 100.0
+	if baseline.Median > 0 {
+		effectPct = (diff / baseline.Median) * 100.0
 	}
 
 	// P-value approximation (one-sided)
@@ -344,6 +342,41 @@ func variance(values []float64, mean float64) float64 {
 		sumSq += d * d
 	}
 	return sumSq / float64(len(values)-1)
+}
+
+// medianOfSlice computes the median of a slice of float64 values.
+// Does not modify the input slice.
+func medianOfSlice(values []float64) float64 {
+	n := len(values)
+	if n == 0 {
+		return 0
+	}
+	if n == 1 {
+		return values[0]
+	}
+
+	// Make a copy to avoid modifying the input
+	sorted := make([]float64, n)
+	copy(sorted, values)
+	sortFloat64s(sorted)
+
+	if n%2 == 1 {
+		return sorted[n/2]
+	}
+	return (sorted[n/2-1] + sorted[n/2]) / 2
+}
+
+// sortFloat64s sorts a slice of float64 in ascending order (simple insertion sort for small slices).
+func sortFloat64s(values []float64) {
+	for i := 1; i < len(values); i++ {
+		key := values[i]
+		j := i - 1
+		for j >= 0 && values[j] > key {
+			values[j+1] = values[j]
+			j--
+		}
+		values[j+1] = key
+	}
 }
 
 // approximatePValue provides a rough p-value approximation for one-sided t-test.

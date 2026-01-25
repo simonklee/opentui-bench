@@ -37,9 +37,16 @@ var tCritical95 = []float64{
 	2.042,
 }
 
-func MeanCI95(avgNs, stdDevNs, sampleCount int64) (lower, upper, sem int64) {
+// CI95 computes a 95% confidence interval around the given value.
+// Uses standard error computed from sample standard deviation.
+// This works for both mean and median when the sample size is sufficient.
+//
+// For rigorous median CI, bootstrap methods would be more appropriate,
+// but the parametric approximation is acceptable for benchmark comparison
+// with typical sample sizes (3-30 samples).
+func CI95(valueNs, stdDevNs, sampleCount int64) (lower, upper, sem int64) {
 	if sampleCount < 2 || stdDevNs == 0 {
-		return avgNs, avgNs, 0
+		return valueNs, valueNs, 0
 	}
 
 	semF := float64(stdDevNs) / math.Sqrt(float64(sampleCount))
@@ -52,11 +59,11 @@ func MeanCI95(avgNs, stdDevNs, sampleCount int64) (lower, upper, sem int64) {
 	}
 
 	margin := tCrit * semF
-	lowerF := float64(avgNs) - margin
+	lowerF := float64(valueNs) - margin
 	if lowerF < 0 {
 		lowerF = 0
 	}
-	upperF := float64(avgNs) + margin
+	upperF := float64(valueNs) + margin
 
 	return int64(math.Round(lowerF)), int64(math.Round(upperF)), int64(math.Round(semF))
 }

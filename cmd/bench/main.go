@@ -314,10 +314,11 @@ func compareCmd() *cobra.Command {
 					continue
 				}
 
+				// Use P50Ns (median) for comparison - more robust to outliers
 				var change float64
 				changeValid := false
-				if r1.AvgNs > 0 {
-					change = float64(r2.AvgNs-r1.AvgNs) / float64(r1.AvgNs) * 100
+				if r1.P50Ns > 0 {
+					change = float64(r2.P50Ns-r1.P50Ns) / float64(r1.P50Ns) * 100
 					changeValid = true
 				}
 
@@ -328,8 +329,8 @@ func compareCmd() *cobra.Command {
 
 				fmt.Printf("%-50s %12s %12s ",
 					name,
-					formatDuration(r1.AvgNs),
-					formatDuration(r2.AvgNs))
+					formatDuration(r1.P50Ns),
+					formatDuration(r2.P50Ns))
 
 				if !changeValid {
 					_, _ = yellow.Printf("n/a\n")
@@ -397,13 +398,14 @@ func trendCmd() *cobra.Command {
 			dim := color.New(color.Faint)
 
 			_, _ = cyan.Printf("Trend for: %s\n\n", trends[0].Result.Name)
-			_, _ = cyan.Printf("%-10s %-12s %12s %s\n", "Commit", "Date", "Avg", "Trend")
+			_, _ = cyan.Printf("%-10s %-12s %12s %s\n", "Commit", "Date", "Median", "Trend")
 			_, _ = dim.Println(strings.Repeat("-", 60))
 
+			// Use P50Ns (median) for trend display - more robust to outliers
 			var maxNs int64
 			for _, t := range trends {
-				if t.Result.AvgNs > maxNs {
-					maxNs = t.Result.AvgNs
+				if t.Result.P50Ns > maxNs {
+					maxNs = t.Result.P50Ns
 				}
 			}
 
@@ -416,7 +418,7 @@ func trendCmd() *cobra.Command {
 
 				barLen := 0
 				if maxNs > 0 {
-					barLen = int(float64(t.Result.AvgNs) / float64(maxNs) * 20)
+					barLen = int(float64(t.Result.P50Ns) / float64(maxNs) * 20)
 				}
 				if barLen > 20 {
 					barLen = 20
@@ -428,7 +430,7 @@ func trendCmd() *cobra.Command {
 				fmt.Printf("%-10s %-12s %12s %s\n",
 					t.Run.CommitHash,
 					date,
-					formatDuration(t.Result.AvgNs),
+					formatDuration(t.Result.P50Ns),
 					bar)
 			}
 
