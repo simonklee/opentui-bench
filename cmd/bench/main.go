@@ -961,19 +961,6 @@ func runBackfill(ctx context.Context, database *db.DB, count int, start string, 
 			continue
 		}
 
-		// Apply tooling patch (benchmarks live in simonklee/local-dev)
-		out, err := runGitCommand(ctx, cfg.RepoPath, "cherry-pick", "simonklee/local-dev", "--no-commit")
-		if err != nil {
-			if strings.Contains(out, "previous cherry-pick is now empty") || strings.Contains(out, "nothing to commit") {
-				_, _ = runGitCommand(ctx, cfg.RepoPath, "cherry-pick", "--abort")
-			} else {
-				color.Yellow("  Warning: cherry-pick failed: %v", err)
-				_, _ = runGitCommand(ctx, cfg.RepoPath, "cherry-pick", "--abort")
-				_, _ = runGitCommand(ctx, cfg.RepoPath, "reset", "--hard", "HEAD")
-				continue
-			}
-		}
-
 		runCfg := cfg
 		runCfg.Notes = fmt.Sprintf("%s (commit %d/%d)", cfg.Notes, i+1, len(unrecorded))
 

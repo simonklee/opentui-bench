@@ -343,9 +343,8 @@ run_benchmarks() {
 	# Register cleanup to reset repo if we fail during processing
 	cleanup_register "reset_opentui"
 
-	# Checkout and apply tooling patch
+	# Checkout the commit
 	git checkout "$next_commit"
-	git cherry-pick simonklee/local-dev --no-commit || true
 
 	# Run benchmarks
 	cd "$BENCH_REPO"
