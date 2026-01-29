@@ -32,6 +32,7 @@ export interface TrendPoint {
   commit_hash: string;
   run_date: string;
   avg_ns: number;
+  median_ns: number; // Primary metric for regression detection (p50)
   min_ns: number;
   max_ns: number;
   std_dev_ns: number;

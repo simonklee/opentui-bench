@@ -129,10 +129,10 @@ const TrendChart: Component<Props> = (props) => {
 
   const chartData = (): any => {
     const data = showData();
-    const ciLower = data.map((d) => d.ci_lower_ns ?? d.avg_ns);
-    const ciUpper = data.map((d) => d.ci_upper_ns ?? d.avg_ns);
-    const sdLower = data.map((d) => Math.max(d.avg_ns - d.std_dev_ns, 0));
-    const sdUpper = data.map((d) => d.avg_ns + d.std_dev_ns);
+    const ciLower = data.map((d) => d.ci_lower_ns ?? d.median_ns);
+    const ciUpper = data.map((d) => d.ci_upper_ns ?? d.median_ns);
+    const sdLower = data.map((d) => Math.max(d.median_ns - d.std_dev_ns, 0));
+    const sdUpper = data.map((d) => d.median_ns + d.std_dev_ns);
 
     // Determine point colors based on regression status
     const currentRunId = props.currentRunId;
@@ -184,8 +184,8 @@ const TrendChart: Component<Props> = (props) => {
           fill: "-1",
         },
         {
-          label: "Average",
-          data: data.map((d) => d.avg_ns),
+          label: "Median",
+          data: data.map((d) => d.median_ns),
           borderColor: "#000000",
           backgroundColor: "#ffffff",
           borderWidth: 1.5,
@@ -258,10 +258,10 @@ const TrendChart: Component<Props> = (props) => {
             if (!d) {
               return "";
             }
-            const ciLower = d.ci_lower_ns ?? d.avg_ns;
-            const ciUpper = d.ci_upper_ns ?? d.avg_ns;
+            const ciLower = d.ci_lower_ns ?? d.median_ns;
+            const ciUpper = d.ci_upper_ns ?? d.median_ns;
             const lines = [
-              `Avg: ${formatNs(d.avg_ns)}`,
+              `Median: ${formatNs(d.median_ns)}`,
               `95% CI: ${formatNs(ciLower)} - ${formatNs(ciUpper)}`,
               `Range: ${formatNs(d.min_ns)} - ${formatNs(d.max_ns)}`,
               `Samples: ${d.sample_count}`,
