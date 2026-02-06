@@ -3,7 +3,6 @@ module opentui-bench
 go 1.25.0
 
 require (
-	github.com/fatih/color v1.18.0
 	github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e
 	github.com/spf13/cobra v1.10.2
 	modernc.org/sqlite v1.42.2
@@ -14,7 +13,6 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/ianlancetaylor/demangle v0.0.0-20240312041847-bd984b5ce465 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

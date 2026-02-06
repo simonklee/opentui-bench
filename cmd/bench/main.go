@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
 	"opentui-bench/internal/cache"
@@ -28,6 +27,20 @@ func defaultDBPath() string {
 		return "bench.db"
 	}
 	return filepath.Join(home, "insmo.com/opentui-bench", "bench.db")
+}
+
+// openDB opens the database and returns it with a close function that logs errors to stderr.
+func openDB() (*db.DB, func(), error) {
+	database, err := db.Open(dbPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := func() {
+		if err := database.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "error closing database: %v\n", err)
+		}
+	}
+	return database, cleanup, nil
 }
 
 func main() {
@@ -102,22 +115,18 @@ Remote usage:
 			}
 
 			// Local mode: Run with local DB (unchanged behavior)
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			runID, err := runner.Run(cmd.Context(), database, cfg)
 			if err != nil {
 				return err
 			}
 
-			color.Green("Recorded run #%d", runID)
+			fmt.Printf("Recorded run #%d\n", runID)
 			return nil
 		},
 	}
@@ -157,7 +166,7 @@ func recordRemote(ctx context.Context, cfg runner.RunConfig, apiURL, apiKey stri
 		return fmt.Errorf("post results to API: %w", err)
 	}
 
-	color.Green("Recorded run #%d (%d results) on %s", runID, len(parsed.Results), apiURL)
+	fmt.Printf("Recorded run #%d (%d results) on %s\n", runID, len(parsed.Results), apiURL)
 
 	var uploadErrors []string
 	uploaded := 0
@@ -183,7 +192,7 @@ func recordRemote(ctx context.Context, cfg runner.RunConfig, apiURL, apiKey stri
 	}
 
 	if uploaded > 0 {
-		color.Green("Uploaded %d artifacts", uploaded)
+		fmt.Printf("Uploaded %d artifacts\n", uploaded)
 	}
 
 	if len(uploadErrors) > 0 {
@@ -201,15 +210,11 @@ func listCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List recorded runs",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			runs, err := database.ListRuns(limit, branch, since)
 			if err != nil {
@@ -221,11 +226,7 @@ func listCmd() *cobra.Command {
 				return nil
 			}
 
-			cyan := color.New(color.FgCyan)
-			dim := color.New(color.Faint)
-
-			_, _ = cyan.Printf("%-6s %-10s %-12s %-20s %s\n", "ID", "Commit", "Branch", "Date", "Notes")
-			_, _ = dim.Println(strings.Repeat("-", 70))
+			fmt.Printf("%-6s %-10s %-12s %-20s %s\n", "ID", "Commit", "Branch", "Date", "Notes")
 
 			for _, r := range runs {
 				count, err := database.CountResultsForRun(r.ID)
@@ -261,15 +262,11 @@ func showCmd() *cobra.Command {
 		Short: "Show details of a run",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			var run *db.Run
 			if id, err := strconv.ParseInt(args[0], 10, 64); err == nil {
@@ -284,11 +281,7 @@ func showCmd() *cobra.Command {
 				}
 			}
 
-			cyan := color.New(color.FgCyan)
-			dim := color.New(color.Faint)
-
-			_, _ = cyan.Printf("Run #%d\n", run.ID)
-			_, _ = dim.Println(strings.Repeat("-", 50))
+			fmt.Printf("Run #%d\n", run.ID)
 			fmt.Printf("Commit:  %s\n", run.CommitHash)
 			fmt.Printf("Message: %s\n", run.CommitMessage)
 			fmt.Printf("Branch:  %s\n", run.Branch)
@@ -320,15 +313,11 @@ func compareCmd() *cobra.Command {
 		Short: "Compare two runs",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			var run1, run2 *db.Run
 
@@ -361,16 +350,10 @@ func compareCmd() *cobra.Command {
 				return err
 			}
 
-			cyan := color.New(color.FgCyan)
-			dim := color.New(color.Faint)
-			red := color.New(color.FgRed)
-			green := color.New(color.FgGreen)
-			yellow := color.New(color.FgYellow)
-
-			_, _ = cyan.Printf("Comparing %s vs %s\n", run1.CommitHash, run2.CommitHash)
-			_, _ = dim.Printf("Baseline: %s (%s)\n", run1.CommitHash, shortDate(run1.RunDate))
-			_, _ = dim.Printf("Current:  %s (%s)\n", run2.CommitHash, shortDate(run2.RunDate))
-			_, _ = dim.Printf("Threshold: %.1f%%\n\n", threshold)
+			fmt.Printf("Comparing %s vs %s\n", run1.CommitHash, run2.CommitHash)
+			fmt.Printf("Baseline: %s (%s)\n", run1.CommitHash, shortDate(run1.RunDate))
+			fmt.Printf("Current:  %s (%s)\n", run2.CommitHash, shortDate(run2.RunDate))
+			fmt.Printf("Threshold: %.1f%%\n\n", threshold)
 
 			type resultKey struct {
 				Category string
@@ -381,8 +364,7 @@ func compareCmd() *cobra.Command {
 				results2Map[resultKey{Category: r.Category, Name: r.Name}] = r
 			}
 
-			_, _ = cyan.Printf("%-50s %12s %12s %10s\n", "Benchmark", "Baseline", "Current", "Change")
-			_, _ = dim.Println(strings.Repeat("-", 90))
+			fmt.Printf("%-50s %12s %12s %10s\n", "Benchmark", "Baseline", "Current", "Change")
 
 			regressions := 0
 			improvements := 0
@@ -410,35 +392,34 @@ func compareCmd() *cobra.Command {
 					name = name[:45] + "..."
 				}
 
-				fmt.Printf("%-50s %12s %12s ",
-					name,
-					formatDuration(r1.P50Ns),
-					formatDuration(r2.P50Ns))
-
 				if !changeValid {
-					_, _ = yellow.Printf("n/a\n")
+					fmt.Printf("%-50s %12s %12s %10s\n",
+						name,
+						formatDuration(r1.P50Ns),
+						formatDuration(r2.P50Ns),
+						"n/a")
 					continue
 				}
 
+				indicator := ""
 				if change > threshold {
-					_, _ = red.Printf("+%.1f%% REGRESSION\n", change)
+					indicator = fmt.Sprintf("+%.1f%% REGRESSION", change)
 					regressions++
 				} else if change < -5 {
-					_, _ = green.Printf("%.1f%%\n", change)
+					indicator = fmt.Sprintf("%.1f%%", change)
 					improvements++
 				} else {
-					_, _ = yellow.Printf("%+.1f%%\n", change)
+					indicator = fmt.Sprintf("%+.1f%%", change)
 				}
+
+				fmt.Printf("%-50s %12s %12s %10s\n",
+					name,
+					formatDuration(r1.P50Ns),
+					formatDuration(r2.P50Ns),
+					indicator)
 			}
 
-			_, _ = dim.Println(strings.Repeat("-", 90))
 			fmt.Printf("\nSummary: %d regressions, %d improvements\n", regressions, improvements)
-
-			if regressions > 0 {
-				_, _ = red.Println("Performance regressions detected!")
-				return nil
-			}
-			_, _ = green.Println("No regressions detected")
 			return nil
 		},
 	}
@@ -457,15 +438,11 @@ func trendCmd() *cobra.Command {
 		Short: "Show performance trend over time",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			trends, err := database.GetTrend(args[0], limit, "")
 			if err != nil {
@@ -477,12 +454,8 @@ func trendCmd() *cobra.Command {
 				return nil
 			}
 
-			cyan := color.New(color.FgCyan)
-			dim := color.New(color.Faint)
-
-			_, _ = cyan.Printf("Trend for: %s\n\n", trends[0].Result.Name)
-			_, _ = cyan.Printf("%-10s %-12s %12s %s\n", "Commit", "Date", "Median", "Trend")
-			_, _ = dim.Println(strings.Repeat("-", 60))
+			fmt.Printf("Trend for: %s\n\n", trends[0].Result.Name)
+			fmt.Printf("%-10s %-12s %12s %s\n", "Commit", "Date", "Median", "Trend")
 
 			// Use P50Ns (median) for trend display - more robust to outliers
 			var maxNs int64
@@ -533,23 +506,18 @@ func deleteCmd() *cobra.Command {
 		Use:   "delete [run_id]",
 		Short: "Delete runs",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			if before != "" {
-
 				count, err := database.DeleteRunsBefore(before)
 				if err != nil {
 					return err
 				}
-				color.Green("Deleted %d runs before %s", count, before)
+				fmt.Printf("Deleted %d runs before %s\n", count, before)
 				return nil
 			}
 
@@ -566,7 +534,7 @@ func deleteCmd() *cobra.Command {
 				return err
 			}
 
-			color.Green("Deleted run #%d", id)
+			fmt.Printf("Deleted run #%d\n", id)
 			return nil
 		},
 	}
@@ -584,15 +552,11 @@ func serveCmd() *cobra.Command {
 		Use:   "serve",
 		Short: "Start web UI server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			addr := fmt.Sprintf(":%d", port)
 			server, err := web.NewServer(database, addr)
@@ -615,15 +579,11 @@ func hasCommitCmd() *cobra.Command {
 		Short: "Check if a commit has been recorded (exit 0 if exists, 1 if not)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			exists, err := database.HasCommit(args[0])
 			if err != nil {
@@ -647,15 +607,11 @@ func latestCommitCmd() *cobra.Command {
 		Use:   "latest-commit",
 		Short: "Print the most recently recorded commit hash (full)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			run, err := database.GetLatestRun()
 			if err != nil {
@@ -699,15 +655,11 @@ Example:
   # Backfill with CPU profiles
   bench backfill --repo ~/insmo.com/opentui --count 20 --profile cpu`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			cfg.Profile = runner.ProfileMode(profileStr)
 			switch cfg.Profile {
@@ -765,15 +717,11 @@ func flamegraphListCmd() *cobra.Command {
 		Short: "List available flamegraphs for a run",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			run, err := database.GetRunByCommit(args[0])
 			if err != nil {
@@ -790,8 +738,7 @@ func flamegraphListCmd() *cobra.Command {
 				return nil
 			}
 
-			cyan := color.New(color.FgCyan)
-			_, _ = cyan.Printf("Flamegraphs for %s (%d benchmarks):\n", run.CommitHash, len(benchmarks))
+			fmt.Printf("Flamegraphs for %s (%d benchmarks):\n", run.CommitHash, len(benchmarks))
 			for _, name := range benchmarks {
 				fmt.Printf("  - %s\n", name)
 			}
@@ -810,15 +757,11 @@ func flamegraphSVGCmd() *cobra.Command {
 		Short: "Output flamegraph SVG for a specific benchmark",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			run, err := database.GetRunByCommit(args[0])
 			if err != nil {
@@ -839,7 +782,7 @@ func flamegraphSVGCmd() *cobra.Command {
 				if err := os.WriteFile(outputFile, svg, 0o644); err != nil {
 					return fmt.Errorf("write file: %w", err)
 				}
-				color.Green("Wrote %s (%d bytes)", outputFile, len(svg))
+				fmt.Printf("Wrote %s (%d bytes)\n", outputFile, len(svg))
 				return nil
 			}
 
@@ -859,15 +802,11 @@ func flamegraphStacksCmd() *cobra.Command {
 		Short: "Output raw folded stacks for a specific benchmark",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			run, err := database.GetRunByCommit(args[0])
 			if err != nil {
@@ -893,15 +832,11 @@ func flamegraphDiffCmd() *cobra.Command {
 		Short: "Generate differential flamegraph between two commits for a benchmark",
 		Args:  cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			run1, err := database.GetRunByCommit(args[0])
 			if err != nil {
@@ -1014,15 +949,11 @@ Example:
 			}
 
 			// Local mode
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			return runWorkerLocal(ctx, database, repoPath, pollInterval, once)
 		},
@@ -1043,9 +974,6 @@ Example:
 
 // runWorkerLocal is the existing local-DB worker loop.
 func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollInterval time.Duration, once bool) error {
-	cyan := color.New(color.FgCyan)
-	yellow := color.New(color.FgYellow)
-
 	zigDir := filepath.Join(repoPath, "packages/core/src/zig")
 	if _, err := os.Stat(zigDir); os.IsNotExist(err) {
 		return fmt.Errorf("zig directory not found: %s", zigDir)
@@ -1054,7 +982,7 @@ func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollI
 	for {
 		job, err := database.ClaimNextPendingJob()
 		if err != nil {
-			color.Red("Error claiming job: %v", err)
+			fmt.Fprintf(os.Stderr, "error claiming job: %v\n", err)
 			if once {
 				return err
 			}
@@ -1069,16 +997,16 @@ func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollI
 			goto sleep
 		}
 
-		_, _ = cyan.Printf("Processing job #%d: branch=%s", job.ID, job.Branch)
+		fmt.Printf("Processing job #%d: branch=%s", job.ID, job.Branch)
 		if job.CommitHash != "" {
 			fmt.Printf(" commit=%s", shortHash(job.CommitHash))
 		}
 		fmt.Println()
 
 		if err := executeJobLocal(ctx, database, job, repoPath); err != nil {
-			color.Red("Job #%d failed: %v", job.ID, err)
+			fmt.Fprintf(os.Stderr, "job #%d failed: %v\n", job.ID, err)
 			if dbErr := database.FailJob(job.ID, err.Error()); dbErr != nil {
-				color.Red("Failed to update job status: %v", dbErr)
+				fmt.Fprintf(os.Stderr, "failed to update job status: %v\n", dbErr)
 			}
 		}
 
@@ -1088,7 +1016,7 @@ func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollI
 		continue
 
 	sleep:
-		_, _ = yellow.Printf("Waiting %s for next poll...\n", pollInterval)
+		fmt.Fprintf(os.Stderr, "Waiting %s for next poll...\n", pollInterval)
 		select {
 		case <-ctx.Done():
 			fmt.Println("Worker stopped")
@@ -1117,7 +1045,7 @@ func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath
 		}
 		fmt.Printf("  Resolved %s/%s to %s\n", repoURL, job.Branch, shortHash(checkoutRef))
 	} else {
-		_, _ = color.New(color.FgWhite).Printf("  Fetching %s...\n", repoURL)
+		fmt.Fprintf(os.Stderr, "  Fetching %s...\n", repoURL)
 		if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL); err != nil {
 			return fmt.Errorf("git fetch: %w", err)
 		}
@@ -1148,10 +1076,10 @@ func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath
 	// Ensure we restore the repo on exit
 	defer func() {
 		if _, err := runGitCommand(ctx, repoPath, "checkout", origHead); err != nil {
-			color.Red("Warning: failed to restore checkout to %s: %v", shortHash(origHead), err)
+			fmt.Fprintf(os.Stderr, "warning: failed to restore checkout to %s: %v\n", shortHash(origHead), err)
 		}
 		if _, err := runGitCommand(ctx, repoPath, "reset", "--hard", "HEAD"); err != nil {
-			color.Red("Warning: failed to reset HEAD: %v", err)
+			fmt.Fprintf(os.Stderr, "warning: failed to reset HEAD: %v\n", err)
 		}
 	}()
 
@@ -1171,7 +1099,7 @@ func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath
 	}
 
 	// Run benchmarks
-	color.White("  Running benchmarks (samples=%d, profile=%s)...", cfg.Samples, cfg.Profile)
+	fmt.Printf("  Running benchmarks (samples=%d, profile=%s)...\n", cfg.Samples, cfg.Profile)
 	runID, err := runner.Run(ctx, database, cfg)
 	if err != nil {
 		return fmt.Errorf("benchmark run failed: %w", err)
@@ -1182,15 +1110,12 @@ func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath
 		return fmt.Errorf("complete job: %w", err)
 	}
 
-	color.Green("  Job #%d completed (Run #%d)", job.ID, runID)
+	fmt.Printf("  Job #%d completed (Run #%d)\n", job.ID, runID)
 	return nil
 }
 
 // runWorkerRemote is the remote-API worker loop.
 func runWorkerRemote(ctx context.Context, remote *runner.RemoteRecorder, repoPath string, pollInterval time.Duration, once bool) error {
-	cyan := color.New(color.FgCyan)
-	yellow := color.New(color.FgYellow)
-
 	zigDir := filepath.Join(repoPath, "packages/core/src/zig")
 	if _, err := os.Stat(zigDir); os.IsNotExist(err) {
 		return fmt.Errorf("zig directory not found: %s", zigDir)
@@ -1199,7 +1124,7 @@ func runWorkerRemote(ctx context.Context, remote *runner.RemoteRecorder, repoPat
 	for {
 		job, err := remote.ClaimJob()
 		if err != nil {
-			color.Red("Error claiming job: %v", err)
+			fmt.Fprintf(os.Stderr, "error claiming job: %v\n", err)
 			if once {
 				return err
 			}
@@ -1214,19 +1139,19 @@ func runWorkerRemote(ctx context.Context, remote *runner.RemoteRecorder, repoPat
 			goto sleep
 		}
 
-		_, _ = cyan.Printf("Processing job #%d: branch=%s", job.ID, job.Branch)
+		fmt.Printf("Processing job #%d: branch=%s", job.ID, job.Branch)
 		if job.CommitHash != "" {
 			fmt.Printf(" commit=%s", shortHash(job.CommitHash))
 		}
 		fmt.Println()
 
 		if err := executeJobRemote(ctx, remote, job, repoPath); err != nil {
-			color.Red("Job #%d failed: %v", job.ID, err)
+			fmt.Fprintf(os.Stderr, "job #%d failed: %v\n", job.ID, err)
 			if updateErr := remote.UpdateJob(job.ID, map[string]interface{}{
 				"status": "failed",
 				"error":  err.Error(),
 			}); updateErr != nil {
-				color.Red("Failed to update job status: %v", updateErr)
+				fmt.Fprintf(os.Stderr, "failed to update job status: %v\n", updateErr)
 			}
 		}
 
@@ -1236,7 +1161,7 @@ func runWorkerRemote(ctx context.Context, remote *runner.RemoteRecorder, repoPat
 		continue
 
 	sleep:
-		_, _ = yellow.Printf("Waiting %s for next poll...\n", pollInterval)
+		fmt.Fprintf(os.Stderr, "Waiting %s for next poll...\n", pollInterval)
 		select {
 		case <-ctx.Done():
 			fmt.Println("Worker stopped")
@@ -1269,7 +1194,7 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 		}
 		fmt.Printf("  Resolved %s/%s to %s\n", repoURL, job.Branch, shortHash(checkoutRef))
 	} else {
-		_, _ = color.New(color.FgWhite).Printf("  Fetching %s...\n", repoURL)
+		fmt.Fprintf(os.Stderr, "  Fetching %s...\n", repoURL)
 		if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL); err != nil {
 			return fmt.Errorf("git fetch: %w", err)
 		}
@@ -1300,10 +1225,10 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 	// Ensure we restore the repo on exit
 	defer func() {
 		if _, err := runGitCommand(ctx, repoPath, "checkout", origHead); err != nil {
-			color.Red("Warning: failed to restore checkout to %s: %v", shortHash(origHead), err)
+			fmt.Fprintf(os.Stderr, "warning: failed to restore checkout to %s: %v\n", shortHash(origHead), err)
 		}
 		if _, err := runGitCommand(ctx, repoPath, "reset", "--hard", "HEAD"); err != nil {
-			color.Red("Warning: failed to reset HEAD: %v", err)
+			fmt.Fprintf(os.Stderr, "warning: failed to reset HEAD: %v\n", err)
 		}
 	}()
 
@@ -1323,7 +1248,7 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 	}
 
 	// Run benchmarks (collect results without writing to any DB)
-	color.White("  Running benchmarks (samples=%d, profile=%s)...", cfg.Samples, cfg.Profile)
+	fmt.Printf("  Running benchmarks (samples=%d, profile=%s)...\n", cfg.Samples, cfg.Profile)
 	parsed, artifacts, err := runner.RunAndCollect(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("benchmark run failed: %w", err)
@@ -1366,7 +1291,7 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 		return fmt.Errorf("complete job: %w", err)
 	}
 
-	color.Green("  Job #%d completed (Run #%d)", job.ID, runID)
+	fmt.Printf("  Job #%d completed (Run #%d)\n", job.ID, runID)
 	return nil
 }
 
@@ -1393,15 +1318,11 @@ Example:
 				return fmt.Errorf("profile must be 'none' or 'cpu'")
 			}
 
-			database, err := db.Open(dbPath)
+			database, cleanup, err := openDB()
 			if err != nil {
 				return err
 			}
-			defer func() {
-				if err := database.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
-				}
-			}()
+			defer cleanup()
 
 			job := &db.Job{
 				Status:      "pending",
@@ -1421,11 +1342,10 @@ Example:
 				return err
 			}
 
-			color.Green("Queued job #%d (branch=%s)", id, branch)
+			fmt.Printf("Queued job #%d (branch=%s, samples=%d, profile=%s)\n", id, branch, samples, profile)
 			if commitHash != "" {
 				fmt.Printf("  commit: %s\n", commitHash)
 			}
-			fmt.Printf("  samples: %d, profile: %s\n", samples, profile)
 			return nil
 		},
 	}
@@ -1485,14 +1405,11 @@ func runBackfill(ctx context.Context, database *db.DB, count int, start string, 
 	}
 
 	if len(unrecorded) == 0 {
-		color.Green("All %d commits already recorded", len(commits))
+		fmt.Printf("All %d commits already recorded\n", len(commits))
 		return nil
 	}
 
-	cyan := color.New(color.FgCyan)
-	yellow := color.New(color.FgYellow)
-
-	_, _ = cyan.Printf("Found %d unrecorded commits (of %d checked):\n\n", len(unrecorded), len(commits))
+	fmt.Printf("Found %d unrecorded commits (of %d checked):\n\n", len(unrecorded), len(commits))
 	for i, c := range unrecorded {
 		msg := c.message
 		if len(msg) > 50 {
@@ -1503,7 +1420,7 @@ func runBackfill(ctx context.Context, database *db.DB, count int, start string, 
 	fmt.Println()
 
 	if dryRun {
-		_, _ = yellow.Println("Dry run - no benchmarks recorded")
+		fmt.Println("Dry run - no benchmarks recorded")
 		return nil
 	}
 
@@ -1519,22 +1436,22 @@ func runBackfill(ctx context.Context, database *db.DB, count int, start string, 
 	}
 
 	for i, c := range unrecorded {
-		_, _ = cyan.Printf("\n[%d/%d] Recording %s: %s\n", i+1, len(unrecorded), c.short, truncate(c.message, 50))
+		fmt.Printf("\n[%d/%d] Recording %s: %s\n", i+1, len(unrecorded), c.short, truncate(c.message, 50))
 
 		if _, err := runGitCommand(ctx, cfg.RepoPath, "checkout", c.hash); err != nil {
-			color.Red("  Failed to checkout: %v", err)
+			fmt.Fprintf(os.Stderr, "  failed to checkout: %v\n", err)
 			continue
 		}
 
 		runCfg := cfg
 		runCfg.Notes = fmt.Sprintf("%s (commit %d/%d)", cfg.Notes, i+1, len(unrecorded))
 
-		color.White("  Running benchmarks (v2)...")
+		fmt.Println("  Running benchmarks...")
 		runID, err := runner.Run(ctx, database, runCfg)
 		if err != nil {
-			color.Red("  Failed: %v", err)
+			fmt.Fprintf(os.Stderr, "  failed: %v\n", err)
 		} else {
-			color.Green("  Done (Run #%d)", runID)
+			fmt.Printf("  Done (Run #%d)\n", runID)
 		}
 
 		// Reset repo to clean state
@@ -1542,10 +1459,10 @@ func runBackfill(ctx context.Context, database *db.DB, count int, start string, 
 	}
 
 	if _, err := runGitCommand(ctx, cfg.RepoPath, "checkout", origHead); err != nil {
-		_, _ = yellow.Printf("\nWarning: failed to restore HEAD to %s: %v\n", shortHash(origHead), err)
+		fmt.Fprintf(os.Stderr, "\nwarning: failed to restore HEAD to %s: %v\n", shortHash(origHead), err)
 	}
 
-	color.Green("\nBackfill complete")
+	fmt.Println("\nBackfill complete")
 	return nil
 }
 
@@ -1557,7 +1474,7 @@ func fetchAndResolve(ctx context.Context, repoPath, repoURL, branch string) (str
 
 	if isURL {
 		// Fetch the specific branch from the URL; this populates FETCH_HEAD
-		_, _ = color.New(color.FgWhite).Printf("  Fetching %s branch %s...\n", repoURL, branch)
+		fmt.Fprintf(os.Stderr, "  Fetching %s branch %s...\n", repoURL, branch)
 		if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL, branch); err != nil {
 			return "", fmt.Errorf("git fetch %s %s: %w", repoURL, branch, err)
 		}
@@ -1569,7 +1486,7 @@ func fetchAndResolve(ctx context.Context, repoPath, repoURL, branch string) (str
 	}
 
 	// Named remote (e.g. "origin")
-	_, _ = color.New(color.FgWhite).Printf("  Fetching %s...\n", repoURL)
+	fmt.Fprintf(os.Stderr, "  Fetching %s...\n", repoURL)
 	if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL); err != nil {
 		return "", fmt.Errorf("git fetch %s: %w", repoURL, err)
 	}
@@ -1603,9 +1520,6 @@ func truncate(s string, max int) string {
 }
 
 func printResults(results []db.Result) {
-	cyan := color.New(color.FgCyan)
-	dim := color.New(color.Faint)
-
 	var maxNameLen int
 	for _, r := range results {
 		if len(r.Name) > maxNameLen {
@@ -1616,14 +1530,13 @@ func printResults(results []db.Result) {
 		maxNameLen = 50
 	}
 
-	_, _ = cyan.Printf("%-*s %12s %12s %12s\n", maxNameLen, "Benchmark", "Min", "Avg", "Max")
-	_, _ = dim.Println(strings.Repeat("-", maxNameLen+40))
+	fmt.Printf("%-*s %12s %12s %12s\n", maxNameLen, "Benchmark", "Min", "Avg", "Max")
 
 	currentCategory := ""
 	for _, r := range results {
 		if r.Category != currentCategory {
 			currentCategory = r.Category
-			_, _ = cyan.Printf("\n%s\n", currentCategory)
+			fmt.Printf("\n%s\n", currentCategory)
 		}
 
 		name := r.Name
