@@ -1455,3 +1455,223 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
+
+// --- Job endpoints ---
+
+type jobResponse struct {
+	ID          int64  `json:"id"`
+	Status      string `json:"status"`
+	Kind        string `json:"kind"`
+	Branch      string `json:"branch"`
+	CommitHash  string `json:"commit_hash,omitempty"`
+	RepoURL     string `json:"repo_url"`
+	Samples     int    `json:"samples"`
+	Profile     string `json:"profile"`
+	Notes       string `json:"notes,omitempty"`
+	CreatedAt   string `json:"created_at"`
+	StartedAt   string `json:"started_at,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
+	Error       string `json:"error,omitempty"`
+	RunID       *int64 `json:"run_id,omitempty"`
+	RequestedBy string `json:"requested_by,omitempty"`
+}
+
+func jobToResponse(j *db.Job) jobResponse {
+	return jobResponse{
+		ID:          j.ID,
+		Status:      j.Status,
+		Kind:        j.Kind,
+		Branch:      j.Branch,
+		CommitHash:  j.CommitHash,
+		RepoURL:     j.RepoURL,
+		Samples:     j.Samples,
+		Profile:     j.Profile,
+		Notes:       j.Notes,
+		CreatedAt:   j.CreatedAt,
+		StartedAt:   j.StartedAt,
+		CompletedAt: j.CompletedAt,
+		Error:       j.Error,
+		RunID:       j.RunID,
+		RequestedBy: j.RequestedBy,
+	}
+}
+
+func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Branch      string `json:"branch"`
+		CommitHash  string `json:"commit_hash"`
+		Samples     int    `json:"samples"`
+		Profile     string `json:"profile"`
+		Notes       string `json:"notes"`
+		RequestedBy string `json:"requested_by"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Branch == "" {
+		http.Error(w, "branch is required", http.StatusBadRequest)
+		return
+	}
+
+	if req.Samples <= 0 {
+		req.Samples = 3
+	}
+	if req.Profile == "" {
+		req.Profile = "cpu"
+	}
+	if req.Profile != "none" && req.Profile != "cpu" {
+		http.Error(w, "profile must be 'none' or 'cpu'", http.StatusBadRequest)
+		return
+	}
+
+	job := &db.Job{
+		Status:      "pending",
+		Kind:        "benchmark",
+		Branch:      req.Branch,
+		CommitHash:  req.CommitHash,
+		RepoURL:     "origin",
+		Samples:     req.Samples,
+		Profile:     req.Profile,
+		Notes:       req.Notes,
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+		RequestedBy: req.RequestedBy,
+	}
+
+	id, err := s.db.InsertJob(job)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	created, err := s.db.GetJob(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(jobToResponse(created)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	status := r.URL.Query().Get("status")
+	branch := r.URL.Query().Get("branch")
+
+	jobs, err := s.db.ListJobs(limit, status, branch)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var response []jobResponse
+	for _, j := range jobs {
+		response = append(response, jobToResponse(&j))
+	}
+
+	// Return empty array instead of null
+	if response == nil {
+		response = []jobResponse{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleListJobs(w, r)
+	case http.MethodPost:
+		s.handleCreateJob(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) routeJobsAPI(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
+	if idStr == "" {
+		http.Error(w, "job id required", http.StatusBadRequest)
+		return
+	}
+
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		s.handleGetJob(w, r, id)
+	case http.MethodDelete:
+		s.handleCancelJob(w, r, id)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleGetJob(w http.ResponseWriter, _ *http.Request, id int64) {
+	job, err := s.db.GetJob(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(jobToResponse(job)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleCancelJob(w http.ResponseWriter, _ *http.Request, id int64) {
+	err := s.db.CancelJob(id)
+	if err != nil {
+		if strings.Contains(err.Error(), "not pending") {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	job, err := s.db.GetJob(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(jobToResponse(job)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}

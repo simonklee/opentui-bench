@@ -366,6 +366,24 @@ run_benchmarks() {
 	log "Benchmark run complete for ${next_commit:0:7}"
 }
 
+run_queued_jobs() {
+	log "Checking for queued jobs..."
+	cd "$BENCH_REPO"
+
+	# Process one queued job per cron invocation (keeps things simple and predictable)
+	if $dry_run; then
+		log "Dry run: would exec ./bench worker --once ..."
+		return 0
+	fi
+
+	if ./bench worker --repo "$OPENTUI_REPO" --db "$DB_FILE" --once; then
+		# Upload if a job was processed
+		sync_db_up
+	fi
+
+	return 0
+}
+
 # --- Main ---
 
 show_usage() {
@@ -420,6 +438,7 @@ main() {
 	fi
 
 	run_benchmarks
+	run_queued_jobs
 }
 
 main "$@"

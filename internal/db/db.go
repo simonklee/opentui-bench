@@ -9,9 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+func timeNow() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
 
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -78,6 +83,26 @@ CREATE TABLE IF NOT EXISTS artifacts (
     UNIQUE(result_id, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_result_kind ON artifacts(result_id, kind);
+
+CREATE TABLE IF NOT EXISTS jobs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    kind          TEXT NOT NULL DEFAULT 'benchmark',
+    branch        TEXT NOT NULL,
+    commit_hash   TEXT,
+    repo_url      TEXT NOT NULL DEFAULT 'origin',
+    samples       INTEGER NOT NULL DEFAULT 3,
+    profile       TEXT NOT NULL DEFAULT 'cpu',
+    notes         TEXT,
+    created_at    TEXT NOT NULL,
+    started_at    TEXT,
+    completed_at  TEXT,
+    error         TEXT,
+    run_id        INTEGER REFERENCES runs(id),
+    requested_by  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 `
 
 type DB struct {
@@ -970,6 +995,207 @@ func (db *DB) GetResultsForBenchmarkInRuns(benchmarkName string, runIDs []int64)
 		results[r.RunID] = r
 	}
 	return results, rows.Err()
+}
+
+// Job represents a queued benchmark job.
+type Job struct {
+	ID          int64
+	Status      string // pending, running, completed, failed, cancelled
+	Kind        string // benchmark
+	Branch      string
+	CommitHash  string // optional: specific commit, empty = branch HEAD
+	RepoURL     string // git remote name or URL
+	Samples     int
+	Profile     string // none, cpu
+	Notes       string
+	CreatedAt   string
+	StartedAt   string
+	CompletedAt string
+	Error       string
+	RunID       *int64 // links to resulting benchmark run
+	RequestedBy string
+}
+
+func (db *DB) InsertJob(job *Job) (int64, error) {
+	var commitHash, notes, requestedBy *string
+	if job.CommitHash != "" {
+		commitHash = &job.CommitHash
+	}
+	if job.Notes != "" {
+		notes = &job.Notes
+	}
+	if job.RequestedBy != "" {
+		requestedBy = &job.RequestedBy
+	}
+
+	res, err := db.Exec(`
+		INSERT INTO jobs (status, kind, branch, commit_hash, repo_url, samples, profile, notes, created_at, requested_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.Status, job.Kind, job.Branch, commitHash, job.RepoURL,
+		job.Samples, job.Profile, notes, job.CreatedAt, requestedBy)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (db *DB) GetJob(id int64) (*Job, error) {
+	var j Job
+	var commitHash, notes, startedAt, completedAt, jobError, requestedBy sql.NullString
+	var runID sql.NullInt64
+
+	err := db.QueryRow(`
+		SELECT id, status, kind, branch, commit_hash, repo_url, samples, profile, notes,
+		       created_at, started_at, completed_at, error, run_id, requested_by
+		FROM jobs WHERE id = ?`, id).Scan(
+		&j.ID, &j.Status, &j.Kind, &j.Branch, &commitHash, &j.RepoURL,
+		&j.Samples, &j.Profile, &notes,
+		&j.CreatedAt, &startedAt, &completedAt, &jobError, &runID, &requestedBy)
+	if err != nil {
+		return nil, err
+	}
+	j.CommitHash = commitHash.String
+	j.Notes = notes.String
+	j.StartedAt = startedAt.String
+	j.CompletedAt = completedAt.String
+	j.Error = jobError.String
+	j.RequestedBy = requestedBy.String
+	if runID.Valid {
+		v := runID.Int64
+		j.RunID = &v
+	}
+	return &j, nil
+}
+
+func (db *DB) ListJobs(limit int, status string, branch string) ([]Job, error) {
+	query := `SELECT id, status, kind, branch, commit_hash, repo_url, samples, profile, notes,
+	                 created_at, started_at, completed_at, error, run_id, requested_by
+	          FROM jobs WHERE 1=1`
+	args := []interface{}{}
+
+	if status != "" {
+		query += " AND status = ?"
+		args = append(args, status)
+	}
+	if branch != "" {
+		query += " AND branch = ?"
+		args = append(args, branch)
+	}
+
+	query += " ORDER BY created_at DESC"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	var jobs []Job
+	for rows.Next() {
+		var j Job
+		var commitHash, notes, startedAt, completedAt, jobError, requestedBy sql.NullString
+		var runID sql.NullInt64
+
+		if err := rows.Scan(
+			&j.ID, &j.Status, &j.Kind, &j.Branch, &commitHash, &j.RepoURL,
+			&j.Samples, &j.Profile, &notes,
+			&j.CreatedAt, &startedAt, &completedAt, &jobError, &runID, &requestedBy,
+		); err != nil {
+			return nil, err
+		}
+		j.CommitHash = commitHash.String
+		j.Notes = notes.String
+		j.StartedAt = startedAt.String
+		j.CompletedAt = completedAt.String
+		j.Error = jobError.String
+		j.RequestedBy = requestedBy.String
+		if runID.Valid {
+			v := runID.Int64
+			j.RunID = &v
+		}
+		jobs = append(jobs, j)
+	}
+	return jobs, rows.Err()
+}
+
+// ClaimNextPendingJob atomically finds the oldest pending job and sets it to running.
+// Returns nil, nil if no pending jobs exist.
+func (db *DB) ClaimNextPendingJob() (*Job, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var jobID int64
+	err = tx.QueryRow(`
+		SELECT id FROM jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1`).Scan(&jobID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	now := timeNow()
+	_, err = tx.Exec(`UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?`, now, jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return db.GetJob(jobID)
+}
+
+// CompleteJob marks a job as completed and links the resulting run.
+func (db *DB) CompleteJob(jobID int64, runID int64) error {
+	now := timeNow()
+	_, err := db.Exec(`
+		UPDATE jobs SET status = 'completed', completed_at = ?, run_id = ?, error = NULL WHERE id = ?`,
+		now, runID, jobID)
+	return err
+}
+
+// FailJob marks a job as failed with an error message.
+func (db *DB) FailJob(jobID int64, errMsg string) error {
+	now := timeNow()
+	_, err := db.Exec(`
+		UPDATE jobs SET status = 'failed', completed_at = ?, error = ? WHERE id = ?`,
+		now, errMsg, jobID)
+	return err
+}
+
+// CancelJob cancels a pending job. Returns an error if the job is not pending.
+func (db *DB) CancelJob(jobID int64) error {
+	res, err := db.Exec(`UPDATE jobs SET status = 'cancelled' WHERE id = ? AND status = 'pending'`, jobID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("job %d is not pending (may already be running, completed, or cancelled)", jobID)
+	}
+	return nil
+}
+
+// UpdateJobCommitHash sets the resolved commit hash on a job (used by worker when resolving branch HEAD).
+func (db *DB) UpdateJobCommitHash(jobID int64, commitHash string) error {
+	_, err := db.Exec(`UPDATE jobs SET commit_hash = ? WHERE id = ?`, commitHash, jobID)
+	return err
 }
 
 // GetDistinctBenchmarkNames returns all unique benchmark names from a set of runs.

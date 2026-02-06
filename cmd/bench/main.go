@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -47,6 +49,8 @@ func main() {
 	rootCmd.AddCommand(latestCommitCmd())
 	rootCmd.AddCommand(backfillCmd())
 	rootCmd.AddCommand(flamegraphCmd())
+	rootCmd.AddCommand(workerCmd())
+	rootCmd.AddCommand(triggerCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -879,6 +883,268 @@ type commitInfo struct {
 	short   string
 	message string
 	date    string
+}
+
+func workerCmd() *cobra.Command {
+	var repoPath string
+	var pollInterval time.Duration
+	var once bool
+
+	cmd := &cobra.Command{
+		Use:   "worker",
+		Short: "Process queued benchmark jobs",
+		Long: `Poll for pending benchmark jobs and execute them.
+
+The worker claims the oldest pending job, checks out the requested branch/commit
+in the opentui repo, runs benchmarks, and records results.
+
+Example:
+  # Run continuously, polling every 30s
+  bench worker --repo ~/repos/opentui
+
+  # Process one job and exit
+  bench worker --repo ~/repos/opentui --once`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if repoPath == "" {
+				return fmt.Errorf("repo path required")
+			}
+
+			database, err := db.Open(dbPath)
+			if err != nil {
+				return err
+			}
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
+
+			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt)
+			defer cancel()
+
+			return runWorker(ctx, database, repoPath, pollInterval, once)
+		},
+	}
+
+	cmd.Flags().StringVar(&repoPath, "repo", "", "path to opentui repo (required)")
+	cmd.Flags().DurationVar(&pollInterval, "poll-interval", 30*time.Second, "how often to poll for new jobs")
+	cmd.Flags().BoolVar(&once, "once", false, "process one job and exit")
+
+	if err := cmd.MarkFlagRequired("repo"); err != nil {
+		panic(err)
+	}
+
+	return cmd
+}
+
+func runWorker(ctx context.Context, database *db.DB, repoPath string, pollInterval time.Duration, once bool) error {
+	cyan := color.New(color.FgCyan)
+	yellow := color.New(color.FgYellow)
+
+	zigDir := filepath.Join(repoPath, "packages/core/src/zig")
+	if _, err := os.Stat(zigDir); os.IsNotExist(err) {
+		return fmt.Errorf("zig directory not found: %s", zigDir)
+	}
+
+	for {
+		job, err := database.ClaimNextPendingJob()
+		if err != nil {
+			color.Red("Error claiming job: %v", err)
+			if once {
+				return err
+			}
+			goto sleep
+		}
+
+		if job == nil {
+			if once {
+				fmt.Println("No pending jobs")
+				return nil
+			}
+			goto sleep
+		}
+
+		_, _ = cyan.Printf("Processing job #%d: branch=%s", job.ID, job.Branch)
+		if job.CommitHash != "" {
+			fmt.Printf(" commit=%s", shortHash(job.CommitHash))
+		}
+		fmt.Println()
+
+		if err := executeJob(ctx, database, job, repoPath); err != nil {
+			color.Red("Job #%d failed: %v", job.ID, err)
+			if dbErr := database.FailJob(job.ID, err.Error()); dbErr != nil {
+				color.Red("Failed to update job status: %v", dbErr)
+			}
+		}
+
+		if once {
+			return nil
+		}
+		continue
+
+	sleep:
+		_, _ = yellow.Printf("Waiting %s for next poll...\n", pollInterval)
+		select {
+		case <-ctx.Done():
+			fmt.Println("Worker stopped")
+			return nil
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+func executeJob(ctx context.Context, database *db.DB, job *db.Job, repoPath string) error {
+	// Fetch the branch/remote
+	_, _ = color.New(color.FgWhite).Printf("  Fetching %s...\n", job.RepoURL)
+	if _, err := runGitCommand(ctx, repoPath, "fetch", job.RepoURL); err != nil {
+		return fmt.Errorf("git fetch: %w", err)
+	}
+
+	// Resolve the commit to check out
+	checkoutRef := job.CommitHash
+	if checkoutRef == "" {
+		// Resolve branch HEAD from remote
+		remoteBranch := job.RepoURL + "/" + job.Branch
+		resolved, err := runGitCommand(ctx, repoPath, "rev-parse", remoteBranch)
+		if err != nil {
+			return fmt.Errorf("resolve %s: %w", remoteBranch, err)
+		}
+		checkoutRef = strings.TrimSpace(resolved)
+		// Record the resolved commit on the job
+		if err := database.UpdateJobCommitHash(job.ID, checkoutRef); err != nil {
+			return fmt.Errorf("update job commit hash: %w", err)
+		}
+		fmt.Printf("  Resolved %s to %s\n", remoteBranch, shortHash(checkoutRef))
+	}
+
+	// Save current HEAD so we can restore after
+	origHead, err := runGitCommand(ctx, repoPath, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("get HEAD: %w", err)
+	}
+	origHead = strings.TrimSpace(origHead)
+
+	// Check for dirty tracked files (ignore untracked)
+	status, _ := runGitCommand(ctx, repoPath, "status", "--porcelain", "--untracked-files=no")
+	if strings.TrimSpace(status) != "" {
+		return fmt.Errorf("opentui repo has uncommitted changes to tracked files")
+	}
+
+	// Checkout the target commit
+	fmt.Printf("  Checking out %s...\n", shortHash(checkoutRef))
+	if _, err := runGitCommand(ctx, repoPath, "checkout", checkoutRef); err != nil {
+		return fmt.Errorf("git checkout: %w", err)
+	}
+
+	// Ensure we restore the repo on exit
+	defer func() {
+		_, _ = runGitCommand(ctx, repoPath, "checkout", origHead)
+		_, _ = runGitCommand(ctx, repoPath, "reset", "--hard", "HEAD")
+	}()
+
+	// Build runner config from job
+	profileMode := runner.ProfileMode(job.Profile)
+	if profileMode != runner.ProfileNone && profileMode != runner.ProfileCPU {
+		profileMode = runner.ProfileNone
+	}
+
+	cfg := runner.RunConfig{
+		RepoPath:    repoPath,
+		ZigOptimize: "ReleaseFast",
+		Samples:     job.Samples,
+		Profile:     profileMode,
+		PerfFreq:    997,
+		Notes:       job.Notes,
+	}
+
+	// Run benchmarks
+	color.White("  Running benchmarks (samples=%d, profile=%s)...", cfg.Samples, cfg.Profile)
+	runID, err := runner.Run(ctx, database, cfg)
+	if err != nil {
+		return fmt.Errorf("benchmark run failed: %w", err)
+	}
+
+	// Mark job completed
+	if err := database.CompleteJob(job.ID, runID); err != nil {
+		return fmt.Errorf("complete job: %w", err)
+	}
+
+	color.Green("  Job #%d completed (Run #%d)", job.ID, runID)
+	return nil
+}
+
+func triggerCmd() *cobra.Command {
+	var branch, commitHash, notes, requestedBy, profile string
+	var samples int
+
+	cmd := &cobra.Command{
+		Use:   "trigger",
+		Short: "Queue a benchmark job for a branch",
+		Long: `Create a pending benchmark job in the queue.
+
+The job will be picked up by the next worker run.
+
+Example:
+  bench trigger --branch feature/fast-rope
+  bench trigger --branch main --commit abc123 --notes "testing optimization"`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if branch == "" {
+				return fmt.Errorf("branch is required")
+			}
+
+			if profile != "none" && profile != "cpu" {
+				return fmt.Errorf("profile must be 'none' or 'cpu'")
+			}
+
+			database, err := db.Open(dbPath)
+			if err != nil {
+				return err
+			}
+			defer func() {
+				if err := database.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
+				}
+			}()
+
+			job := &db.Job{
+				Status:      "pending",
+				Kind:        "benchmark",
+				Branch:      branch,
+				CommitHash:  commitHash,
+				RepoURL:     "origin",
+				Samples:     samples,
+				Profile:     profile,
+				Notes:       notes,
+				CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+				RequestedBy: requestedBy,
+			}
+
+			id, err := database.InsertJob(job)
+			if err != nil {
+				return err
+			}
+
+			color.Green("Queued job #%d (branch=%s)", id, branch)
+			if commitHash != "" {
+				fmt.Printf("  commit: %s\n", commitHash)
+			}
+			fmt.Printf("  samples: %d, profile: %s\n", samples, profile)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&branch, "branch", "", "branch to benchmark (required)")
+	cmd.Flags().StringVar(&commitHash, "commit", "", "specific commit hash (default: branch HEAD)")
+	cmd.Flags().IntVar(&samples, "samples", 3, "number of benchmark samples")
+	cmd.Flags().StringVar(&profile, "profile", "cpu", "profile mode (none, cpu)")
+	cmd.Flags().StringVar(&notes, "notes", "", "optional notes")
+	cmd.Flags().StringVar(&requestedBy, "requested-by", "", "who requested this job")
+
+	if err := cmd.MarkFlagRequired("branch"); err != nil {
+		panic(err)
+	}
+
+	return cmd
 }
 
 func runBackfill(ctx context.Context, database *db.DB, count int, start string, dryRun bool, cfg runner.RunConfig) error {
