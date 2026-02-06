@@ -30,6 +30,7 @@ type RunConfig struct {
 	Notes           string
 	MachineID       string
 	WorkDir         string
+	Branch          string // override branch name (useful for detached HEAD)
 }
 
 // CollectedArtifact holds a binary artifact (e.g., pprof profile) captured
@@ -60,6 +61,9 @@ func RunAndCollect(ctx context.Context, cfg RunConfig) (*record.ParsedRun, []Col
 		return nil, nil, fmt.Errorf("read git meta: %w", err)
 	}
 
+	if cfg.Branch != "" && meta.Branch == "" {
+		meta.Branch = cfg.Branch
+	}
 	if cfg.Notes != "" {
 		meta.Notes = cfg.Notes
 	}

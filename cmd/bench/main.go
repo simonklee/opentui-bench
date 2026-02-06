@@ -140,6 +140,7 @@ Remote usage:
 	cmd.Flags().StringVar(&cfg.MachineID, "machine", "", "machine identifier")
 	cmd.Flags().StringVar(&profileStr, "profile", string(runner.ProfileNone), "profile mode (none, cpu)")
 	cmd.Flags().IntVar(&cfg.PerfFreq, "perf-freq", 997, "perf sampling frequency")
+	cmd.Flags().StringVar(&cfg.Branch, "branch", "", "override branch name (useful for detached HEAD)")
 	cmd.Flags().StringVar(&apiURL, "api-url", "", "remote API URL (mutually exclusive with --db)")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key for remote auth")
 
@@ -1096,6 +1097,7 @@ func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath
 		Profile:     profileMode,
 		PerfFreq:    997,
 		Notes:       job.Notes,
+		Branch:      job.Branch,
 	}
 
 	// Run benchmarks
@@ -1245,6 +1247,7 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 		Profile:     profileMode,
 		PerfFreq:    997,
 		Notes:       job.Notes,
+		Branch:      job.Branch,
 	}
 
 	// Run benchmarks (collect results without writing to any DB)

@@ -244,7 +244,8 @@ run_benchmarks() {
 	else
 		./bench record --repo "$OPENTUI_REPO" \
 			--api-url "$API_URL" --api-key "$API_KEY" \
-			--samples 3 --profile cpu --notes "Hetzner CCX13"
+			--samples 3 --profile cpu --notes "Hetzner CCX13" \
+			--branch main
 	fi
 
 	# Reset opentui repo
