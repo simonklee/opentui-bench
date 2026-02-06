@@ -61,15 +61,47 @@ func main() {
 func recordCmd() *cobra.Command {
 	var cfg runner.RunConfig
 	var profileStr string
+	var apiURL, apiKey string
 
 	cmd := &cobra.Command{
 		Use:   "record",
 		Short: "Record benchmark results",
+		Long: `Run benchmarks and record results.
+
+When --api-url is provided, results are POSTed to the remote API instead of
+written to a local DB. When omitted, behavior is unchanged (local DB write).
+
+Local usage:
+  bench record --repo ~/insmo.com/opentui --db /tmp/test.db --samples 1
+
+Remote usage:
+  bench record --repo ~/repos/opentui \
+    --api-url https://opentui-bench.fly.dev \
+    --api-key <token> \
+    --samples 3 --profile cpu --notes "Hetzner CCX13"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cfg.RepoPath == "" {
 				return fmt.Errorf("repo path required")
 			}
 
+			cfg.Profile = runner.ProfileMode(profileStr)
+			switch cfg.Profile {
+			case runner.ProfileNone, runner.ProfileCPU:
+			default:
+				return fmt.Errorf("invalid profile mode: %s", profileStr)
+			}
+
+			// --db and --api-url are mutually exclusive
+			if apiURL != "" && cmd.Flags().Changed("db") {
+				return fmt.Errorf("--db and --api-url are mutually exclusive")
+			}
+
+			if apiURL != "" {
+				// Remote mode: RunAndCollect + POST to API
+				return recordRemote(cmd.Context(), cfg, apiURL, apiKey)
+			}
+
+			// Local mode: Run with local DB (unchanged behavior)
 			database, err := db.Open(dbPath)
 			if err != nil {
 				return err
@@ -79,13 +111,6 @@ func recordCmd() *cobra.Command {
 					fmt.Fprintf(os.Stderr, "Error closing database: %v\n", err)
 				}
 			}()
-
-			cfg.Profile = runner.ProfileMode(profileStr)
-			switch cfg.Profile {
-			case runner.ProfileNone, runner.ProfileCPU:
-			default:
-				return fmt.Errorf("invalid profile mode: %s", profileStr)
-			}
 
 			runID, err := runner.Run(cmd.Context(), database, cfg)
 			if err != nil {
@@ -106,12 +131,66 @@ func recordCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.MachineID, "machine", "", "machine identifier")
 	cmd.Flags().StringVar(&profileStr, "profile", string(runner.ProfileNone), "profile mode (none, cpu)")
 	cmd.Flags().IntVar(&cfg.PerfFreq, "perf-freq", 997, "perf sampling frequency")
+	cmd.Flags().StringVar(&apiURL, "api-url", "", "remote API URL (mutually exclusive with --db)")
+	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key for remote auth")
 
 	if err := cmd.MarkFlagRequired("repo"); err != nil {
 		panic(err)
 	}
 
 	return cmd
+}
+
+func recordRemote(ctx context.Context, cfg runner.RunConfig, apiURL, apiKey string) error {
+	parsed, artifacts, err := runner.RunAndCollect(ctx, cfg)
+	if err != nil {
+		return err
+	}
+
+	remote := &runner.RemoteRecorder{
+		BaseURL: apiURL,
+		APIKey:  apiKey,
+	}
+
+	runID, resultIDs, err := remote.RecordRun(parsed)
+	if err != nil {
+		return fmt.Errorf("post results to API: %w", err)
+	}
+
+	color.Green("Recorded run #%d (%d results) on %s", runID, len(parsed.Results), apiURL)
+
+	var uploadErrors []string
+	uploaded := 0
+	for _, art := range artifacts {
+		// Look up the result ID for this artifact's benchmark
+		key := ""
+		for _, pr := range parsed.Results {
+			if pr.Name == art.BenchmarkName {
+				key = pr.Category + "/" + pr.Name
+				break
+			}
+		}
+		resultID, ok := resultIDs[key]
+		if !ok {
+			uploadErrors = append(uploadErrors, fmt.Sprintf("no result ID for artifact %s (key=%s)", art.BenchmarkName, key))
+			continue
+		}
+		if err := remote.UploadArtifact(runID, resultID, art); err != nil {
+			uploadErrors = append(uploadErrors, fmt.Sprintf("upload %s: %v", art.BenchmarkName, err))
+			continue
+		}
+		uploaded++
+	}
+
+	if uploaded > 0 {
+		color.Green("Uploaded %d artifacts", uploaded)
+	}
+
+	if len(uploadErrors) > 0 {
+		return fmt.Errorf("artifact upload errors (%d/%d failed): %s", len(uploadErrors), len(artifacts), strings.Join(uploadErrors, "; "))
+	}
+
+	return nil
 }
 
 func listCmd() *cobra.Command {
@@ -516,7 +595,10 @@ func serveCmd() *cobra.Command {
 			}()
 
 			addr := fmt.Sprintf(":%d", port)
-			server := web.NewServer(database, addr)
+			server, err := web.NewServer(database, addr)
+			if err != nil {
+				return err
+			}
 			return server.Start(open)
 		},
 	}
@@ -889,6 +971,7 @@ func workerCmd() *cobra.Command {
 	var repoPath string
 	var pollInterval time.Duration
 	var once bool
+	var apiURL, apiKey string
 
 	cmd := &cobra.Command{
 		Use:   "worker",
@@ -898,17 +981,39 @@ func workerCmd() *cobra.Command {
 The worker claims the oldest pending job, checks out the requested branch/commit
 in the opentui repo, runs benchmarks, and records results.
 
+When --api-url is provided, the worker communicates entirely via the HTTP API:
+claims jobs, posts results, uploads artifacts, and updates job status remotely.
+No local database is needed.
+
+When --api-url is not provided, uses the local database (existing behavior).
+
 Example:
-  # Run continuously, polling every 30s
+  # Remote mode (no local DB needed)
+  bench worker --repo ~/repos/opentui --api-url https://opentui-bench.fly.dev --api-key <token>
+
+  # Local mode (existing behavior)
   bench worker --repo ~/repos/opentui
 
   # Process one job and exit
-  bench worker --repo ~/repos/opentui --once`,
+  bench worker --repo ~/repos/opentui --api-url <url> --api-key <key> --once`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if repoPath == "" {
 				return fmt.Errorf("repo path required")
 			}
 
+			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt)
+			defer cancel()
+
+			if apiURL != "" {
+				// Remote mode
+				remote := &runner.RemoteRecorder{
+					BaseURL: apiURL,
+					APIKey:  apiKey,
+				}
+				return runWorkerRemote(ctx, remote, repoPath, pollInterval, once)
+			}
+
+			// Local mode
 			database, err := db.Open(dbPath)
 			if err != nil {
 				return err
@@ -919,16 +1024,15 @@ Example:
 				}
 			}()
 
-			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt)
-			defer cancel()
-
-			return runWorker(ctx, database, repoPath, pollInterval, once)
+			return runWorkerLocal(ctx, database, repoPath, pollInterval, once)
 		},
 	}
 
 	cmd.Flags().StringVar(&repoPath, "repo", "", "path to opentui repo (required)")
 	cmd.Flags().DurationVar(&pollInterval, "poll-interval", 30*time.Second, "how often to poll for new jobs")
 	cmd.Flags().BoolVar(&once, "once", false, "process one job and exit")
+	cmd.Flags().StringVar(&apiURL, "api-url", "", "remote API URL")
+	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key for remote auth")
 
 	if err := cmd.MarkFlagRequired("repo"); err != nil {
 		panic(err)
@@ -937,7 +1041,8 @@ Example:
 	return cmd
 }
 
-func runWorker(ctx context.Context, database *db.DB, repoPath string, pollInterval time.Duration, once bool) error {
+// runWorkerLocal is the existing local-DB worker loop.
+func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollInterval time.Duration, once bool) error {
 	cyan := color.New(color.FgCyan)
 	yellow := color.New(color.FgYellow)
 
@@ -970,7 +1075,7 @@ func runWorker(ctx context.Context, database *db.DB, repoPath string, pollInterv
 		}
 		fmt.Println()
 
-		if err := executeJob(ctx, database, job, repoPath); err != nil {
+		if err := executeJobLocal(ctx, database, job, repoPath); err != nil {
 			color.Red("Job #%d failed: %v", job.ID, err)
 			if dbErr := database.FailJob(job.ID, err.Error()); dbErr != nil {
 				color.Red("Failed to update job status: %v", dbErr)
@@ -993,7 +1098,7 @@ func runWorker(ctx context.Context, database *db.DB, repoPath string, pollInterv
 	}
 }
 
-func executeJob(ctx context.Context, database *db.DB, job *db.Job, repoPath string) error {
+func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath string) error {
 	// Fetch the branch/remote
 	_, _ = color.New(color.FgWhite).Printf("  Fetching %s...\n", job.RepoURL)
 	if _, err := runGitCommand(ctx, repoPath, "fetch", job.RepoURL); err != nil {
@@ -1025,7 +1130,10 @@ func executeJob(ctx context.Context, database *db.DB, job *db.Job, repoPath stri
 	origHead = strings.TrimSpace(origHead)
 
 	// Check for dirty tracked files (ignore untracked)
-	status, _ := runGitCommand(ctx, repoPath, "status", "--porcelain", "--untracked-files=no")
+	status, err := runGitCommand(ctx, repoPath, "status", "--porcelain", "--untracked-files=no")
+	if err != nil {
+		return fmt.Errorf("git status: %w", err)
+	}
 	if strings.TrimSpace(status) != "" {
 		return fmt.Errorf("opentui repo has uncommitted changes to tracked files")
 	}
@@ -1038,8 +1146,12 @@ func executeJob(ctx context.Context, database *db.DB, job *db.Job, repoPath stri
 
 	// Ensure we restore the repo on exit
 	defer func() {
-		_, _ = runGitCommand(ctx, repoPath, "checkout", origHead)
-		_, _ = runGitCommand(ctx, repoPath, "reset", "--hard", "HEAD")
+		if _, err := runGitCommand(ctx, repoPath, "checkout", origHead); err != nil {
+			color.Red("Warning: failed to restore checkout to %s: %v", shortHash(origHead), err)
+		}
+		if _, err := runGitCommand(ctx, repoPath, "reset", "--hard", "HEAD"); err != nil {
+			color.Red("Warning: failed to reset HEAD: %v", err)
+		}
 	}()
 
 	// Build runner config from job
@@ -1066,6 +1178,191 @@ func executeJob(ctx context.Context, database *db.DB, job *db.Job, repoPath stri
 
 	// Mark job completed
 	if err := database.CompleteJob(job.ID, runID); err != nil {
+		return fmt.Errorf("complete job: %w", err)
+	}
+
+	color.Green("  Job #%d completed (Run #%d)", job.ID, runID)
+	return nil
+}
+
+// runWorkerRemote is the remote-API worker loop.
+func runWorkerRemote(ctx context.Context, remote *runner.RemoteRecorder, repoPath string, pollInterval time.Duration, once bool) error {
+	cyan := color.New(color.FgCyan)
+	yellow := color.New(color.FgYellow)
+
+	zigDir := filepath.Join(repoPath, "packages/core/src/zig")
+	if _, err := os.Stat(zigDir); os.IsNotExist(err) {
+		return fmt.Errorf("zig directory not found: %s", zigDir)
+	}
+
+	for {
+		job, err := remote.ClaimJob()
+		if err != nil {
+			color.Red("Error claiming job: %v", err)
+			if once {
+				return err
+			}
+			goto sleep
+		}
+
+		if job == nil {
+			if once {
+				fmt.Println("No pending jobs")
+				return nil
+			}
+			goto sleep
+		}
+
+		_, _ = cyan.Printf("Processing job #%d: branch=%s", job.ID, job.Branch)
+		if job.CommitHash != "" {
+			fmt.Printf(" commit=%s", shortHash(job.CommitHash))
+		}
+		fmt.Println()
+
+		if err := executeJobRemote(ctx, remote, job, repoPath); err != nil {
+			color.Red("Job #%d failed: %v", job.ID, err)
+			if updateErr := remote.UpdateJob(job.ID, map[string]interface{}{
+				"status": "failed",
+				"error":  err.Error(),
+			}); updateErr != nil {
+				color.Red("Failed to update job status: %v", updateErr)
+			}
+		}
+
+		if once {
+			return nil
+		}
+		continue
+
+	sleep:
+		_, _ = yellow.Printf("Waiting %s for next poll...\n", pollInterval)
+		select {
+		case <-ctx.Done():
+			fmt.Println("Worker stopped")
+			return nil
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *runner.JobClaimResponse, repoPath string) error {
+	// Fetch the branch/remote
+	repoURL := job.RepoURL
+	if repoURL == "" {
+		repoURL = "origin"
+	}
+	_, _ = color.New(color.FgWhite).Printf("  Fetching %s...\n", repoURL)
+	if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL); err != nil {
+		return fmt.Errorf("git fetch: %w", err)
+	}
+
+	// Resolve the commit to check out
+	checkoutRef := job.CommitHash
+	if checkoutRef == "" {
+		remoteBranch := repoURL + "/" + job.Branch
+		resolved, err := runGitCommand(ctx, repoPath, "rev-parse", remoteBranch)
+		if err != nil {
+			return fmt.Errorf("resolve %s: %w", remoteBranch, err)
+		}
+		checkoutRef = strings.TrimSpace(resolved)
+		// Record the resolved commit on the job
+		if err := remote.UpdateJob(job.ID, map[string]interface{}{
+			"status":      "running",
+			"commit_hash": checkoutRef,
+		}); err != nil {
+			return fmt.Errorf("update job commit hash: %w", err)
+		}
+		fmt.Printf("  Resolved %s to %s\n", remoteBranch, shortHash(checkoutRef))
+	}
+
+	// Save current HEAD so we can restore after
+	origHead, err := runGitCommand(ctx, repoPath, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("get HEAD: %w", err)
+	}
+	origHead = strings.TrimSpace(origHead)
+
+	// Check for dirty tracked files (ignore untracked)
+	status, err := runGitCommand(ctx, repoPath, "status", "--porcelain", "--untracked-files=no")
+	if err != nil {
+		return fmt.Errorf("git status: %w", err)
+	}
+	if strings.TrimSpace(status) != "" {
+		return fmt.Errorf("opentui repo has uncommitted changes to tracked files")
+	}
+
+	// Checkout the target commit
+	fmt.Printf("  Checking out %s...\n", shortHash(checkoutRef))
+	if _, err := runGitCommand(ctx, repoPath, "checkout", checkoutRef); err != nil {
+		return fmt.Errorf("git checkout: %w", err)
+	}
+
+	// Ensure we restore the repo on exit
+	defer func() {
+		if _, err := runGitCommand(ctx, repoPath, "checkout", origHead); err != nil {
+			color.Red("Warning: failed to restore checkout to %s: %v", shortHash(origHead), err)
+		}
+		if _, err := runGitCommand(ctx, repoPath, "reset", "--hard", "HEAD"); err != nil {
+			color.Red("Warning: failed to reset HEAD: %v", err)
+		}
+	}()
+
+	// Build runner config from job
+	profileMode := runner.ProfileMode(job.Profile)
+	if profileMode != runner.ProfileNone && profileMode != runner.ProfileCPU {
+		profileMode = runner.ProfileNone
+	}
+
+	cfg := runner.RunConfig{
+		RepoPath:    repoPath,
+		ZigOptimize: "ReleaseFast",
+		Samples:     job.Samples,
+		Profile:     profileMode,
+		PerfFreq:    997,
+		Notes:       job.Notes,
+	}
+
+	// Run benchmarks (collect results without writing to any DB)
+	color.White("  Running benchmarks (samples=%d, profile=%s)...", cfg.Samples, cfg.Profile)
+	parsed, artifacts, err := runner.RunAndCollect(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("benchmark run failed: %w", err)
+	}
+
+	// POST results to API
+	runID, resultIDs, err := remote.RecordRun(parsed)
+	if err != nil {
+		return fmt.Errorf("post results to API: %w", err)
+	}
+
+	// Upload artifacts
+	var uploadErrors []string
+	for _, art := range artifacts {
+		key := ""
+		for _, pr := range parsed.Results {
+			if pr.Name == art.BenchmarkName {
+				key = pr.Category + "/" + pr.Name
+				break
+			}
+		}
+		resultID, ok := resultIDs[key]
+		if !ok {
+			uploadErrors = append(uploadErrors, fmt.Sprintf("no result ID for artifact %s", art.BenchmarkName))
+			continue
+		}
+		if err := remote.UploadArtifact(runID, resultID, art); err != nil {
+			uploadErrors = append(uploadErrors, fmt.Sprintf("upload %s: %v", art.BenchmarkName, err))
+		}
+	}
+	if len(uploadErrors) > 0 {
+		return fmt.Errorf("artifact upload errors (%d/%d failed): %s", len(uploadErrors), len(artifacts), strings.Join(uploadErrors, "; "))
+	}
+
+	// Mark job completed
+	if err := remote.UpdateJob(job.ID, map[string]interface{}{
+		"status": "completed",
+		"run_id": runID,
+	}); err != nil {
 		return fmt.Errorf("complete job: %w", err)
 	}
 

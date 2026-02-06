@@ -1,6 +1,7 @@
 package web
 
 import (
+	"crypto/subtle"
 	"embed"
 	"fmt"
 	"io"
@@ -23,12 +24,13 @@ var staticFiles embed.FS
 type Server struct {
 	db            *db.DB
 	addr          string
+	apiKey        string
 	svgCache      *cache.SVGCache
 	flamegraphSem chan struct{}
 	pprofManager  *PProfManager
 }
 
-func NewServer(database *db.DB, addr string) *Server {
+func NewServer(database *db.DB, addr string) (*Server, error) {
 	cacheDir := os.Getenv("SVG_CACHE_DIR")
 	if cacheDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -54,15 +56,33 @@ func NewServer(database *db.DB, addr string) *Server {
 
 	svgCache, err := cache.NewSVGCache(cacheDir, maxRuns)
 	if err != nil {
-		fmt.Printf("Warning: failed to initialize SVG cache: %v\n", err)
+		return nil, fmt.Errorf("initialize SVG cache: %w", err)
 	}
 
 	return &Server{
 		db:            database,
 		addr:          addr,
+		apiKey:        os.Getenv("BENCH_API_KEY"),
 		svgCache:      svgCache,
 		flamegraphSem: make(chan struct{}, maxConcurrency),
 		pprofManager:  NewPProfManager(),
+	}, nil
+}
+
+// requireAuth wraps a handler to require bearer token authentication.
+// If no API key is configured (dev mode), all requests are allowed.
+func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.apiKey == "" {
+			next(w, r) // no auth configured (dev mode)
+			return
+		}
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.apiKey)) != 1 {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
 	}
 }
 
@@ -75,13 +95,15 @@ func (s *Server) Start(openBrowser bool) error {
 	}
 	mux.Handle("/", spaFileServer(appFS))
 
-	mux.HandleFunc("/api/runs", s.handleRuns)
+	mux.HandleFunc("/api/runs", s.handleRunsRoute)
 	mux.HandleFunc("/api/runs/", s.routeRunsAPI)
 	mux.HandleFunc("/api/compare", s.handleCompare)
 	mux.HandleFunc("/api/trend", s.handleTrend)
 	mux.HandleFunc("/api/benchmarks", s.handleBenchmarks)
 	mux.HandleFunc("/api/regressions", s.handleRegressions)
-	mux.HandleFunc("/api/jobs", s.handleJobs)
+	mux.HandleFunc("/api/has-commit/", s.handleHasCommit)
+	mux.HandleFunc("/api/latest-commit", s.handleLatestCommit)
+	mux.HandleFunc("/api/jobs", s.handleJobsRoute)
 	mux.HandleFunc("/api/jobs/", s.routeJobsAPI)
 	mux.HandleFunc("/api/database/download", s.handleDatabaseDownload)
 
@@ -166,6 +188,8 @@ func (s *Server) routeRunsAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleCallgraphSVG(w, r)
 	case strings.HasSuffix(path, "/categories"):
 		s.handleCategories(w, r)
+	case strings.Contains(path, "/results/") && strings.HasSuffix(path, "/artifacts") && r.Method == http.MethodPost:
+		s.requireAuth(s.handleUploadArtifact)(w, r)
 	case strings.HasSuffix(path, "/artifacts"):
 		s.handleArtifactList(w, r)
 	case strings.HasSuffix(path, "/download") && strings.Contains(path, "/artifacts/"):

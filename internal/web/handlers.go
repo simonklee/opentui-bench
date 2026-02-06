@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -21,6 +22,18 @@ import (
 	"opentui-bench/internal/db"
 	"opentui-bench/internal/stats"
 )
+
+// handleRunsRoute dispatches /api/runs by method: GET lists runs, POST creates a run.
+func (s *Server) handleRunsRoute(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleRuns(w, r)
+	case http.MethodPost:
+		s.requireAuth(s.handleCreateRun)(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
 
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	limit := 50
@@ -1602,25 +1615,31 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleJobsRoute(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		s.handleListJobs(w, r)
 	case http.MethodPost:
-		s.handleCreateJob(w, r)
+		s.requireAuth(s.handleCreateJob)(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 func (s *Server) routeJobsAPI(w http.ResponseWriter, r *http.Request) {
-	idStr := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
-	if idStr == "" {
+	path := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
+	if path == "" {
 		http.Error(w, "job id required", http.StatusBadRequest)
 		return
 	}
 
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	// Handle /api/jobs/claim
+	if path == "claim" {
+		s.requireAuth(s.handleClaimJob)(w, r)
+		return
+	}
+
+	id, err := strconv.ParseInt(path, 10, 64)
 	if err != nil {
 		http.Error(w, "invalid job id", http.StatusBadRequest)
 		return
@@ -1629,8 +1648,14 @@ func (s *Server) routeJobsAPI(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		s.handleGetJob(w, r, id)
+	case http.MethodPatch:
+		s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+			s.handleUpdateJob(w, r, id)
+		})(w, r)
 	case http.MethodDelete:
-		s.handleCancelJob(w, r, id)
+		s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+			s.handleCancelJob(w, r, id)
+		})(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1674,4 +1699,437 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, _ *http.Request, id int6
 	if err := json.NewEncoder(w).Encode(jobToResponse(job)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// --- New write API endpoints ---
+
+// handleCreateRun handles POST /api/runs - creates a run with all results and mem_stats.
+func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		CommitHash     string `json:"commit_hash"`
+		CommitHashFull string `json:"commit_hash_full"`
+		CommitMessage  string `json:"commit_message"`
+		CommitDate     string `json:"commit_date"`
+		Branch         string `json:"branch"`
+		MachineID      string `json:"machine_id"`
+		Notes          string `json:"notes"`
+		ZigOptimize    string `json:"zig_optimize"`
+		Results        []struct {
+			Category    string `json:"category"`
+			Name        string `json:"name"`
+			MinNs       int64  `json:"min_ns"`
+			AvgNs       int64  `json:"avg_ns"`
+			MaxNs       int64  `json:"max_ns"`
+			StdDevNs    int64  `json:"std_dev_ns"`
+			P50Ns       int64  `json:"p50_ns"`
+			P95Ns       int64  `json:"p95_ns"`
+			P99Ns       int64  `json:"p99_ns"`
+			TotalNs     int64  `json:"total_ns"`
+			Iterations  int64  `json:"iterations"`
+			SampleCount int64  `json:"sample_count"`
+			MemStats    []struct {
+				Name  string `json:"name"`
+				Bytes int64  `json:"bytes"`
+			} `json:"mem_stats,omitempty"`
+		} `json:"results"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.CommitHash == "" {
+		writeJSONError(w, "commit_hash is required", http.StatusBadRequest)
+		return
+	}
+
+	if req.ZigOptimize == "" {
+		req.ZigOptimize = "ReleaseFast"
+	}
+
+	// Idempotency: check for existing run with same (commit_hash_full, machine_id, zig_optimize)
+	if req.CommitHashFull != "" {
+		existingRun, err := s.findExistingRun(req.CommitHashFull, req.MachineID, req.ZigOptimize)
+		if err == nil && existingRun != nil {
+			// Return existing run
+			resultIDs, err := s.buildResultIDMap(existingRun.ID)
+			if err != nil {
+				writeJSONError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			count, _ := s.db.CountResultsForRun(existingRun.ID)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK) // 200 instead of 201 for existing
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":               existingRun.ID,
+				"commit_hash":      existingRun.CommitHash,
+				"commit_hash_full": existingRun.CommitHashFull,
+				"run_date":         existingRun.RunDate,
+				"result_count":     count,
+				"result_ids":       resultIDs,
+			})
+			return
+		}
+	}
+
+	// Insert run
+	run := &db.Run{
+		CommitHash:     req.CommitHash,
+		CommitHashFull: req.CommitHashFull,
+		CommitMessage:  req.CommitMessage,
+		CommitDate:     req.CommitDate,
+		Branch:         req.Branch,
+		RunDate:        time.Now().Format(time.RFC3339),
+		MachineID:      req.MachineID,
+		Notes:          req.Notes,
+		ZigOptimize:    req.ZigOptimize,
+	}
+
+	runID, err := s.db.InsertRun(run)
+	if err != nil {
+		writeJSONError(w, "insert run: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	cleanup := func() {
+		_ = s.db.DeleteRun(runID)
+	}
+
+	resultIDs := make(map[string]int64, len(req.Results))
+
+	for _, rr := range req.Results {
+		result := &db.Result{
+			RunID:       runID,
+			Category:    rr.Category,
+			Name:        rr.Name,
+			MinNs:       rr.MinNs,
+			AvgNs:       rr.AvgNs,
+			MaxNs:       rr.MaxNs,
+			StdDevNs:    rr.StdDevNs,
+			P50Ns:       rr.P50Ns,
+			P95Ns:       rr.P95Ns,
+			P99Ns:       rr.P99Ns,
+			TotalNs:     rr.TotalNs,
+			Iterations:  rr.Iterations,
+			SampleCount: rr.SampleCount,
+		}
+
+		resultID, err := s.db.InsertResult(result)
+		if err != nil {
+			cleanup()
+			writeJSONError(w, "insert result: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Use "category/name" as key since benchmark names may not be unique across categories
+		resultIDs[rr.Category+"/"+rr.Name] = resultID
+
+		for _, ms := range rr.MemStats {
+			stat := &db.MemStat{
+				ResultID: resultID,
+				StatName: ms.Name,
+				Bytes:    ms.Bytes,
+			}
+			if err := s.db.InsertMemStat(stat); err != nil {
+				cleanup()
+				writeJSONError(w, "insert mem stat: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":               runID,
+		"commit_hash":      req.CommitHash,
+		"commit_hash_full": req.CommitHashFull,
+		"run_date":         run.RunDate,
+		"result_count":     len(req.Results),
+		"result_ids":       resultIDs,
+	})
+}
+
+// findExistingRun checks for a run matching (commit_hash_full, machine_id, zig_optimize).
+func (s *Server) findExistingRun(commitHashFull, machineID, zigOptimize string) (*db.Run, error) {
+	var r db.Run
+	var commitHashFullN, commitMessage, commitDate, branch, machineIDN, notes, zigOptimizeN sql.NullString
+	err := s.db.QueryRow(`
+		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
+		FROM runs WHERE commit_hash_full = ? AND machine_id = ? AND zig_optimize = ?
+		ORDER BY run_date DESC LIMIT 1`, commitHashFull, machineID, zigOptimize).Scan(
+		&r.ID, &r.CommitHash, &commitHashFullN, &commitMessage, &commitDate, &branch, &r.RunDate, &machineIDN, &notes, &zigOptimizeN)
+	if err != nil {
+		return nil, err
+	}
+	r.CommitHashFull = commitHashFullN.String
+	r.CommitMessage = commitMessage.String
+	r.CommitDate = commitDate.String
+	r.Branch = branch.String
+	r.MachineID = machineIDN.String
+	r.Notes = notes.String
+	r.ZigOptimize = zigOptimizeN.String
+	return &r, nil
+}
+
+// buildResultIDMap builds a "category/name" -> resultID map for a run.
+func (s *Server) buildResultIDMap(runID int64) (map[string]int64, error) {
+	results, err := s.db.GetResultsForRun(runID)
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[string]int64, len(results))
+	for _, r := range results {
+		m[r.Category+"/"+r.Name] = r.ID
+	}
+	return m, nil
+}
+
+// handleUploadArtifact handles POST /api/runs/{id}/results/{rid}/artifacts
+func (s *Server) handleUploadArtifact(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse path: /api/runs/{id}/results/{rid}/artifacts
+	path := strings.TrimPrefix(r.URL.Path, "/api/runs/")
+	path = strings.TrimSuffix(path, "/artifacts")
+	parts := strings.Split(path, "/results/")
+	if len(parts) != 2 {
+		writeJSONError(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	runID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		writeJSONError(w, "invalid run id", http.StatusBadRequest)
+		return
+	}
+
+	resultID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		writeJSONError(w, "invalid result id", http.StatusBadRequest)
+		return
+	}
+
+	// Validate result belongs to run
+	if err := s.ensureResultBelongsToRun(runID, resultID); err != nil {
+		if err == sql.ErrNoRows {
+			writeJSONError(w, "result not found", http.StatusNotFound)
+			return
+		}
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	kind := r.URL.Query().Get("kind")
+	if kind == "" {
+		writeJSONError(w, "kind query parameter required", http.StatusBadRequest)
+		return
+	}
+
+	metadata := r.URL.Query().Get("metadata")
+	if metadata == "" {
+		metadata = "{}"
+	}
+
+	// Read body with size limit
+	body := io.LimitReader(r.Body, maxProfileSize)
+	data, err := io.ReadAll(body)
+	if err != nil {
+		writeJSONError(w, "read body: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(data) == 0 {
+		writeJSONError(w, "empty body", http.StatusBadRequest)
+		return
+	}
+
+	artID, err := s.db.InsertArtifact(&db.Artifact{
+		ResultID:  resultID,
+		Kind:      kind,
+		DataBlob:  data,
+		Metadata:  metadata,
+		CreatedAt: time.Now().Format(time.RFC3339),
+	})
+	if err != nil {
+		writeJSONError(w, "insert artifact: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":   artID,
+		"kind": kind,
+		"size": len(data),
+	})
+}
+
+// handleHasCommit handles GET /api/has-commit/{hash}
+func (s *Server) handleHasCommit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	hash := strings.TrimPrefix(r.URL.Path, "/api/has-commit/")
+	if hash == "" {
+		writeJSONError(w, "commit hash required", http.StatusBadRequest)
+		return
+	}
+
+	exists, err := s.db.HasCommit(hash)
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"exists": exists,
+	})
+}
+
+// handleLatestCommit handles GET /api/latest-commit
+func (s *Server) handleLatestCommit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	run, err := s.db.GetLatestRun()
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"commit_hash":      nil,
+				"commit_hash_full": nil,
+			})
+			return
+		}
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"commit_hash":      run.CommitHash,
+		"commit_hash_full": run.CommitHashFull,
+	})
+}
+
+// handleClaimJob handles POST /api/jobs/claim - atomically claim next pending job.
+func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	job, err := s.db.ClaimNextPendingJob()
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if job == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(jobToResponse(job)); err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// handleUpdateJob handles PATCH /api/jobs/{id} - update job status/commit/run_id.
+func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request, id int64) {
+	var req struct {
+		Status     *string `json:"status"`
+		CommitHash *string `json:"commit_hash"`
+		RunID      *int64  `json:"run_id"`
+		Error      *string `json:"error"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Get current job
+	job, err := s.db.GetJob(id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSONError(w, "job not found", http.StatusNotFound)
+			return
+		}
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Handle commit_hash update (no status change required)
+	if req.CommitHash != nil {
+		if err := s.db.UpdateJobCommitHash(id, *req.CommitHash); err != nil {
+			writeJSONError(w, "update commit hash: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Handle status transitions
+	if req.Status != nil {
+		newStatus := *req.Status
+		currentStatus := job.Status
+
+		switch {
+		case currentStatus == "running" && newStatus == "completed":
+			if req.RunID == nil {
+				writeJSONError(w, "run_id required for completed status", http.StatusBadRequest)
+				return
+			}
+			if err := s.db.CompleteJob(id, *req.RunID); err != nil {
+				writeJSONError(w, "complete job: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		case currentStatus == "running" && newStatus == "failed":
+			errMsg := ""
+			if req.Error != nil {
+				errMsg = *req.Error
+			}
+			if err := s.db.FailJob(id, errMsg); err != nil {
+				writeJSONError(w, "fail job: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		case currentStatus == "running" && newStatus == "running":
+			// No-op for status, just allow commit_hash update
+		default:
+			writeJSONError(w, fmt.Sprintf("invalid state transition: %s -> %s", currentStatus, newStatus), http.StatusConflict)
+			return
+		}
+	}
+
+	// Re-fetch and return updated job
+	updated, err := s.db.GetJob(id)
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(jobToResponse(updated)); err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// writeJSONError writes a JSON error response in the standard format.
+func writeJSONError(w http.ResponseWriter, msg string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

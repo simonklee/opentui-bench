@@ -7,10 +7,9 @@
 #
 # This script manages the benchmarking process:
 # 1. Sets up repositories (opentui-bench, opentui)
-# 2. Syncs the benchmark database from Fly.io
-# 3. Identifies commits to benchmark
-# 4. Runs benchmarks using 'bench record'
-# 5. Uploads results back to Fly.io
+# 2. Identifies commits to benchmark
+# 3. Runs benchmarks using 'bench record --api-url'
+# 4. Results are posted directly to the Fly.io API
 #
 # It is robust, uses locking to prevent concurrent runs, and handles errors gracefully.
 
@@ -44,9 +43,11 @@ readonly SCRIPT_DIR
 readonly REPOS_DIR="$HOME/repos"
 readonly BENCH_REPO="$REPOS_DIR/opentui-bench"
 readonly OPENTUI_REPO="$REPOS_DIR/opentui"
-readonly DB_FILE="$BENCH_REPO/public-opentui.db"
 readonly LOG_FILE="$HOME/benchmark.log"
-readonly FLY_APP="opentui-bench"
+
+# API configuration - set these as environment variables
+: "${API_URL:=https://opentui-bench.fly.dev}"
+: "${API_KEY:?BENCH_API_KEY or API_KEY must be set}"
 
 # Export PATH to include necessary binaries
 export PATH="$HOME/.cargo/bin:$HOME/anyzig:$HOME/.fly/bin:/usr/local/go/bin:$PATH"
@@ -141,8 +142,6 @@ lock_acquire() {
 		cleanup_register "lock_release"
 		info "Acquired script lock: $lock_dir"
 	else
-		# Check if the process holding the lock is still alive
-		# This is a basic stale lock check, could be more robust
 		err "Script is already running (lock exists: $lock_dir)"
 		exit 1
 	fi
@@ -166,63 +165,7 @@ check_dependencies() {
 		err "Missing required commands: ${missing[*]}"
 		return 1
 	fi
-
-	# Install flyctl if missing
-	if ! command -v flyctl &>/dev/null; then
-		log "Installing flyctl..."
-		curl -L https://fly.io/install.sh | sh
-		export FLYCTL_INSTALL="$HOME/.fly"
-		export PATH="$FLYCTL_INSTALL/bin:$PATH"
-	fi
 	return 0
-}
-
-fly_machine_running() {
-	local app="$1"
-	# Check if any machine is started or running using jq
-	flyctl machine list --app "$app" --json 2>/dev/null |
-		jq -e 'any(.[]; (.state // "") | ascii_downcase | . == "started" or . == "running")' >/dev/null
-}
-
-fly_machine_first_id() {
-	local app="$1"
-	# Get the first machine ID found
-	flyctl machine list --app "$app" --json 2>/dev/null |
-		jq -r 'map(select(.id)) | .[0].id // empty'
-}
-
-ensure_fly_app_running() {
-	local app="$FLY_APP"
-	local max_attempts=30
-	local attempt=0
-
-	if fly_machine_running "$app"; then
-		return 0
-	fi
-
-	log "Fly app is not running, starting it..."
-	local machine_id
-	machine_id="$(fly_machine_first_id "$app")"
-
-	if [[ -n "$machine_id" ]]; then
-		log "Starting machine $machine_id..."
-		flyctl machine start "$machine_id" --app "$app" 2>&1 || true
-	else
-		log "No machine found, scaling up..."
-		flyctl scale count 1 --app "$app" --yes 2>&1 || true
-	fi
-
-	while ((attempt < max_attempts)); do
-		if fly_machine_running "$app"; then
-			log "Fly app is now running"
-			return 0
-		fi
-		((attempt++))
-		sleep 2
-	done
-
-	err "Fly app failed to start after ${max_attempts} attempts"
-	return 1
 }
 
 setup_repos() {
@@ -257,58 +200,6 @@ setup_repos() {
 	git fetch simonklee
 }
 
-sync_db_down() {
-	log "Downloading DB from Fly.io..."
-	cd "$BENCH_REPO"
-	ensure_fly_app_running || true
-
-	if [[ -f "$DB_FILE" ]]; then
-		chmod u+w "$DB_FILE" || true
-	fi
-
-	local tmp_db
-	tmp_db="$(mktemp "${DB_FILE}.XXXXXX")"
-	rm -f "$tmp_db" # flyctl sftp refuses to overwrite existing files
-
-	if flyctl ssh sftp get /data/bench.db "$tmp_db" --app "$FLY_APP"; then
-		log "Downloaded DB from Fly"
-		mv -f "$tmp_db" "$DB_FILE"
-		chmod u+w "$DB_FILE" || true
-	else
-		rm -f "$tmp_db"
-		err "Failed to download DB from Fly"
-		return 1
-	fi
-}
-
-sync_db_up() {
-	log "Uploading updated DB to Fly.io..."
-	cd "$BENCH_REPO"
-	ensure_fly_app_running
-
-	local machine_id
-	machine_id="$(fly_machine_first_id "$FLY_APP")"
-
-	if [[ -z "$machine_id" ]]; then
-		err "No running machine found to upload DB"
-		return 1
-	fi
-
-	# Remove remote DB first as sftp put doesn't overwrite
-	log "Removing existing remote DB on machine $machine_id..."
-	flyctl ssh console --machine "$machine_id" --app "$FLY_APP" -C "rm -f /data/bench.db" || true
-
-	if flyctl ssh sftp put "$DB_FILE" /data/bench.db --machine "$machine_id" --app "$FLY_APP"; then
-		log "Uploaded DB to Fly"
-	else
-		err "Failed to upload DB to Fly!"
-		return 1
-	fi
-
-	log "Restarting Fly app..."
-	flyctl apps restart "$FLY_APP"
-}
-
 reset_opentui() {
 	if [[ -d "$OPENTUI_REPO" ]]; then
 		cd "$OPENTUI_REPO"
@@ -319,9 +210,9 @@ reset_opentui() {
 run_benchmarks() {
 	cd "$OPENTUI_REPO"
 
-	# Find latest recorded commit
+	# Ask the API for the latest recorded commit
 	local latest_recorded
-	latest_recorded=$("$BENCH_REPO/bench" latest-commit --db "$DB_FILE" 2>/dev/null || echo "")
+	latest_recorded=$(curl -s "$API_URL/api/latest-commit" | jq -r '.commit_hash_full // empty | select(. != "null")')
 
 	local commits
 	if [[ -n "$latest_recorded" ]] && git cat-file -e "$latest_recorded" 2>/dev/null; then
@@ -346,22 +237,18 @@ run_benchmarks() {
 	# Checkout the commit
 	git checkout "$next_commit"
 
-	# Run benchmarks
+	# Record posts results directly to the API
 	cd "$BENCH_REPO"
-	# Samples set to 3 for dedicated hardware (adjust as needed)
 	if $dry_run; then
-		log "Dry run: would exec ./bench record ..."
+		log "Dry run: would exec ./bench record --api-url ..."
 	else
-		./bench record --repo "$OPENTUI_REPO" --db "$DB_FILE" --samples 3 --notes "Hetzner CCX13" --profile cpu
+		./bench record --repo "$OPENTUI_REPO" \
+			--api-url "$API_URL" --api-key "$API_KEY" \
+			--samples 3 --profile cpu --notes "Hetzner CCX13"
 	fi
 
 	# Reset opentui repo
 	reset_opentui
-
-	# Upload results
-	if ! $dry_run; then
-		sync_db_up
-	fi
 
 	log "Benchmark run complete for ${next_commit:0:7}"
 }
@@ -376,10 +263,8 @@ run_queued_jobs() {
 		return 0
 	fi
 
-	if ./bench worker --repo "$OPENTUI_REPO" --db "$DB_FILE" --once; then
-		# Upload if a job was processed
-		sync_db_up
-	fi
+	./bench worker --repo "$OPENTUI_REPO" \
+		--api-url "$API_URL" --api-key "$API_KEY" --once
 
 	return 0
 }
@@ -394,6 +279,10 @@ Options:
     -v, --verbose    Enable verbose output
     -n, --dry-run    Show what would be done without doing it
     -h, --help       Show this help message
+
+Environment variables:
+    API_URL          API endpoint (default: https://opentui-bench.fly.dev)
+    API_KEY          API key for authentication (required)
 EOF
 }
 
@@ -430,13 +319,6 @@ main() {
 	check_dependencies
 
 	setup_repos
-
-	if $dry_run; then
-		log "Dry run: Skipping DB download"
-	else
-		sync_db_down
-	fi
-
 	run_benchmarks
 	run_queued_jobs
 }

@@ -136,6 +136,24 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
+	// Serialize all access through one connection. SQLite supports only one
+	// writer at a time; multiple connections cause SQLITE_BUSY errors.
+	sqlDB.SetMaxOpenConns(1)
+
+	// WAL mode: allows concurrent reads while a write is in progress.
+	// Without this, readers block writers and vice versa.
+	if _, err := sqlDB.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("enable WAL mode: %w", err)
+	}
+
+	// Wait up to 5s for locks instead of failing immediately.
+	// Handles transient contention from concurrent HTTP requests.
+	if _, err := sqlDB.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("set busy timeout: %w", err)
+	}
+
 	if _, err := sqlDB.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)

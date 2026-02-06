@@ -45,6 +45,30 @@ type RunMetadata struct {
 	SampleCount    int
 }
 
+// ParsedRun contains a fully parsed and aggregated benchmark run, ready for
+// storage (local DB or remote API). Built entirely in memory with no side effects.
+type ParsedRun struct {
+	Meta    RunMetadata
+	Results []ParsedResult
+}
+
+// ParsedResult is a single aggregated benchmark result with optional memory stats.
+type ParsedResult struct {
+	Category    string
+	Name        string
+	MinNs       int64
+	AvgNs       int64
+	MaxNs       int64
+	StdDevNs    int64
+	P50Ns       int64
+	P95Ns       int64
+	P99Ns       int64
+	TotalNs     int64
+	Iterations  int64
+	SampleCount int64
+	MemStats    []MemStatJSON
+}
+
 type sample struct {
 	minNs      int64
 	avgNs      int64
@@ -59,29 +83,12 @@ type benchmarkKey struct {
 	name     string
 }
 
-func Record(database *db.DB, reader io.Reader, meta RunMetadata) (int64, int, error) {
-	run := &db.Run{
-		CommitHash:     meta.CommitHash,
-		CommitHashFull: meta.CommitHashFull,
-		CommitMessage:  meta.CommitMessage,
-		CommitDate:     meta.CommitDate,
-		Branch:         meta.Branch,
-		RunDate:        time.Now().Format(time.RFC3339),
-		MachineID:      meta.MachineID,
-		Notes:          meta.Notes,
-		ZigOptimize:    meta.ZigOptimize,
-	}
-
-	if run.ZigOptimize == "" {
-		run.ZigOptimize = "ReleaseFast"
-	}
-
-	runID, err := database.InsertRun(run)
-	if err != nil {
-		return 0, 0, fmt.Errorf("insert run: %w", err)
-	}
-	cleanup := func() {
-		_ = database.DeleteRun(runID)
+// Parse reads benchmark JSON output and aggregates samples into a ParsedRun.
+// It does everything Record() does up to the DB write: parses JSON, aggregates
+// samples, builds the result structs. No DB dependency. No side effects.
+func Parse(reader io.Reader, meta RunMetadata) (*ParsedRun, error) {
+	if meta.ZigOptimize == "" {
+		meta.ZigOptimize = "ReleaseFast"
 	}
 
 	samples := make(map[benchmarkKey][]sample)
@@ -104,8 +111,7 @@ func Record(database *db.DB, reader io.Reader, meta RunMetadata) (int64, int, er
 
 		var bench BenchmarkJSON
 		if err := json.Unmarshal([]byte(trimmed), &bench); err != nil {
-			cleanup()
-			return 0, 0, fmt.Errorf("parse benchmark JSON on line %d: %w", lineNum, err)
+			return nil, fmt.Errorf("parse benchmark JSON on line %d: %w", lineNum, err)
 		}
 
 		for _, r := range bench.Results {
@@ -125,16 +131,82 @@ func Record(database *db.DB, reader io.Reader, meta RunMetadata) (int64, int, er
 	}
 
 	if err := scanner.Err(); err != nil {
-		cleanup()
-		return 0, 0, fmt.Errorf("scan input: %w", err)
+		return nil, fmt.Errorf("scan input: %w", err)
 	}
 
-	totalResults := 0
+	parsed := &ParsedRun{Meta: meta}
 
 	for _, key := range keyOrder {
 		sampleList := samples[key]
-		result := aggregateSamples(key.category, key.name, sampleList)
-		result.RunID = runID
+		agg := aggregateSamples(key.category, key.name, sampleList)
+
+		var memStats []MemStatJSON
+		if len(sampleList) > 0 && len(sampleList[0].memStats) > 0 {
+			memStats = sampleList[0].memStats
+		}
+
+		parsed.Results = append(parsed.Results, ParsedResult{
+			Category:    agg.Category,
+			Name:        agg.Name,
+			MinNs:       agg.MinNs,
+			AvgNs:       agg.AvgNs,
+			MaxNs:       agg.MaxNs,
+			StdDevNs:    agg.StdDevNs,
+			P50Ns:       agg.P50Ns,
+			P95Ns:       agg.P95Ns,
+			P99Ns:       agg.P99Ns,
+			TotalNs:     agg.TotalNs,
+			Iterations:  agg.Iterations,
+			SampleCount: agg.SampleCount,
+			MemStats:    memStats,
+		})
+	}
+
+	return parsed, nil
+}
+
+// Store writes a ParsedRun to the database. Returns the run ID and result count.
+func Store(database *db.DB, parsed *ParsedRun) (int64, int, error) {
+	run := &db.Run{
+		CommitHash:     parsed.Meta.CommitHash,
+		CommitHashFull: parsed.Meta.CommitHashFull,
+		CommitMessage:  parsed.Meta.CommitMessage,
+		CommitDate:     parsed.Meta.CommitDate,
+		Branch:         parsed.Meta.Branch,
+		RunDate:        time.Now().Format(time.RFC3339),
+		MachineID:      parsed.Meta.MachineID,
+		Notes:          parsed.Meta.Notes,
+		ZigOptimize:    parsed.Meta.ZigOptimize,
+	}
+
+	if run.ZigOptimize == "" {
+		run.ZigOptimize = "ReleaseFast"
+	}
+
+	runID, err := database.InsertRun(run)
+	if err != nil {
+		return 0, 0, fmt.Errorf("insert run: %w", err)
+	}
+	cleanup := func() {
+		_ = database.DeleteRun(runID)
+	}
+
+	for _, pr := range parsed.Results {
+		result := &db.Result{
+			RunID:       runID,
+			Category:    pr.Category,
+			Name:        pr.Name,
+			MinNs:       pr.MinNs,
+			AvgNs:       pr.AvgNs,
+			MaxNs:       pr.MaxNs,
+			StdDevNs:    pr.StdDevNs,
+			P50Ns:       pr.P50Ns,
+			P95Ns:       pr.P95Ns,
+			P99Ns:       pr.P99Ns,
+			TotalNs:     pr.TotalNs,
+			Iterations:  pr.Iterations,
+			SampleCount: pr.SampleCount,
+		}
 
 		resultID, err := database.InsertResult(result)
 		if err != nil {
@@ -142,24 +214,31 @@ func Record(database *db.DB, reader io.Reader, meta RunMetadata) (int64, int, er
 			return 0, 0, fmt.Errorf("insert result: %w", err)
 		}
 
-		if len(sampleList) > 0 && len(sampleList[0].memStats) > 0 {
-			for _, ms := range sampleList[0].memStats {
-				stat := &db.MemStat{
-					ResultID: resultID,
-					StatName: ms.Name,
-					Bytes:    ms.Bytes,
-				}
-				if err := database.InsertMemStat(stat); err != nil {
-					cleanup()
-					return 0, 0, fmt.Errorf("insert mem stat: %w", err)
-				}
+		for _, ms := range pr.MemStats {
+			stat := &db.MemStat{
+				ResultID: resultID,
+				StatName: ms.Name,
+				Bytes:    ms.Bytes,
+			}
+			if err := database.InsertMemStat(stat); err != nil {
+				cleanup()
+				return 0, 0, fmt.Errorf("insert mem stat: %w", err)
 			}
 		}
-
-		totalResults++
 	}
 
-	return runID, totalResults, nil
+	return runID, len(parsed.Results), nil
+}
+
+// Record parses benchmark output and writes it to the database. This is a
+// convenience function that calls Parse() then Store(). Existing callers
+// (backfill, local usage) don't need to change.
+func Record(database *db.DB, reader io.Reader, meta RunMetadata) (int64, int, error) {
+	parsed, err := Parse(reader, meta)
+	if err != nil {
+		return 0, 0, err
+	}
+	return Store(database, parsed)
 }
 
 func aggregateSamples(category, name string, sampleList []sample) *db.Result {

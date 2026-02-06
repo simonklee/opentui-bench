@@ -39,6 +39,36 @@ make help            # Show all available commands
 ./bench trend "benchmark_name"       # Show performance trend
 ```
 
+## Triggering Benchmark Runs
+
+Benchmarks run automatically every 30 minutes via cron (recording the next
+unrecorded commit on `origin/main`). To benchmark a different branch or commit,
+queue a job via the API. The Hetzner worker picks it up on its next poll.
+
+```bash
+# Queue a benchmark for a feature branch
+curl -X POST https://opentui-bench.fly.dev/api/jobs \
+  -H "Authorization: Bearer $(pass opentui-bench/api-key)" \
+  -H "Content-Type: application/json" \
+  -d '{"branch": "feature/fast-rope"}'
+
+# Queue with a specific commit and options
+curl -X POST https://opentui-bench.fly.dev/api/jobs \
+  -H "Authorization: Bearer $(pass opentui-bench/api-key)" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "branch": "feature/fast-rope",
+    "commit_hash": "abc123def456",
+    "samples": 3,
+    "profile": "cpu",
+    "notes": "testing rope optimization",
+    "requested_by": "simon"
+  }'
+
+# Check job status
+curl -s https://opentui-bench.fly.dev/api/jobs?limit=5 | jq .
+```
+
 ## Architecture
 
 - `cmd/bench/` - CLI entry point

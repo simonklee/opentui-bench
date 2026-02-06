@@ -48,7 +48,7 @@ log "Triggering benchmark run in background"
 
 # Launch in background, detached from session
 # Explicitly pass FLY_API_TOKEN and PATH to ensure they survive detachment
-FLY_API_TOKEN="${FLY_API_TOKEN:-}" PATH="$PATH" nohup "$RUN_SCRIPT" >>"$LOG_FILE" 2>&1 &
+FLY_API_TOKEN="${FLY_API_TOKEN:-}" API_KEY="${API_KEY:-}" PATH="$PATH" nohup "$RUN_SCRIPT" >>"$LOG_FILE" 2>&1 &
 echo $! >"$PID_FILE"
 
 log "Started benchmark process (pid $!)"
