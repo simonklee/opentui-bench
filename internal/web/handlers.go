@@ -1557,12 +1557,23 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse "user:branch" format (GitHub fork reference).
+	// e.g. "zenyr:fix/255-line-starts-byte-offset" becomes:
+	//   repo_url = "https://github.com/zenyr/opentui.git"
+	//   branch   = "fix/255-line-starts-byte-offset"
+	repoURL := "origin"
+	branch := req.Branch
+	if parts := strings.SplitN(req.Branch, ":", 2); len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+		repoURL = "https://github.com/" + parts[0] + "/opentui.git"
+		branch = parts[1]
+	}
+
 	job := &db.Job{
 		Status:      "pending",
 		Kind:        "benchmark",
-		Branch:      req.Branch,
+		Branch:      branch,
 		CommitHash:  req.CommitHash,
-		RepoURL:     "origin",
+		RepoURL:     repoURL,
 		Samples:     req.Samples,
 		Profile:     req.Profile,
 		Notes:       req.Notes,

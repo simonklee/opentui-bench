@@ -1099,27 +1099,28 @@ func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollI
 }
 
 func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath string) error {
-	// Fetch the branch/remote
-	_, _ = color.New(color.FgWhite).Printf("  Fetching %s...\n", job.RepoURL)
-	if _, err := runGitCommand(ctx, repoPath, "fetch", job.RepoURL); err != nil {
-		return fmt.Errorf("git fetch: %w", err)
+	repoURL := job.RepoURL
+	if repoURL == "" {
+		repoURL = "origin"
 	}
 
 	// Resolve the commit to check out
 	checkoutRef := job.CommitHash
 	if checkoutRef == "" {
-		// Resolve branch HEAD from remote
-		remoteBranch := job.RepoURL + "/" + job.Branch
-		resolved, err := runGitCommand(ctx, repoPath, "rev-parse", remoteBranch)
-		if err != nil {
-			return fmt.Errorf("resolve %s: %w", remoteBranch, err)
+		checkoutRef, _ = fetchAndResolve(ctx, repoPath, repoURL, job.Branch)
+		if checkoutRef == "" {
+			return fmt.Errorf("resolve %s branch %s: could not determine commit", repoURL, job.Branch)
 		}
-		checkoutRef = strings.TrimSpace(resolved)
 		// Record the resolved commit on the job
 		if err := database.UpdateJobCommitHash(job.ID, checkoutRef); err != nil {
 			return fmt.Errorf("update job commit hash: %w", err)
 		}
-		fmt.Printf("  Resolved %s to %s\n", remoteBranch, shortHash(checkoutRef))
+		fmt.Printf("  Resolved %s/%s to %s\n", repoURL, job.Branch, shortHash(checkoutRef))
+	} else {
+		_, _ = color.New(color.FgWhite).Printf("  Fetching %s...\n", repoURL)
+		if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL); err != nil {
+			return fmt.Errorf("git fetch: %w", err)
+		}
 	}
 
 	// Save current HEAD so we can restore after
@@ -1251,20 +1252,14 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 	if repoURL == "" {
 		repoURL = "origin"
 	}
-	_, _ = color.New(color.FgWhite).Printf("  Fetching %s...\n", repoURL)
-	if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL); err != nil {
-		return fmt.Errorf("git fetch: %w", err)
-	}
 
 	// Resolve the commit to check out
 	checkoutRef := job.CommitHash
 	if checkoutRef == "" {
-		remoteBranch := repoURL + "/" + job.Branch
-		resolved, err := runGitCommand(ctx, repoPath, "rev-parse", remoteBranch)
-		if err != nil {
-			return fmt.Errorf("resolve %s: %w", remoteBranch, err)
+		checkoutRef, _ = fetchAndResolve(ctx, repoPath, repoURL, job.Branch)
+		if checkoutRef == "" {
+			return fmt.Errorf("resolve %s branch %s: could not determine commit", repoURL, job.Branch)
 		}
-		checkoutRef = strings.TrimSpace(resolved)
 		// Record the resolved commit on the job
 		if err := remote.UpdateJob(job.ID, map[string]interface{}{
 			"status":      "running",
@@ -1272,7 +1267,12 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 		}); err != nil {
 			return fmt.Errorf("update job commit hash: %w", err)
 		}
-		fmt.Printf("  Resolved %s to %s\n", remoteBranch, shortHash(checkoutRef))
+		fmt.Printf("  Resolved %s/%s to %s\n", repoURL, job.Branch, shortHash(checkoutRef))
+	} else {
+		_, _ = color.New(color.FgWhite).Printf("  Fetching %s...\n", repoURL)
+		if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL); err != nil {
+			return fmt.Errorf("git fetch: %w", err)
+		}
 	}
 
 	// Save current HEAD so we can restore after
@@ -1547,6 +1547,38 @@ func runBackfill(ctx context.Context, database *db.DB, count int, start string, 
 
 	color.Green("\nBackfill complete")
 	return nil
+}
+
+// fetchAndResolve fetches a branch from a remote and resolves it to a commit hash.
+// For named remotes (e.g. "origin"), it fetches then resolves "remote/branch".
+// For URL remotes (e.g. fork URLs), it fetches the specific branch and resolves FETCH_HEAD.
+func fetchAndResolve(ctx context.Context, repoPath, repoURL, branch string) (string, error) {
+	isURL := strings.Contains(repoURL, "://") || strings.Contains(repoURL, "@")
+
+	if isURL {
+		// Fetch the specific branch from the URL; this populates FETCH_HEAD
+		_, _ = color.New(color.FgWhite).Printf("  Fetching %s branch %s...\n", repoURL, branch)
+		if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL, branch); err != nil {
+			return "", fmt.Errorf("git fetch %s %s: %w", repoURL, branch, err)
+		}
+		resolved, err := runGitCommand(ctx, repoPath, "rev-parse", "FETCH_HEAD")
+		if err != nil {
+			return "", fmt.Errorf("resolve FETCH_HEAD: %w", err)
+		}
+		return strings.TrimSpace(resolved), nil
+	}
+
+	// Named remote (e.g. "origin")
+	_, _ = color.New(color.FgWhite).Printf("  Fetching %s...\n", repoURL)
+	if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL); err != nil {
+		return "", fmt.Errorf("git fetch %s: %w", repoURL, err)
+	}
+	remoteBranch := repoURL + "/" + branch
+	resolved, err := runGitCommand(ctx, repoPath, "rev-parse", remoteBranch)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", remoteBranch, err)
+	}
+	return strings.TrimSpace(resolved), nil
 }
 
 func runGitCommand(ctx context.Context, repoPath string, args ...string) (string, error) {
