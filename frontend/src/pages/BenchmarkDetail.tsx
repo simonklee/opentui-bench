@@ -24,6 +24,9 @@ const BenchmarkDetail: Component = () => {
     selectBenchmark,
     selectedBenchmark,
     trendData,
+    branchTrendData,
+    isOnBranch,
+    runBranch,
     hasCpuProfile,
     closeDetail,
     navigate,
@@ -117,7 +120,9 @@ const BenchmarkDetail: Component = () => {
           benchmark={selectedBenchmark()!}
           runId={run()!.id}
           commitHash={run()!.commit_hash}
+          branch={runBranch()}
           trendData={trendData()}
+          branchTrendData={isOnBranch() ? branchTrendData() : undefined}
           flamegraphView={flamegraphView()}
           setFlamegraphView={setFlamegraphView}
           hasCpuProfile={hasCpuProfile()}

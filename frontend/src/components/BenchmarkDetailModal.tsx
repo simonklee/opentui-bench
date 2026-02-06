@@ -12,7 +12,9 @@ interface BenchmarkDetailModalProps {
   benchmark: BenchmarkResult;
   runId: number;
   commitHash: string;
+  branch: string;
   trendData: TrendResponse | undefined;
+  branchTrendData?: TrendResponse | undefined;
   flamegraphView: "flamegraph" | "callgraph";
   setFlamegraphView: (v: "flamegraph" | "callgraph") => void;
   hasCpuProfile: boolean;
@@ -59,6 +61,11 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
           <span class="font-mono text-[11px] md:text-[13px] text-text-muted">
             #{props.commitHash.slice(0, 7)}
           </span>
+          <Show when={props.branch && props.branch !== "main" && props.branch !== ""}>
+            <span class="ml-1 px-1.5 py-0.5 text-[10px] font-mono font-medium bg-purple-100 text-purple-700 rounded-sm">
+              {props.branch}
+            </span>
+          </Show>
           <span class="text-text-muted">/</span>
           <span class="font-mono font-bold text-black text-[13px] md:text-[15px] truncate">
             {props.benchmark.name}
@@ -197,6 +204,8 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
               >
                 <TrendChart
                   data={props.trendData!.points}
+                  overlayData={props.branchTrendData?.points}
+                  overlayBranch={props.branch}
                   range={props.chartRange}
                   currentRunId={props.runId}
                   baselineCILowerNs={props.trendData!.baseline_ci_lower_ns}

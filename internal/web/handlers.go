@@ -331,7 +331,9 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	trends, err := s.db.GetTrend(name, limit)
+	branch := r.URL.Query().Get("branch")
+
+	trends, err := s.db.GetTrend(name, limit, branch)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -341,6 +343,7 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		RunID            int64    `json:"run_id"`
 		ResultID         int64    `json:"result_id"`
 		CommitHash       string   `json:"commit_hash"`
+		Branch           string   `json:"branch"`
 		RunDate          string   `json:"run_date"`
 		AvgNs            int64    `json:"avg_ns"`    // Mean (kept for backwards compatibility)
 		MedianNs         int64    `json:"median_ns"` // Median (p50) - primary metric for regression
@@ -394,6 +397,7 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 			RunID:       t.Run.ID,
 			ResultID:    t.Result.ID,
 			CommitHash:  t.Run.CommitHash,
+			Branch:      t.Run.Branch,
 			RunDate:     t.Run.RunDate,
 			AvgNs:       t.Result.AvgNs,
 			MedianNs:    t.Result.P50Ns,
@@ -1331,6 +1335,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 
 	type regressionsResponse struct {
 		RunID               *int64       `json:"run_id"`
+		Branch              string       `json:"branch"`
 		Window              int          `json:"window"`
 		MinPoints           int          `json:"min_points"`
 		BaselineOffset      int          `json:"baseline_offset"`
@@ -1454,8 +1459,15 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Get branch from the comparable runs (they all share the same branch)
+	var branch string
+	if len(runs) > 0 {
+		branch = runs[0].Branch
+	}
+
 	response := regressionsResponse{
 		RunID:               &runID,
+		Branch:              branch,
 		Window:              window,
 		MinPoints:           minPoints,
 		BaselineOffset:      baselineOffset,

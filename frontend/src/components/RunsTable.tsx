@@ -47,7 +47,16 @@ const RunsTable: Component<RunsTableProps> = (props) => {
                 >
                   {run.commit_message}
                 </td>
-                <td class="px-4 py-3 opacity-80">{run.branch}</td>
+                <td class="px-4 py-3">
+                  <Show
+                    when={run.branch && run.branch !== "" && run.branch !== "main"}
+                    fallback={<span class="opacity-50">main</span>}
+                  >
+                    <span class="px-1.5 py-0.5 text-[10px] font-mono font-medium bg-purple-100 text-purple-700 rounded-sm">
+                      {run.branch}
+                    </span>
+                  </Show>
+                </td>
                 <td class="px-4 py-3 opacity-80">{new Date(run.run_date).toLocaleString()}</td>
                 <td class="px-4 py-3 font-bold">{run.result_count}</td>
               </tr>

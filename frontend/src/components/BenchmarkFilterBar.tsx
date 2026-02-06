@@ -1,4 +1,4 @@
-import { For } from "solid-js";
+import { For, Show } from "solid-js";
 import type { Component } from "solid-js";
 import { Button } from "./Button";
 
@@ -6,6 +6,7 @@ interface BenchmarkFilterBarProps {
   run?: {
     commit_hash: string;
     commit_message: string;
+    branch?: string;
   } | null;
   filter: string;
   setFilter: (v: string) => void;
@@ -29,9 +30,16 @@ const BenchmarkFilterBar: Component<BenchmarkFilterBarProps> = (props) => {
         <h2 class="text-[14px] font-bold text-black uppercase tracking-widest flex items-center gap-2 sm:gap-3">
           Benchmarks
           {showRunInfo() && props.run && (
-            <span class="font-mono text-text-muted text-[11px] normal-case hidden sm:inline-block bg-bg-hover px-1.5 py-0.5 rounded-none">
-              #{props.run.commit_hash.substring(0, 7)}
-            </span>
+            <>
+              <span class="font-mono text-text-muted text-[11px] normal-case hidden sm:inline-block bg-bg-hover px-1.5 py-0.5 rounded-none">
+                #{props.run.commit_hash.substring(0, 7)}
+              </span>
+              <Show when={props.run.branch && props.run.branch !== "" && props.run.branch !== "main"}>
+                <span class="text-[10px] font-mono font-medium normal-case hidden sm:inline-block bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-sm">
+                  {props.run.branch}
+                </span>
+              </Show>
+            </>
           )}
         </h2>
         {showRunInfo() && props.run && (

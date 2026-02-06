@@ -467,7 +467,7 @@ func trendCmd() *cobra.Command {
 				}
 			}()
 
-			trends, err := database.GetTrend(args[0], limit)
+			trends, err := database.GetTrend(args[0], limit, "")
 			if err != nil {
 				return err
 			}

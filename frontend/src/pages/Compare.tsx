@@ -2,6 +2,7 @@ import { createResource, createSignal, For, Show, createMemo, createEffect } fro
 import type { Component } from "solid-js";
 import { useSearchParams, useNavigate } from "@solidjs/router";
 import { api } from "../services/api";
+import type { Run } from "../services/api";
 import { formatDate, formatNs } from "../utils/format";
 import { Button } from "../components/Button";
 import BenchmarkFilterBar from "../components/BenchmarkFilterBar";
@@ -16,12 +17,42 @@ import {
 import { useFilteredBenchmarks } from "../hooks/useFilteredBenchmarks";
 import { useFilterParams } from "../hooks/useFilterParams";
 
+/** Group runs by branch for optgroup display. "main" includes empty/null branches. */
+function groupRunsByBranch(runs: Run[]): { branch: string; runs: Run[] }[] {
+  const groups = new Map<string, Run[]>();
+  for (const r of runs) {
+    const branch = r.branch && r.branch !== "" ? r.branch : "main";
+    if (!groups.has(branch)) groups.set(branch, []);
+    groups.get(branch)!.push(r);
+  }
+  // Put "main" first, then other branches alphabetically
+  const result: { branch: string; runs: Run[] }[] = [];
+  const mainGroup = groups.get("main");
+  if (mainGroup) result.push({ branch: "main", runs: mainGroup });
+  for (const [branch, branchRuns] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (branch !== "main") result.push({ branch, runs: branchRuns });
+  }
+  return result;
+}
+
+function formatRunOption(r: Run): string {
+  return `#${r.commit_hash.substring(0, 7)} · ${r.commit_message?.substring(0, 50)}${r.commit_message?.length > 50 ? "..." : ""}`;
+}
+
 const Compare: Component = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   useFilterParams(searchParams, setSearchParams);
   const [runs] = createResource(() => api.getRuns(100));
   const [copyToast, setCopyToast] = createSignal(false);
+
+  // Group runs by branch for <optgroup> display
+  const grouped = createMemo(() => {
+    const r = runs();
+    if (!r) return [];
+    return groupRunsByBranch(r);
+  });
+  const hasMultipleBranches = createMemo(() => grouped().length > 1);
 
   // Check URL params at mount time (before any async operations) to avoid race conditions
   const urlParams = new URLSearchParams(window.location.search);
@@ -217,26 +248,43 @@ const Compare: Component = () => {
                     onChange={handleBaseChange}
                   >
                     <option value="">Select Run</option>
-                    <For each={runs()}>
-                      {(r) => (
-                        <option value={String(r.id)}>
-                          #{r.commit_hash.substring(0, 7)} · {r.commit_message?.substring(0, 50)}
-                          {r.commit_message?.length > 50 ? "..." : ""}
-                          {r.branch ? ` (${r.branch})` : ""}
-                        </option>
-                      )}
-                    </For>
+                    <Show when={hasMultipleBranches()} fallback={
+                      <For each={runs()}>
+                        {(r) => (
+                          <option value={String(r.id)}>{formatRunOption(r)}</option>
+                        )}
+                      </For>
+                    }>
+                      <For each={grouped()}>
+                        {(group) => (
+                          <optgroup label={group.branch}>
+                            <For each={group.runs}>
+                              {(r) => (
+                                <option value={String(r.id)}>{formatRunOption(r)}</option>
+                              )}
+                            </For>
+                          </optgroup>
+                        )}
+                      </For>
+                    </Show>
                   </select>
                   <Show when={selectedBaseRun()}>
                     {(run) => (
                       <div class="flex items-center justify-between text-[10px] text-text-muted">
-                        <a
-                          href={`https://github.com/anomalyco/opentui/commit/${run().commit_hash}`}
-                          target="_blank"
-                          class="font-mono text-text-main underline decoration-dotted underline-offset-2 hover:decoration-solid"
-                        >
-                          #{run().commit_hash.substring(0, 7)}
-                        </a>
+                        <div class="flex items-center gap-1.5">
+                          <a
+                            href={`https://github.com/anomalyco/opentui/commit/${run().commit_hash}`}
+                            target="_blank"
+                            class="font-mono text-text-main underline decoration-dotted underline-offset-2 hover:decoration-solid"
+                          >
+                            #{run().commit_hash.substring(0, 7)}
+                          </a>
+                          <Show when={run().branch && run().branch !== "" && run().branch !== "main"}>
+                            <span class="px-1 py-0.5 text-[9px] font-mono font-medium bg-purple-100 text-purple-700 rounded-sm">
+                              {run().branch}
+                            </span>
+                          </Show>
+                        </div>
                         <span>{formatDate(run().run_date)}</span>
                       </div>
                     )}
@@ -268,26 +316,43 @@ const Compare: Component = () => {
                   onChange={handleCurrChange}
                 >
                   <option value="">Select Run</option>
-                  <For each={runs()}>
-                    {(r) => (
-                      <option value={String(r.id)}>
-                        #{r.commit_hash.substring(0, 7)} · {r.commit_message?.substring(0, 50)}
-                        {r.commit_message?.length > 50 ? "..." : ""}
-                        {r.branch ? ` (${r.branch})` : ""}
-                      </option>
-                    )}
-                  </For>
+                  <Show when={hasMultipleBranches()} fallback={
+                    <For each={runs()}>
+                      {(r) => (
+                        <option value={String(r.id)}>{formatRunOption(r)}</option>
+                      )}
+                    </For>
+                  }>
+                    <For each={grouped()}>
+                      {(group) => (
+                        <optgroup label={group.branch}>
+                          <For each={group.runs}>
+                            {(r) => (
+                              <option value={String(r.id)}>{formatRunOption(r)}</option>
+                            )}
+                          </For>
+                        </optgroup>
+                      )}
+                    </For>
+                  </Show>
                 </select>
                 <Show when={selectedCurrRun()}>
                   {(run) => (
                     <div class="flex items-center justify-between text-[10px] text-text-muted">
-                      <a
-                        href={`https://github.com/anomalyco/opentui/commit/${run().commit_hash}`}
-                        target="_blank"
-                        class="font-mono text-text-main underline decoration-dotted underline-offset-2 hover:decoration-solid"
-                      >
-                        #{run().commit_hash.substring(0, 7)}
-                      </a>
+                      <div class="flex items-center gap-1.5">
+                        <a
+                          href={`https://github.com/anomalyco/opentui/commit/${run().commit_hash}`}
+                          target="_blank"
+                          class="font-mono text-text-main underline decoration-dotted underline-offset-2 hover:decoration-solid"
+                        >
+                          #{run().commit_hash.substring(0, 7)}
+                        </a>
+                        <Show when={run().branch && run().branch !== "" && run().branch !== "main"}>
+                          <span class="px-1 py-0.5 text-[9px] font-mono font-medium bg-purple-100 text-purple-700 rounded-sm">
+                            {run().branch}
+                          </span>
+                        </Show>
+                      </div>
                       <span>{formatDate(run().run_date)}</span>
                     </div>
                   )}

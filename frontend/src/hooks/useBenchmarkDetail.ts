@@ -1,10 +1,15 @@
 import { createResource, createSignal, createMemo, createEffect } from "solid-js";
 import { useParams, useSearchParams, useNavigate } from "@solidjs/router";
 import { api } from "../services/api";
-import type { BenchmarkResult } from "../services/api";
+import type { BenchmarkResult, TrendResponse } from "../services/api";
 import { globalCategory, globalFilter, setGlobalCategory, setGlobalFilter } from "../store";
 import { useFilteredBenchmarks } from "./useFilteredBenchmarks";
 import { useFilterParams } from "./useFilterParams";
+
+/** Returns true if the branch represents a non-main feature branch. */
+function isBranchRun(branch: string | undefined | null): boolean {
+  return !!branch && branch !== "" && branch !== "main";
+}
 
 export function useBenchmarkDetail() {
   const params = useParams();
@@ -105,15 +110,43 @@ export function useBenchmarkDetail() {
     return run()?.results.find((r) => r.id === selectedBenchmarkId());
   });
 
+  // The branch of the current run (empty/null/"main" = main branch)
+  const runBranch = createMemo(() => run()?.branch ?? "");
+  const isOnBranch = createMemo(() => isBranchRun(runBranch()));
+
+  // Primary trend data: always fetch main's history for baseline context
+  // When on a branch, explicitly filter to main; otherwise fetch unfiltered (same as before)
   const [trendData] = createResource(
     () => {
       const name = selectedBenchmark()?.name;
-      return name ? { name, limit: 100 } : null;
+      if (!name) return null;
+      const branch = isOnBranch() ? "main" : undefined;
+      return { name, limit: 100, branch };
     },
-    async ({ name, limit }) => {
-      return api.getTrend(name, limit);
+    async ({ name, limit, branch }) => {
+      return api.getTrend(name, limit, branch);
     },
   );
+
+  // Overlay trend data: only fetched when viewing a non-main branch
+  const [branchTrendData] = createResource(
+    () => {
+      const name = selectedBenchmark()?.name;
+      const branch = runBranch();
+      if (!name || !isBranchRun(branch)) return null;
+      return { name, limit: 100, branch };
+    },
+    async ({ name, limit, branch }) => {
+      return api.getTrend(name, limit, branch);
+    },
+  );
+
+  // Combined trend response: main data with branch overlay info
+  const combinedTrendData = createMemo((): TrendResponse | undefined => {
+    const main = trendData();
+    if (!main) return undefined;
+    return main;
+  });
 
   // Check artifacts
   createEffect(async () => {
@@ -153,7 +186,10 @@ export function useBenchmarkDetail() {
     selectedBenchmarkId,
     selectBenchmark,
     selectedBenchmark,
-    trendData,
+    trendData: combinedTrendData,
+    branchTrendData,
+    isOnBranch,
+    runBranch,
     hasCpuProfile,
     closeDetail,
     navigate,

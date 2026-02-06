@@ -30,6 +30,7 @@ export interface TrendPoint {
   run_id: number;
   result_id: number;
   commit_hash: string;
+  branch: string;
   run_date: string;
   avg_ns: number;
   median_ns: number; // Primary metric for regression detection (p50)
@@ -87,6 +88,7 @@ export interface Regression {
 
 export interface RegressionsResponse {
   run_id: number | null;
+  branch: string;
   window: number;
   min_points: number;
   baseline_offset: number;
@@ -112,8 +114,12 @@ export const api = {
   getCompare: async (baseId: number, currId: number) => {
     return fetchJson<CompareResult>(`/api/compare?id_a=${baseId}&id_b=${currId}`);
   },
-  getTrend: async (name: string, limit = 100) => {
-    return fetchJson<TrendResponse>(`/api/trend?name=${encodeURIComponent(name)}&limit=${limit}`);
+  getTrend: async (name: string, limit = 100, branch?: string) => {
+    let url = `/api/trend?name=${encodeURIComponent(name)}&limit=${limit}`;
+    if (branch) {
+      url += `&branch=${encodeURIComponent(branch)}`;
+    }
+    return fetchJson<TrendResponse>(url);
   },
   getFlamegraphs: async (runId: number) => {
     return fetchJson<{ result_id: number; type: string }[]>(`/api/runs/${runId}/flamegraphs`);

@@ -684,7 +684,7 @@ func (db *DB) CountResultsForRun(runID int64) (int, error) {
 	return count, err
 }
 
-func (db *DB) GetTrend(namePattern string, limit int) ([]struct {
+func (db *DB) GetTrend(namePattern string, limit int, branch string) ([]struct {
 	Run    Run
 	Result Result
 }, error,
@@ -697,10 +697,19 @@ func (db *DB) GetTrend(namePattern string, limit int) ([]struct {
 			r.total_ns, r.iterations, COALESCE(r.sample_count, 1)
 		FROM results r
 		JOIN runs ru ON r.run_id = ru.id
-		WHERE r.name LIKE ?
-		ORDER BY ru.run_date DESC`
+		WHERE r.name LIKE ?`
 
 	args := []interface{}{"%" + namePattern + "%"}
+	if branch != "" {
+		// "main" matches branch='main', branch=NULL, or branch='' (legacy runs)
+		if branch == "main" {
+			query += " AND (ru.branch = 'main' OR ru.branch IS NULL OR ru.branch = '')"
+		} else {
+			query += " AND ru.branch = ?"
+			args = append(args, branch)
+		}
+	}
+	query += " ORDER BY ru.run_date DESC"
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)

@@ -118,7 +118,27 @@ const Regressions: Component = () => {
     <div class="flex flex-col h-full w-full">
       {/* Header */}
       <div class="flex-none h-[57px] px-6 border-b border-border bg-bg-dark flex justify-between items-center">
-        <h2 class="text-[14px] font-bold text-black uppercase tracking-widest">Regressions</h2>
+        <div class="flex items-center gap-3">
+          <h2 class="text-[14px] font-bold text-black uppercase tracking-widest">Regressions</h2>
+          <Show when={data() && !data.loading}>
+            {(() => {
+              const branch = data()?.branch;
+              const displayBranch = branch && branch !== "" ? branch : "main";
+              const isFeatureBranch = branch && branch !== "" && branch !== "main";
+              return (
+                <span
+                  class={`text-[10px] font-mono font-medium px-1.5 py-0.5 rounded-sm ${
+                    isFeatureBranch
+                      ? "bg-purple-100 text-purple-700"
+                      : "bg-bg-hover text-text-muted"
+                  }`}
+                >
+                  {displayBranch}
+                </span>
+              );
+            })()}
+          </Show>
+        </div>
       </div>
 
       {/* Status Row */}
