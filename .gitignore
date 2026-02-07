@@ -1,4 +1,6 @@
 bench.db
+bench.db-wal
+bench.db-shm
 bench-backup.db
 /bench
 tmp/

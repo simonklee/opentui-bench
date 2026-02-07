@@ -18,12 +18,13 @@ type RunStat struct {
 // BaselineStats represents the computed baseline from historical runs.
 // Uses median-based statistics for robustness against outliers.
 type BaselineStats struct {
-	RunID    int64   // ID of the run chosen as baseline reference
-	Median   float64 // Baseline median (median of run medians)
-	Variance float64 // Run-to-run variance of medians
-	CILower  float64 // 95% CI lower bound
-	CIUpper  float64 // 95% CI upper bound
-	CV       float64 // Coefficient of variation (run-to-run noise)
+	RunID      int64   // ID of the run chosen as baseline reference
+	Median     float64 // Baseline median (median of run medians)
+	Variance   float64 // Run-to-run variance of medians
+	PointCount int     // Number of valid historical runs used for baseline stats
+	CILower    float64 // 95% CI lower bound
+	CIUpper    float64 // 95% CI upper bound
+	CV         float64 // Coefficient of variation (run-to-run noise)
 }
 
 // RegressionResult represents the outcome of regression detection for a single point.
@@ -196,12 +197,13 @@ func ComputeBaseline(history []RunStat, minPoints int, baselineOffset int) (*Bas
 	}
 
 	return &BaselineStats{
-		RunID:    baselineRunID,
-		Median:   baselineMedian,
-		Variance: combinedVar,
-		CILower:  ciLower,
-		CIUpper:  ciUpper,
-		CV:       cv,
+		RunID:      baselineRunID,
+		Median:     baselineMedian,
+		Variance:   combinedVar,
+		PointCount: len(valid),
+		CILower:    ciLower,
+		CIUpper:    ciUpper,
+		CV:         cv,
 	}, nil
 }
 
@@ -246,12 +248,14 @@ func DetectRegression(latest RunStat, baseline *BaselineStats, alpha float64) Re
 	// t-statistic
 	t := diff / seDiff
 
-	// Degrees of freedom (Welch-Satterthwaite approximation simplified)
-	// Use the latest sample count as a conservative proxy
-	df := int(latest.SampleCount - 1)
-	if df < 1 {
-		df = 1
-	}
+	// Degrees of freedom (Welch-Satterthwaite approximation)
+	// Uses both latest and baseline uncertainty, rather than latest-only sample count.
+	df := effectiveDegreesOfFreedom(
+		latest.Sem*latest.Sem,
+		int(latest.SampleCount),
+		baseline.Variance,
+		baseline.PointCount,
+	)
 
 	// One-sided t-critical value
 	tCrit := TCriticalOneSided(df, alpha)
@@ -342,6 +346,53 @@ func variance(values []float64, mean float64) float64 {
 		sumSq += d * d
 	}
 	return sumSq / float64(len(values)-1)
+}
+
+// effectiveDegreesOfFreedom computes a Welch-Satterthwaite approximation for
+// the t-test degrees of freedom using latest and baseline variance terms.
+func effectiveDegreesOfFreedom(latestVar float64, latestCount int, baselineVar float64, baselineCount int) int {
+	latestDF := latestCount - 1
+	if latestDF < 1 {
+		latestDF = 1
+	}
+	if baselineCount < 2 || baselineVar <= 0 {
+		return latestDF
+	}
+
+	baselineDF := baselineCount - 1
+	if baselineDF < 1 {
+		baselineDF = 1
+	}
+	if latestCount < 2 || latestVar <= 0 {
+		return baselineDF
+	}
+
+	numerator := (latestVar + baselineVar) * (latestVar + baselineVar)
+	denominator := 0.0
+
+	denominator += (latestVar * latestVar) / float64(latestCount-1)
+	denominator += (baselineVar * baselineVar) / float64(baselineCount-1)
+
+	if denominator <= 0 || numerator <= 0 {
+		return latestDF
+	}
+
+	df := int(math.Floor(numerator / denominator))
+	if df < 1 {
+		df = 1
+	}
+
+	// Keep df within pooled upper bound when both sides have sample counts.
+	pooledUpper := latestCount + baselineCount - 2
+	if df > pooledUpper {
+		df = pooledUpper
+	}
+
+	if df < 1 {
+		return 1
+	}
+
+	return df
 }
 
 // medianOfSlice computes the median of a slice of float64 values.
