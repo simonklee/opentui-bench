@@ -248,14 +248,11 @@ func DetectRegression(latest RunStat, baseline *BaselineStats, alpha float64) Re
 	// t-statistic
 	t := diff / seDiff
 
-	// Degrees of freedom (Welch-Satterthwaite approximation)
-	// Uses both latest and baseline uncertainty, rather than latest-only sample count.
-	df := effectiveDegreesOfFreedom(
-		latest.Sem*latest.Sem,
-		int(latest.SampleCount),
-		baseline.Variance,
-		baseline.PointCount,
-	)
+	// Degrees of freedom for regression significance.
+	// We anchor to baseline history size when available because latest runs often
+	// have very small sample counts (for example n=3), making latest-only df
+	// unrealistically strict for run-over-run detection.
+	df := regressionDegreesOfFreedom(int(latest.SampleCount), baseline.PointCount)
 
 	// One-sided t-critical value
 	tCrit := TCriticalOneSided(df, alpha)
@@ -348,51 +345,17 @@ func variance(values []float64, mean float64) float64 {
 	return sumSq / float64(len(values)-1)
 }
 
-// effectiveDegreesOfFreedom computes a Welch-Satterthwaite approximation for
-// the t-test degrees of freedom using latest and baseline variance terms.
-func effectiveDegreesOfFreedom(latestVar float64, latestCount int, baselineVar float64, baselineCount int) int {
-	latestDF := latestCount - 1
-	if latestDF < 1 {
-		latestDF = 1
+// regressionDegreesOfFreedom returns the degrees of freedom used for
+// significance testing. Baseline history count is preferred when available,
+// with latest-run sample count as fallback.
+func regressionDegreesOfFreedom(latestCount int, baselineCount int) int {
+	if baselineCount > 1 {
+		return baselineCount - 1
 	}
-	if baselineCount < 2 || baselineVar <= 0 {
-		return latestDF
+	if latestCount > 1 {
+		return latestCount - 1
 	}
-
-	baselineDF := baselineCount - 1
-	if baselineDF < 1 {
-		baselineDF = 1
-	}
-	if latestCount < 2 || latestVar <= 0 {
-		return baselineDF
-	}
-
-	numerator := (latestVar + baselineVar) * (latestVar + baselineVar)
-	denominator := 0.0
-
-	denominator += (latestVar * latestVar) / float64(latestCount-1)
-	denominator += (baselineVar * baselineVar) / float64(baselineCount-1)
-
-	if denominator <= 0 || numerator <= 0 {
-		return latestDF
-	}
-
-	df := int(math.Floor(numerator / denominator))
-	if df < 1 {
-		df = 1
-	}
-
-	// Keep df within pooled upper bound when both sides have sample counts.
-	pooledUpper := latestCount + baselineCount - 2
-	if df > pooledUpper {
-		df = pooledUpper
-	}
-
-	if df < 1 {
-		return 1
-	}
-
-	return df
+	return 1
 }
 
 // medianOfSlice computes the median of a slice of float64 values.

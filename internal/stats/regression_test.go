@@ -2,18 +2,25 @@ package stats
 
 import "testing"
 
-func TestEffectiveDegreesOfFreedom(t *testing.T) {
+func TestRegressionDegreesOfFreedom(t *testing.T) {
 	t.Run("uses baseline point count when available", func(t *testing.T) {
-		df := effectiveDegreesOfFreedom(100, 3, 10000, 20)
+		df := regressionDegreesOfFreedom(3, 20)
 		if df != 19 {
 			t.Fatalf("expected df=19, got %d", df)
 		}
 	})
 
 	t.Run("falls back to latest df when baseline count missing", func(t *testing.T) {
-		df := effectiveDegreesOfFreedom(100, 3, 10000, 0)
+		df := regressionDegreesOfFreedom(3, 0)
 		if df != 2 {
 			t.Fatalf("expected df=2 fallback, got %d", df)
+		}
+	})
+
+	t.Run("returns one when both counts are too small", func(t *testing.T) {
+		df := regressionDegreesOfFreedom(1, 1)
+		if df != 1 {
+			t.Fatalf("expected df=1, got %d", df)
 		}
 	})
 }
