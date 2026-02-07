@@ -71,3 +71,39 @@ func TestDetectRegressionUsesBaselinePointCount(t *testing.T) {
 		}
 	})
 }
+
+func TestComputeBaselineCIWidth(t *testing.T) {
+	buildHistory := func(n int) []RunStat {
+		pattern := []float64{95, 98, 101, 99, 102, 97, 100, 103, 96, 104}
+		history := make([]RunStat, n)
+		for i := 0; i < n; i++ {
+			history[i] = RunStat{
+				RunID:       int64(n - i),
+				Median:      pattern[i%len(pattern)],
+				Sem:         0.5,
+				SampleCount: 30,
+				StdDev:      2,
+			}
+		}
+		return history
+	}
+
+	baseline10, err := ComputeBaseline(buildHistory(10), 10, 0)
+	if err != nil {
+		t.Fatalf("ComputeBaseline(10) returned error: %v", err)
+	}
+
+	baseline20, err := ComputeBaseline(buildHistory(20), 10, 0)
+	if err != nil {
+		t.Fatalf("ComputeBaseline(20) returned error: %v", err)
+	}
+
+	if baseline20.Variance >= baseline10.Variance {
+		t.Fatalf("expected n=20 baseline variance < n=10 baseline variance, got n20=%f n10=%f", baseline20.Variance, baseline10.Variance)
+	}
+
+	ratio := baseline20.Variance / baseline10.Variance
+	if ratio < 0.4 || ratio > 0.6 {
+		t.Fatalf("expected variance ratio near 0.5, got %f (n20=%f n10=%f)", ratio, baseline20.Variance, baseline10.Variance)
+	}
+}

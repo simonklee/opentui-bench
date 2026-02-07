@@ -20,7 +20,7 @@ type RunStat struct {
 type BaselineStats struct {
 	RunID      int64   // ID of the run chosen as baseline reference
 	Median     float64 // Baseline median (median of run medians)
-	Variance   float64 // Run-to-run variance of medians
+	Variance   float64 // Variance used for baseline-estimator uncertainty in DetectRegression
 	PointCount int     // Number of valid historical runs used for baseline stats
 	CILower    float64 // 95% CI lower bound
 	CIUpper    float64 // 95% CI upper bound
@@ -107,7 +107,7 @@ func TCriticalOneSided(df int, alpha float64) float64 {
 //
 // The returned BaselineStats contains:
 // - Median: median of run medians (doubly robust to outliers)
-// - Variance: run-to-run variance of medians (used for t-test)
+// - Variance: baseline-estimator variance used for baseline uncertainty in DetectRegression
 // - CILower/CIUpper: 95% CI around the baseline median
 // - RunID: ID of the selected baseline reference run
 // - CV: coefficient of variation for sensitivity tuning
@@ -162,8 +162,9 @@ func ComputeBaseline(history []RunStat, minPoints int, baselineOffset int) (*Bas
 	// tau^2 represents between-run variance
 	tau2 := math.Max(0, s2-meanSem2)
 	combinedVar := meanSem2 + tau2
+	combinedVar = combinedVar / float64(len(valid))
 
-	// For small samples, use s2 directly as it's more conservative
+	// For small samples, use s2/n directly as it's more conservative
 	if len(valid) < 10 {
 		combinedVar = s2 / float64(len(valid))
 	}
