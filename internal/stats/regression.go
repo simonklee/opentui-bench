@@ -394,40 +394,7 @@ func sortFloat64s(values []float64) {
 	}
 }
 
-// approximatePValue provides a rough p-value approximation for one-sided t-test.
-// This is a simplified approximation; production code should use a proper t-distribution CDF.
+// approximatePValue returns the one-sided p-value for a t-statistic.
 func approximatePValue(t float64, df int) float64 {
-	if t <= 0 {
-		return 0.5 // Not slower than baseline
-	}
-
-	// Use normal approximation for larger df
-	if df > 30 {
-		// Approximate using standard normal
-		// P(Z > t) for one-sided test
-		return 0.5 * math.Erfc(t/math.Sqrt2)
-	}
-
-	// For small df, use a rough lookup-based approximation
-	// This maps t-values to approximate p-values
-	// Better implementations would use numerical integration or lookup tables
-	if t > 4.0 {
-		return 0.001
-	}
-	if t > 3.0 {
-		return 0.005
-	}
-	if t > 2.5 {
-		return 0.01
-	}
-	if t > 2.0 {
-		return 0.025
-	}
-	if t > 1.5 {
-		return 0.05
-	}
-	if t > 1.0 {
-		return 0.15
-	}
-	return 0.3
+	return tDistSurvival(t, df)
 }
