@@ -1,6 +1,9 @@
 package stats
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestRegressionDegreesOfFreedom(t *testing.T) {
 	t.Run("uses baseline point count when available", func(t *testing.T) {
@@ -21,6 +24,61 @@ func TestRegressionDegreesOfFreedom(t *testing.T) {
 		df := regressionDegreesOfFreedom(1, 1)
 		if df != 1 {
 			t.Fatalf("expected df=1, got %d", df)
+		}
+	})
+}
+
+func TestTCriticalOneSided(t *testing.T) {
+	testCases := []struct {
+		name     string
+		df       int
+		alpha    float64
+		expected float64
+	}{
+		{name: "df10_alpha005", df: 10, alpha: 0.05, expected: 1.812},
+		{name: "df10_alpha001", df: 10, alpha: 0.01, expected: 2.764},
+		{name: "df20_alpha005", df: 20, alpha: 0.05, expected: 1.725},
+		{name: "df20_alpha001", df: 20, alpha: 0.01, expected: 2.528},
+		{name: "df5_alpha0005", df: 5, alpha: 0.005, expected: 4.032},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := TCriticalOneSided(tc.df, tc.alpha)
+			if math.Abs(got-tc.expected) > 0.01 {
+				t.Fatalf("expected t-critical ~= %.3f, got %.6f", tc.expected, got)
+			}
+		})
+	}
+}
+
+func TestTCriticalOneSidedEdgeCases(t *testing.T) {
+	t.Run("alpha less than or equal zero returns +Inf", func(t *testing.T) {
+		got := TCriticalOneSided(10, 0)
+		if !math.IsInf(got, 1) {
+			t.Fatalf("expected +Inf, got %v", got)
+		}
+
+		got = TCriticalOneSided(10, -0.1)
+		if !math.IsInf(got, 1) {
+			t.Fatalf("expected +Inf for negative alpha, got %v", got)
+		}
+	})
+
+	t.Run("alpha greater than or equal 0.5 returns zero", func(t *testing.T) {
+		for _, alpha := range []float64{0.5, 0.6, 1.0} {
+			got := TCriticalOneSided(10, alpha)
+			if got != 0 {
+				t.Fatalf("alpha=%v: expected 0, got %v", alpha, got)
+			}
+		}
+	})
+
+	t.Run("df less than one clamps to one", func(t *testing.T) {
+		clamped := TCriticalOneSided(0, 0.01)
+		dfOne := TCriticalOneSided(1, 0.01)
+		if math.Abs(clamped-dfOne) > 1e-9 {
+			t.Fatalf("expected df<1 to match df=1, got df<1=%v df=1=%v", clamped, dfOne)
 		}
 	})
 }

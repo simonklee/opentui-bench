@@ -43,57 +43,34 @@ var (
 	ErrInsufficientData = errors.New("insufficient data for regression analysis")
 )
 
-// tCriticalOneSided99 maps degrees of freedom to t-critical values for 99% one-sided test.
-// Used for regression detection with alpha = 0.01.
-var tCriticalOneSided99 = []float64{
-	0,
-	31.821, // df=1
-	6.965,  // df=2
-	4.541,  // df=3
-	3.747,  // df=4
-	3.365,  // df=5
-	3.143,  // df=6
-	2.998,  // df=7
-	2.896,  // df=8
-	2.821,  // df=9
-	2.764,  // df=10
-	2.718,  // df=11
-	2.681,  // df=12
-	2.650,  // df=13
-	2.624,  // df=14
-	2.602,  // df=15
-	2.583,  // df=16
-	2.567,  // df=17
-	2.552,  // df=18
-	2.539,  // df=19
-	2.528,  // df=20
-	2.518,  // df=21
-	2.508,  // df=22
-	2.500,  // df=23
-	2.492,  // df=24
-	2.485,  // df=25
-	2.479,  // df=26
-	2.473,  // df=27
-	2.467,  // df=28
-	2.462,  // df=29
-	2.457,  // df=30
-}
-
-// TCriticalOneSided returns the t-critical value for a one-sided test at alpha level.
-// Currently supports alpha = 0.01 (99% confidence).
+// TCriticalOneSided returns the t-critical value for a one-sided test.
+// Solves for t where P(T > t) = alpha using bisection on tDistSurvival.
 func TCriticalOneSided(df int, alpha float64) float64 {
-	if alpha != 0.01 {
-		// For other alpha levels, use asymptotic z-value
-		// This is a simplification; full implementation would use inverse-t
-		return 2.326 // z for 99% one-sided
-	}
 	if df < 1 {
-		return tCriticalOneSided99[1]
+		df = 1
 	}
-	if df < len(tCriticalOneSided99) {
-		return tCriticalOneSided99[df]
+	if alpha <= 0 {
+		return math.Inf(1)
 	}
-	return 2.326 // asymptotic z for 99% one-sided
+	if alpha >= 0.5 {
+		return 0
+	}
+
+	lo, hi := 0.0, 1.0
+	for tDistSurvival(hi, df) > alpha && hi < 1e6 {
+		hi *= 2
+	}
+
+	for i := 0; i < 100; i++ {
+		mid := (lo + hi) / 2
+		if tDistSurvival(mid, df) > alpha {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+
+	return (lo + hi) / 2
 }
 
 // ComputeBaseline computes a stable baseline from historical runs using median-based statistics.
@@ -264,8 +241,7 @@ func DetectRegression(latest RunStat, baseline *BaselineStats, alpha float64) Re
 		effectPct = (diff / baseline.Median) * 100.0
 	}
 
-	// P-value approximation (one-sided)
-	// This is a rough approximation; full implementation would use t-distribution CDF
+	// One-sided p-value from the t-distribution.
 	pValue := approximatePValue(t, df)
 
 	// Is it a regression?
