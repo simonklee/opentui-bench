@@ -94,6 +94,51 @@ const errorBarPlugin = {
   },
 };
 
+const changePointLinesPlugin = {
+  id: "changePointLines",
+  afterDatasetsDraw(chart: any) {
+    const options = chart.options?.plugins?.changePointLines;
+    const points = options?.points as
+      | { run_id: number; magnitude_ns: number; p_value: number }[]
+      | undefined;
+    const runIdToIndex = options?.runIdToIndex as Record<string, number> | undefined;
+    const xScale = chart.scales?.x;
+    const yScale = chart.scales?.y;
+    if (!points || points.length === 0 || !runIdToIndex || !xScale || !yScale) {
+      return;
+    }
+
+    const { ctx } = chart;
+    for (const cp of points) {
+      const idx = runIdToIndex[String(cp.run_id)];
+      if (idx === undefined) {
+        continue;
+      }
+
+      const x = xScale.getPixelForValue(idx);
+      const color = cp.magnitude_ns >= 0 ? "#cf222e" : "#0969da";
+      const absMagnitude = Math.abs(cp.magnitude_ns);
+      const magnitudeLabel = `${cp.magnitude_ns >= 0 ? "+" : "-"}${formatNs(Math.round(absMagnitude))}`;
+
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(x, yScale.top);
+      ctx.lineTo(x, yScale.bottom);
+      ctx.stroke();
+
+      ctx.setLineDash([]);
+      ctx.fillStyle = color;
+      ctx.font = "10px var(--font-mono)";
+      ctx.textAlign = "left";
+      ctx.fillText(magnitudeLabel, x + 4, yScale.top + 10);
+      ctx.restore();
+    }
+  },
+};
+
 Chart.register(
   Title,
   Tooltip,
@@ -107,6 +152,7 @@ Chart.register(
   Filler,
   errorBarPlugin,
   baselineBandPlugin,
+  changePointLinesPlugin,
 );
 
 // Branch overlay color
@@ -114,6 +160,7 @@ const BRANCH_COLOR = "#7c3aed"; // purple-600
 
 interface Props {
   data: TrendPoint[];
+  changePoints?: { run_id: number; magnitude_ns: number; p_value: number }[];
   overlayData?: TrendPoint[];
   overlayBranch?: string;
   range?: number;
@@ -146,16 +193,6 @@ function buildMergedTimeline(
   if (branch.length === 0) {
     // No branch data — return main only
     return { labels: buildLabels(main), mainData: main, branchData: null, allPoints: main };
-  }
-
-  // Find the fork point: last main point before or at the branch's first point
-  const branchFirstDate = new Date(branch[0]!.run_date).getTime();
-  let forkIndex = -1;
-  for (let i = main.length - 1; i >= 0; i--) {
-    if (new Date(main[i]!.run_date).getTime() <= branchFirstDate) {
-      forkIndex = i;
-      break;
-    }
   }
 
   // Build a unified timeline: all main points, then branch points interleaved by date
@@ -210,7 +247,6 @@ function buildMergedTimeline(
   // then the fork point's main value (to connect), then branch values
   const labels = slots.map((s) => s.label);
   const mainData = slots.map((s) => s.mainPoint);
-  const branchDataRaw = slots.map((s) => s.branchPoint);
 
   // Find the fork point in the merged timeline: last main slot before first branch slot
   let forkSlotIndex = -1;
@@ -271,8 +307,26 @@ const TrendChart: Component<Props> = (props) => {
     return cachedMerged;
   };
 
+  const getChangePointRunIndexMap = (): Record<string, number> => {
+    const map: Record<string, number> = {};
+    if (hasOverlay()) {
+      const { mainData } = getMergedTimeline();
+      mainData.forEach((point, index) => {
+        if (point) {
+          map[String(point.run_id)] = index;
+        }
+      });
+      return map;
+    }
+
+    const data = showData();
+    data.forEach((point, index) => {
+      map[String(point.run_id)] = index;
+    });
+    return map;
+  };
+
   const chartData = (): any => {
-    const limit = props.range || 100;
     const currentRunId = props.currentRunId;
 
     if (hasOverlay()) {
@@ -552,6 +606,10 @@ const TrendChart: Component<Props> = (props) => {
       baselineBand: {
         lower: props.baselineCILowerNs,
         upper: props.baselineCIUpperNs,
+      },
+      changePointLines: {
+        points: props.changePoints || [],
+        runIdToIndex: getChangePointRunIndexMap(),
       },
       tooltip: {
         backgroundColor: "#ffffff",

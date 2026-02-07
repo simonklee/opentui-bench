@@ -48,10 +48,13 @@ export interface TrendPoint {
 
 export interface TrendResponse {
   points: TrendPoint[];
+  change_points?: { run_id: number; magnitude_ns: number; p_value: number }[];
   baseline_run_id?: number;
   baseline_ci_lower_ns?: number;
   baseline_ci_upper_ns?: number;
 }
+
+export type RegressionsMethod = "legacy" | "hybrid";
 
 export interface CompareResult {
   comparisons: {
@@ -78,6 +81,7 @@ export interface Regression {
   min_effect_percent: number;
   p_value?: number;
   adjusted_p_value?: number;
+  detection_method: "t_test" | "change_point";
   alpha: number;
   introduced_run_id?: number;
   introduced_result_id?: number;
@@ -93,6 +97,7 @@ export interface RegressionsResponse {
   window: number;
   min_points: number;
   baseline_offset: number;
+  method: RegressionsMethod;
   insufficient_history?: boolean;
   regressions: Regression[];
 }
@@ -127,7 +132,12 @@ export const api = {
   },
   getRegressions: async (
     runId?: number,
-    options?: { window?: number; minPoints?: number; baselineOffset?: number },
+    options?: {
+      window?: number;
+      minPoints?: number;
+      baselineOffset?: number;
+      method?: RegressionsMethod;
+    },
   ) => {
     const params = new URLSearchParams();
     if (runId) {
@@ -141,6 +151,9 @@ export const api = {
     }
     if (options?.baselineOffset !== undefined) {
       params.set("baseline_offset", String(options.baselineOffset));
+    }
+    if (options?.method) {
+      params.set("method", options.method);
     }
     const query = params.toString();
     const url = query ? `/api/regressions?${query}` : "/api/regressions";

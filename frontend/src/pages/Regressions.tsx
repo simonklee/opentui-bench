@@ -1,8 +1,8 @@
 import { createResource, Show, For } from "solid-js";
 import type { Component } from "solid-js";
-import { useNavigate } from "@solidjs/router";
+import { useNavigate, useSearchParams } from "@solidjs/router";
 import { api } from "../services/api";
-import type { Regression } from "../services/api";
+import type { Regression, RegressionsMethod } from "../services/api";
 import { formatNs } from "../utils/format";
 import { Check, AlertTriangle, Loader2, ArrowRight } from "lucide-solid";
 
@@ -84,6 +84,9 @@ const RegressionRow: Component<{ regression: Regression; runId?: number | null }
             );
           })()}
         </Show>
+        <div class="text-[10px] text-text-muted">
+          via {reg().detection_method === "change_point" ? "change-point" : "t-test"}
+        </div>
       </td>
       <td class="py-3 px-4">
         <CommitLink hash={reg().baseline_commit_hash} hashFull={reg().baseline_commit_hash_full} />
@@ -122,7 +125,16 @@ const RegressionRow: Component<{ regression: Regression; runId?: number | null }
 };
 
 const Regressions: Component = () => {
-  const [data] = createResource(() => api.getRegressions());
+  const [searchParams, setSearchParams] = useSearchParams();
+  const method = (): RegressionsMethod =>
+    searchParams.method === "legacy" ? "legacy" : "hybrid";
+  const [data] = createResource(method, (selectedMethod) =>
+    api.getRegressions(undefined, { method: selectedMethod }),
+  );
+
+  const setMethod = (next: RegressionsMethod) => {
+    setSearchParams({ method: next });
+  };
 
   const regressionCount = () => data()?.regressions?.length ?? 0;
   const hasRegressions = () => regressionCount() > 0;
@@ -153,6 +165,28 @@ const Regressions: Component = () => {
               );
             })()}
           </Show>
+        </div>
+        <div class="flex items-center gap-1">
+          <button
+            class={`px-2.5 py-1 text-[11px] font-mono border transition-colors ${
+              method() === "legacy"
+                ? "border-black bg-black text-white"
+                : "border-border bg-white text-text-muted hover:text-black"
+            }`}
+            onClick={() => setMethod("legacy")}
+          >
+            Legacy
+          </button>
+          <button
+            class={`px-2.5 py-1 text-[11px] font-mono border transition-colors ${
+              method() === "hybrid"
+                ? "border-black bg-black text-white"
+                : "border-border bg-white text-text-muted hover:text-black"
+            }`}
+            onClick={() => setMethod("hybrid")}
+          >
+            Hybrid
+          </button>
         </div>
       </div>
 

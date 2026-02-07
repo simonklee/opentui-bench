@@ -204,6 +204,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
               >
                 <TrendChart
                   data={props.trendData!.points}
+                  changePoints={props.trendData!.change_points}
                   overlayData={props.branchTrendData?.points}
                   overlayBranch={props.branch}
                   range={props.chartRange}
