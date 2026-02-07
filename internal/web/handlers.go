@@ -1186,6 +1186,7 @@ const (
 	defaultMinPoints      = 5
 	defaultBaselineOffset = 3
 	defaultAlpha          = 0.01
+	defaultFDR            = defaultAlpha
 )
 
 func (s *Server) handleDatabaseDownload(w http.ResponseWriter, r *http.Request) {
@@ -1324,6 +1325,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		ChangePercent            float64  `json:"change_percent"`
 		MinEffectPercent         float64  `json:"min_effect_percent"`
 		PValue                   *float64 `json:"p_value,omitempty"`
+		AdjustedPValue           *float64 `json:"adjusted_p_value,omitempty"`
 		Alpha                    float64  `json:"alpha"`
 		IntroducedRunID          *int64   `json:"introduced_run_id,omitempty"`
 		IntroducedResultID       *int64   `json:"introduced_result_id,omitempty"`
@@ -1343,7 +1345,18 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		Regressions         []regression `json:"regressions"`
 	}
 
+	type benchResult struct {
+		result      stats.RegressionResult
+		latest      db.Result
+		baseline    *stats.BaselineStats
+		history     []stats.RunStat
+		resultsMap  map[int64]db.Result
+		changePct   float64
+		practicalOK bool
+	}
+
 	var regressions []regression
+	var benchResults []benchResult
 	analyzableBenchmarks := 0
 
 	// Analyze each benchmark
@@ -1408,40 +1421,70 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		// Detect regression
 		result := stats.DetectRegression(latestStat, baseline, defaultAlpha)
 
-		if result.Status == "regressed" {
-			// Find introducing run
-			// Reverse history to chronological order for FindIntroducingRun
-			chronoHistory := make([]stats.RunStat, len(history))
-			for i, h := range history {
-				chronoHistory[len(history)-1-i] = h
-			}
-			introducingID := stats.FindIntroducingRun(chronoHistory, baseline, defaultAlpha)
+		if result.PValue == nil {
+			continue
+		}
 
-			// Build CI for latest
-			ciLower, ciUpper, _ := stats.CI95(latestResult.P50Ns, latestResult.StdDevNs, latestResult.SampleCount)
+		changePct := 0.0
+		if baseline.Median > 0 {
+			changePct = (latestStat.Median - baseline.Median) / baseline.Median * 100.0
+		}
+
+		benchResults = append(benchResults, benchResult{
+			result:      result,
+			latest:      latestResult,
+			baseline:    baseline,
+			history:     history,
+			resultsMap:  resultsMap,
+			changePct:   changePct,
+			practicalOK: changePct >= result.MinEffectPercent,
+		})
+	}
+
+	if len(benchResults) > 0 {
+		pValues := make([]float64, len(benchResults))
+		for i, bench := range benchResults {
+			pValues[i] = *bench.result.PValue
+		}
+
+		bhResults := stats.BenjaminiHochberg(pValues, defaultFDR)
+		for _, bh := range bhResults {
+			bench := benchResults[bh.Index]
+			if !bh.IsSignificant || !bench.practicalOK {
+				continue
+			}
+
+			// Find introducing run only for surviving entries.
+			chronoHistory := make([]stats.RunStat, len(bench.history))
+			for i, h := range bench.history {
+				chronoHistory[len(bench.history)-1-i] = h
+			}
+			introducingID := stats.FindIntroducingRun(chronoHistory, bench.baseline, defaultAlpha)
+
+			ciLower, ciUpper, _ := stats.CI95(bench.latest.P50Ns, bench.latest.StdDevNs, bench.latest.SampleCount)
+			adjustedPValue := bh.AdjPValue
 
 			reg := regression{
-				Name:              latestResult.Name,
-				Category:          latestResult.Category,
-				LatestResultID:    latestResult.ID,
+				Name:              bench.latest.Name,
+				Category:          bench.latest.Category,
+				LatestResultID:    bench.latest.ID,
 				LatestCILowerNs:   ciLower,
 				LatestCIUpperNs:   ciUpper,
-				BaselineRunID:     baseline.RunID,
-				BaselineCILowerNs: int64(baseline.CILower),
-				BaselineCIUpperNs: int64(baseline.CIUpper),
-				ChangePercent:     *result.ChangePercent,
-				MinEffectPercent:  result.MinEffectPercent,
-				PValue:            result.PValue,
+				BaselineRunID:     bench.baseline.RunID,
+				BaselineCILowerNs: int64(bench.baseline.CILower),
+				BaselineCIUpperNs: int64(bench.baseline.CIUpper),
+				ChangePercent:     bench.changePct,
+				MinEffectPercent:  bench.result.MinEffectPercent,
+				PValue:            bench.result.PValue,
+				AdjustedPValue:    &adjustedPValue,
 				Alpha:             defaultAlpha,
 			}
 
-			// Add baseline commit hash
-			if baselineRun, ok := runByID[baseline.RunID]; ok {
+			if baselineRun, ok := runByID[bench.baseline.RunID]; ok {
 				reg.BaselineCommitHash = baselineRun.CommitHash
 				reg.BaselineCommitHashFull = baselineRun.CommitHashFull
 			}
 
-			// Add introducing run info
 			if introducingID != nil {
 				reg.IntroducedRunID = introducingID
 				if introRun, ok := runByID[*introducingID]; ok {
@@ -1450,7 +1493,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 					reg.IntroducedCommitMessage = &introRun.CommitMessage
 					reg.IntroducedRunDate = &introRun.RunDate
 				}
-				if introResult, ok := resultsMap[*introducingID]; ok {
+				if introResult, ok := bench.resultsMap[*introducingID]; ok {
 					reg.IntroducedResultID = &introResult.ID
 				}
 			}

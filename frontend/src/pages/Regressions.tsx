@@ -68,7 +68,22 @@ const RegressionRow: Component<{ regression: Regression; runId?: number | null }
         <div class="text-[11px] text-text-muted">{reg().category}</div>
       </td>
       <td class="py-3 px-4 font-mono text-[13px] text-danger">
-        +{reg().change_percent.toFixed(1)}%
+        <div>+{reg().change_percent.toFixed(1)}%</div>
+        <Show when={reg().adjusted_p_value !== undefined}>
+          {(() => {
+            const adjusted = reg().adjusted_p_value!;
+            const raw = reg().p_value;
+            const title =
+              raw !== undefined
+                ? `raw p=${raw.toExponential(2)} · adjusted p=${adjusted.toExponential(2)}`
+                : `adjusted p=${adjusted.toExponential(2)}`;
+            return (
+              <div class="text-[10px] text-text-muted" title={title}>
+                adj p {adjusted.toExponential(2)}
+              </div>
+            );
+          })()}
+        </Show>
       </td>
       <td class="py-3 px-4">
         <CommitLink hash={reg().baseline_commit_hash} hashFull={reg().baseline_commit_hash_full} />

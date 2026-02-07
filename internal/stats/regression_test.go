@@ -2,6 +2,7 @@ package stats
 
 import (
 	"math"
+	"sort"
 	"testing"
 )
 
@@ -163,5 +164,55 @@ func TestComputeBaselineCIWidth(t *testing.T) {
 	ratio := baseline20.Variance / baseline10.Variance
 	if ratio < 0.4 || ratio > 0.6 {
 		t.Fatalf("expected variance ratio near 0.5, got %f (n20=%f n10=%f)", ratio, baseline20.Variance, baseline10.Variance)
+	}
+}
+
+func TestBenjaminiHochberg(t *testing.T) {
+	pValues := []float64{0.039, 0.001, 0.23, 0.008, 0.041}
+	results := BenjaminiHochberg(pValues, 0.05)
+
+	if len(results) != len(pValues) {
+		t.Fatalf("expected %d results, got %d", len(pValues), len(results))
+	}
+
+	expectedAdj := []float64{0.05125, 0.005, 0.23, 0.02, 0.05125}
+	expectedSig := []bool{false, true, false, true, false}
+
+	for i := range pValues {
+		if results[i].Index != i {
+			t.Fatalf("result[%d]: expected index %d, got %d", i, i, results[i].Index)
+		}
+		if results[i].PValue != pValues[i] {
+			t.Fatalf("result[%d]: expected p-value %f, got %f", i, pValues[i], results[i].PValue)
+		}
+		if math.Abs(results[i].AdjPValue-expectedAdj[i]) > 1e-9 {
+			t.Fatalf("result[%d]: expected adjusted p-value %f, got %f", i, expectedAdj[i], results[i].AdjPValue)
+		}
+		if results[i].IsSignificant != expectedSig[i] {
+			t.Fatalf("result[%d]: expected significant=%v, got %v", i, expectedSig[i], results[i].IsSignificant)
+		}
+	}
+
+	indices := make([]int, len(pValues))
+	for i := range indices {
+		indices[i] = i
+	}
+	sort.Slice(indices, func(i, j int) bool {
+		return pValues[indices[i]] < pValues[indices[j]]
+	})
+
+	for i := 1; i < len(indices); i++ {
+		prev := results[indices[i-1]].AdjPValue
+		curr := results[indices[i]].AdjPValue
+		if curr < prev {
+			t.Fatalf("expected adjusted p-values to be monotone in sorted order, got rank %d value %f < rank %d value %f", i+1, curr, i, prev)
+		}
+	}
+}
+
+func TestBenjaminiHochbergEmpty(t *testing.T) {
+	results := BenjaminiHochberg(nil, 0.05)
+	if results != nil {
+		t.Fatalf("expected nil for empty input, got %#v", results)
 	}
 }

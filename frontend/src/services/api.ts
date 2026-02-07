@@ -77,6 +77,7 @@ export interface Regression {
   change_percent: number;
   min_effect_percent: number;
   p_value?: number;
+  adjusted_p_value?: number;
   alpha: number;
   introduced_run_id?: number;
   introduced_result_id?: number;

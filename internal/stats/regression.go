@@ -3,6 +3,7 @@ package stats
 import (
 	"errors"
 	"math"
+	"sort"
 )
 
 // RunStat represents the statistical summary of a single benchmark run.
@@ -36,6 +37,72 @@ type RegressionResult struct {
 	ChangePercent    *float64 // nil if not regressed
 	MinEffectPercent float64  // Dynamic threshold based on CV
 	PValue           *float64 // nil if not computed
+}
+
+// BHResult holds a benchmark's regression result after FDR correction.
+type BHResult struct {
+	Index         int
+	PValue        float64
+	AdjPValue     float64
+	IsSignificant bool
+}
+
+// BenjaminiHochberg applies Benjamini-Hochberg FDR correction to a set of p-values.
+// Returns adjusted p-values and significance flags at the given FDR level.
+func BenjaminiHochberg(pValues []float64, fdr float64) []BHResult {
+	m := len(pValues)
+	if m == 0 {
+		return nil
+	}
+
+	type rankedPValue struct {
+		Index     int
+		PValue    float64
+		AdjPValue float64
+	}
+
+	ranked := make([]rankedPValue, m)
+	for i, p := range pValues {
+		if p < 0 {
+			p = 0
+		}
+		if p > 1 {
+			p = 1
+		}
+		ranked[i] = rankedPValue{Index: i, PValue: p}
+	}
+
+	sort.Slice(ranked, func(i, j int) bool {
+		return ranked[i].PValue < ranked[j].PValue
+	})
+
+	for i := range ranked {
+		rank := float64(i + 1)
+		ranked[i].AdjPValue = ranked[i].PValue * float64(m) / rank
+	}
+
+	runningMin := 1.0
+	for i := m - 1; i >= 0; i-- {
+		if ranked[i].AdjPValue < runningMin {
+			runningMin = ranked[i].AdjPValue
+		}
+		if runningMin > 1 {
+			runningMin = 1
+		}
+		ranked[i].AdjPValue = runningMin
+	}
+
+	results := make([]BHResult, m)
+	for _, rp := range ranked {
+		results[rp.Index] = BHResult{
+			Index:         rp.Index,
+			PValue:        rp.PValue,
+			AdjPValue:     rp.AdjPValue,
+			IsSignificant: rp.AdjPValue <= fdr,
+		}
+	}
+
+	return results
 }
 
 // Errors returned by regression detection.
