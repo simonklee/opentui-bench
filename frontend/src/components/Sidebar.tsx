@@ -138,20 +138,12 @@ const Sidebar: Component = () => {
             class="cursor-pointer hover:text-black hover:underline"
             onClick={() => {
               if (confirm("Download the full SQLite database (~350 MB)?")) {
-                fetch("/api/database/download", { method: "POST" })
-                  .then((res) => {
-                    if (!res.ok) throw new Error("Download failed");
-                    return res.blob();
-                  })
-                  .then((blob) => {
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = "bench.db";
-                    a.click();
-                    URL.revokeObjectURL(url);
-                  })
-                  .catch(() => alert("Download failed"));
+                const form = document.createElement("form");
+                form.method = "POST";
+                form.action = "/api/database/download";
+                document.body.appendChild(form);
+                form.submit();
+                form.remove();
               }
             }}
             title="Download SQLite database"
