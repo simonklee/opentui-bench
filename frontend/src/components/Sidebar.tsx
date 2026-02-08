@@ -12,6 +12,7 @@ import {
   PanelLeftOpen,
   HelpCircle,
   Activity,
+  Github,
 } from "lucide-solid";
 
 const Sidebar: Component = () => {
@@ -121,18 +122,43 @@ const Sidebar: Component = () => {
         class={`p-4 border-t border-border text-[10px] uppercase tracking-wider text-text-muted flex items-center ${isSidebarExpanded() ? "justify-between" : "justify-center"}`}
       >
         <div
-          class={`overflow-hidden whitespace-nowrap transition-all duration-300 flex items-center ${isSidebarExpanded() ? "max-w-[200px] opacity-100" : "max-w-0 opacity-0"}`}
+          class={`overflow-hidden whitespace-nowrap transition-all duration-300 flex items-center gap-4 ${isSidebarExpanded() ? "max-w-[250px] opacity-100" : "max-w-0 opacity-0"}`}
         >
-          <span class="font-mono">v0.2.1</span>
           <a
-            href="/api/database/download"
-            download="bench.db"
-            class="cursor-pointer hover:text-black hover:underline ml-4"
+            href="https://github.com/simonklee/opentui-bench"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="hover:text-black transition-colors flex items-center gap-1"
+            title="opentui-bench on GitHub"
+          >
+            <Github size={12} />
+            <span>Source</span>
+          </a>
+          <span
+            class="cursor-pointer hover:text-black hover:underline"
+            onClick={() => {
+              if (confirm("Download the full SQLite database (~350 MB)?")) {
+                fetch("/api/database/download", { method: "POST" })
+                  .then((res) => {
+                    if (!res.ok) throw new Error("Download failed");
+                    return res.blob();
+                  })
+                  .then((blob) => {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = "bench.db";
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  })
+                  .catch(() => alert("Download failed"));
+              }
+            }}
             title="Download SQLite database"
           >
             Export
-          </a>
-          <span class="cursor-pointer hover:text-black hover:underline ml-4" onClick={toggleHelp}>
+          </span>
+          <span class="cursor-pointer hover:text-black hover:underline" onClick={toggleHelp}>
             Shortcuts
           </span>
         </div>
