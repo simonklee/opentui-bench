@@ -638,7 +638,13 @@ const TrendChart: Component<Props> = (props) => {
             const date = new Date(d.run_date).toLocaleString();
             const branchLabel =
               d.branch && d.branch !== "" && d.branch !== "main" ? ` [${d.branch}]` : "";
-            return `${d.commit_hash.slice(0, 7)}${branchLabel} (${date})`;
+            const lines = [`${d.commit_hash.slice(0, 7)}${branchLabel} (${date})`];
+            if (d.commit_message) {
+              const firstLine = d.commit_message.split("\n")[0] ?? "";
+              const msg = firstLine.length > 60 ? firstLine.slice(0, 59) + "…" : firstLine;
+              if (msg) lines.push(msg);
+            }
+            return lines;
           },
           label: function (context: any) {
             const idx = context.dataIndex;
@@ -719,6 +725,8 @@ const TrendChart: Component<Props> = (props) => {
     },
   });
 
+  const hasChangePoints = () => (props.changePoints?.length ?? 0) > 0;
+
   return (
     <div class="relative w-full h-full">
       <Line data={chartData()} options={chartOptions()} width={500} height={300} />
@@ -734,6 +742,18 @@ const TrendChart: Component<Props> = (props) => {
               style={`background: ${BRANCH_COLOR}; border-top: 2px dashed ${BRANCH_COLOR}; height: 0;`}
             ></span>
             {props.overlayBranch}
+          </span>
+        </div>
+      </Show>
+      <Show when={hasChangePoints()}>
+        <div class="mt-1 flex gap-4 text-[10px] text-text-muted font-mono uppercase tracking-wider">
+          <span class="flex items-center gap-1">
+            <span class="inline-block w-3 h-0 border-t border-dashed" style="border-color: #cf222e;"></span>
+            Regression shift
+          </span>
+          <span class="flex items-center gap-1">
+            <span class="inline-block w-3 h-0 border-t border-dashed" style="border-color: #0969da;"></span>
+            Improvement shift
           </span>
         </div>
       </Show>

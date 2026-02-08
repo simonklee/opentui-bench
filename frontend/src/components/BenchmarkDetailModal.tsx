@@ -182,11 +182,11 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                 </Show>
               </div>
               <div class="flex gap-2 items-center self-start sm:self-auto">
-                <Button active={props.chartRange === 10} onClick={() => props.setChartRange(10)}>
-                  10
-                </Button>
                 <Button active={props.chartRange === 30} onClick={() => props.setChartRange(30)}>
                   30
+                </Button>
+                <Button active={props.chartRange === 70} onClick={() => props.setChartRange(70)}>
+                  70
                 </Button>
                 <Button active={props.chartRange === 100} onClick={() => props.setChartRange(100)}>
                   MAX

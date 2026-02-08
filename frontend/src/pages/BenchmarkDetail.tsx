@@ -36,7 +36,7 @@ const BenchmarkDetail: Component = () => {
   const [flamegraphView, setFlamegraphView] = createSignal<"flamegraph" | "callgraph">(
     "flamegraph",
   );
-  const [chartRange, setChartRange] = createSignal(30);
+  const [chartRange, setChartRange] = createSignal(70);
   const [copyToast, setCopyToast] = createSignal(false);
 
   // Side effects relevant to the global store/view

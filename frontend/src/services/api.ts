@@ -30,6 +30,7 @@ export interface TrendPoint {
   run_id: number;
   result_id: number;
   commit_hash: string;
+  commit_message?: string;
   branch: string;
   run_date: string;
   avg_ns: number;

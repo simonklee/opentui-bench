@@ -343,6 +343,7 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		RunID            int64    `json:"run_id"`
 		ResultID         int64    `json:"result_id"`
 		CommitHash       string   `json:"commit_hash"`
+		CommitMessage    string   `json:"commit_message,omitempty"`
 		Branch           string   `json:"branch"`
 		RunDate          string   `json:"run_date"`
 		AvgNs            int64    `json:"avg_ns"`    // Mean (kept for backwards compatibility)
@@ -401,20 +402,21 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		ciLower, ciUpper, sem := stats.CI95(t.Result.P50Ns, t.Result.StdDevNs, t.Result.SampleCount)
 
 		point := trendPoint{
-			RunID:       t.Run.ID,
-			ResultID:    t.Result.ID,
-			CommitHash:  t.Run.CommitHash,
-			Branch:      t.Run.Branch,
-			RunDate:     t.Run.RunDate,
-			AvgNs:       t.Result.AvgNs,
-			MedianNs:    t.Result.P50Ns,
-			MinNs:       t.Result.MinNs,
-			MaxNs:       t.Result.MaxNs,
-			StdDevNs:    t.Result.StdDevNs,
-			SampleCount: t.Result.SampleCount,
-			CiLowerNs:   ciLower,
-			CiUpperNs:   ciUpper,
-			SemNs:       sem,
+			RunID:         t.Run.ID,
+			ResultID:      t.Result.ID,
+			CommitHash:    t.Run.CommitHash,
+			CommitMessage: t.Run.CommitMessage,
+			Branch:        t.Run.Branch,
+			RunDate:       t.Run.RunDate,
+			AvgNs:         t.Result.AvgNs,
+			MedianNs:      t.Result.P50Ns,
+			MinNs:         t.Result.MinNs,
+			MaxNs:         t.Result.MaxNs,
+			StdDevNs:      t.Result.StdDevNs,
+			SampleCount:   t.Result.SampleCount,
+			CiLowerNs:     ciLower,
+			CiUpperNs:     ciUpper,
+			SemNs:         sem,
 		}
 
 		// Determine regression status

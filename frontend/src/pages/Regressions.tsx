@@ -1,10 +1,12 @@
-import { createResource, Show, For } from "solid-js";
+import { createResource, createSignal, Show, For } from "solid-js";
 import type { Component } from "solid-js";
 import { useNavigate, useSearchParams } from "@solidjs/router";
 import { api } from "../services/api";
 import type { Regression, RegressionsMethod } from "../services/api";
 import { formatNs } from "../utils/format";
 import { Check, AlertTriangle, Loader2, ArrowRight } from "lucide-solid";
+
+type DetectionFilter = "all" | "t_test" | "change_point";
 
 const GITHUB_REPO_URL = "https://github.com/anomalyco/opentui";
 
@@ -84,9 +86,15 @@ const RegressionRow: Component<{ regression: Regression; runId?: number | null }
             );
           })()}
         </Show>
-        <div class="text-[10px] text-text-muted">
-          via {reg().detection_method === "change_point" ? "change-point" : "t-test"}
-        </div>
+        <span
+          class={`inline-block text-[9px] font-mono px-1.5 py-0.5 rounded-sm ${
+            reg().detection_method === "change_point"
+              ? "bg-blue-50 text-blue-700"
+              : "bg-gray-100 text-gray-600"
+          }`}
+        >
+          {reg().detection_method === "change_point" ? "change-point" : "t-test"}
+        </span>
       </td>
       <td class="py-3 px-4">
         <CommitLink hash={reg().baseline_commit_hash} hashFull={reg().baseline_commit_hash_full} />
@@ -126,6 +134,7 @@ const RegressionRow: Component<{ regression: Regression; runId?: number | null }
 
 const Regressions: Component = () => {
   const [searchParams, setSearchParams] = useSearchParams();
+  const [detectionFilter, setDetectionFilter] = createSignal<DetectionFilter>("all");
   const method = (): RegressionsMethod =>
     searchParams.method === "legacy" ? "legacy" : "hybrid";
   const [data] = createResource(method, (selectedMethod) =>
@@ -136,10 +145,20 @@ const Regressions: Component = () => {
     setSearchParams({ method: next });
   };
 
-  const regressionCount = () => data()?.regressions?.length ?? 0;
+  const allRegressions = () => data()?.regressions ?? [];
+  const filteredRegressions = () => {
+    const filter = detectionFilter();
+    if (filter === "all") return allRegressions();
+    return allRegressions().filter((r) => r.detection_method === filter);
+  };
+  const regressionCount = () => allRegressions().length;
   const hasRegressions = () => regressionCount() > 0;
   const insufficientHistory = () => !!data()?.insufficient_history;
   const showInsufficientHistory = () => insufficientHistory() && !hasRegressions();
+
+  // Count by detection method for filter badges
+  const tTestCount = () => allRegressions().filter((r) => r.detection_method === "t_test").length;
+  const changePointCount = () => allRegressions().filter((r) => r.detection_method === "change_point").length;
 
   return (
     <div class="flex flex-col h-full w-full">
@@ -192,48 +211,92 @@ const Regressions: Component = () => {
 
       {/* Status Row */}
       <div class="flex-none border-b border-border py-4 px-6 bg-white">
-        <Show when={data.loading}>
-          <div class="flex items-center gap-2 text-text-muted">
-            <Loader2 size={18} class="animate-spin" />
-            <span class="text-[14px]">Checking for regressions...</span>
-          </div>
-        </Show>
+        <div class="flex items-center justify-between">
+          <div>
+            <Show when={data.loading}>
+              <div class="flex items-center gap-2 text-text-muted">
+                <Loader2 size={18} class="animate-spin" />
+                <span class="text-[14px]">Checking for regressions...</span>
+              </div>
+            </Show>
 
-        <Show when={!data.loading && data()}>
-          <Show
-            when={showInsufficientHistory()}
-            fallback={
+            <Show when={!data.loading && data()}>
               <Show
-                when={hasRegressions()}
+                when={showInsufficientHistory()}
                 fallback={
-                  <div class="flex items-center gap-2 text-success">
-                    <Check size={18} strokeWidth={3} />
-                    <span class="text-[14px] font-medium">All benchmarks healthy</span>
-                  </div>
+                  <Show
+                    when={hasRegressions()}
+                    fallback={
+                      <div class="flex items-center gap-2 text-success">
+                        <Check size={18} strokeWidth={3} />
+                        <span class="text-[14px] font-medium">All benchmarks healthy</span>
+                      </div>
+                    }
+                  >
+                    <div class="flex items-center gap-2 text-danger">
+                      <AlertTriangle size={18} />
+                      <span class="text-[14px] font-medium">
+                        {regressionCount()} regression{regressionCount() !== 1 ? "s" : ""} detected
+                      </span>
+                    </div>
+                  </Show>
                 }
               >
-                <div class="flex items-center gap-2 text-danger">
+                <div class="flex items-center gap-2 text-warning">
                   <AlertTriangle size={18} />
-                  <span class="text-[14px] font-medium">
-                    {regressionCount()} regression{regressionCount() !== 1 ? "s" : ""} detected
-                  </span>
+                  <span class="text-[14px] font-medium">Not enough history for analysis</span>
                 </div>
               </Show>
-            }
-          >
-            <div class="flex items-center gap-2 text-warning">
-              <AlertTriangle size={18} />
-              <span class="text-[14px] font-medium">Not enough history for analysis</span>
+            </Show>
+
+            <Show when={data.error}>
+              <div class="flex items-center gap-2 text-warning">
+                <AlertTriangle size={18} />
+                <span class="text-[14px]">Unable to check regressions</span>
+              </div>
+            </Show>
+          </div>
+
+          {/* Detection method filter */}
+          <Show when={hasRegressions() && method() === "hybrid"}>
+            <div class="flex items-center gap-1">
+              <button
+                class={`px-2 py-1 text-[10px] font-mono border transition-colors ${
+                  detectionFilter() === "all"
+                    ? "border-black bg-black text-white"
+                    : "border-border bg-white text-text-muted hover:text-black"
+                }`}
+                onClick={() => setDetectionFilter("all")}
+              >
+                All ({regressionCount()})
+              </button>
+              <Show when={tTestCount() > 0}>
+                <button
+                  class={`px-2 py-1 text-[10px] font-mono border transition-colors ${
+                    detectionFilter() === "t_test"
+                      ? "border-black bg-black text-white"
+                      : "border-border bg-white text-text-muted hover:text-black"
+                  }`}
+                  onClick={() => setDetectionFilter("t_test")}
+                >
+                  t-test ({tTestCount()})
+                </button>
+              </Show>
+              <Show when={changePointCount() > 0}>
+                <button
+                  class={`px-2 py-1 text-[10px] font-mono border transition-colors ${
+                    detectionFilter() === "change_point"
+                      ? "border-black bg-black text-white"
+                      : "border-border bg-white text-text-muted hover:text-black"
+                  }`}
+                  onClick={() => setDetectionFilter("change_point")}
+                >
+                  change-point ({changePointCount()})
+                </button>
+              </Show>
             </div>
           </Show>
-        </Show>
-
-        <Show when={data.error}>
-          <div class="flex items-center gap-2 text-warning">
-            <AlertTriangle size={18} />
-            <span class="text-[14px]">Unable to check regressions</span>
-          </div>
-        </Show>
+        </div>
       </div>
 
       {/* Regressions Table */}
@@ -250,7 +313,7 @@ const Regressions: Component = () => {
               </tr>
             </thead>
             <tbody>
-              <For each={data()?.regressions}>
+              <For each={filteredRegressions()}>
                 {(regression) => <RegressionRow regression={regression} runId={data()?.run_id} />}
               </For>
             </tbody>

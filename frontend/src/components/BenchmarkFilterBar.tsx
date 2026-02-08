@@ -31,9 +31,15 @@ const BenchmarkFilterBar: Component<BenchmarkFilterBarProps> = (props) => {
           Benchmarks
           {showRunInfo() && props.run && (
             <>
-              <span class="font-mono text-text-muted text-[11px] normal-case hidden sm:inline-block bg-bg-hover px-1.5 py-0.5 rounded-none">
+              <a
+                href={`https://github.com/anomalyco/opentui/commit/${props.run.commit_hash}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                class="font-mono text-accent text-[11px] normal-case hidden sm:inline-block bg-bg-hover px-1.5 py-0.5 rounded-none hover:underline"
+                onClick={(e: MouseEvent) => e.stopPropagation()}
+              >
                 #{props.run.commit_hash.substring(0, 7)}
-              </span>
+              </a>
               <Show when={props.run.branch && props.run.branch !== "" && props.run.branch !== "main"}>
                 <span class="text-[10px] font-mono font-medium normal-case hidden sm:inline-block bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-sm">
                   {props.run.branch}
