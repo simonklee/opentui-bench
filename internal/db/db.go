@@ -937,19 +937,32 @@ func (db *DB) GetComparableRunsWindow(runID int64, window int) ([]Run, error) {
 	query := `
 		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
 		FROM runs
-		WHERE (branch = ? OR (branch IS NULL AND ? = ''))
+		WHERE `
+	args := []interface{}{}
+
+	// Treat legacy empty branch values as "main" for continuity.
+	if refRun.Branch == "main" || refRun.Branch == "" {
+		query += `(branch = 'main' OR branch IS NULL OR branch = '')`
+	} else {
+		query += `branch = ?`
+		args = append(args, refRun.Branch)
+	}
+
+	query += `
 		  AND (machine_id = ? OR (machine_id IS NULL AND ? = ''))
 		  AND (zig_optimize = ? OR (zig_optimize IS NULL AND ? = ''))
 		  AND run_date <= ?
 		ORDER BY run_date DESC
 		LIMIT ?`
 
-	rows, err := db.Query(query,
-		refRun.Branch, refRun.Branch,
+	args = append(args,
 		refRun.MachineID, refRun.MachineID,
 		refRun.ZigOptimize, refRun.ZigOptimize,
 		refRun.RunDate,
-		window)
+		window,
+	)
+
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

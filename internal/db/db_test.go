@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -375,6 +376,110 @@ func TestUpdateJobCommitHash(t *testing.T) {
 	}
 	if got.CommitHash != "deadbeef12345678" {
 		t.Errorf("commit_hash = %q, want deadbeef12345678", got.CommitHash)
+	}
+}
+
+func TestGetComparableRunsWindowMainIncludesLegacyBranchRuns(t *testing.T) {
+	db := openTestDB(t)
+
+	const (
+		machineID   = "bench-runner"
+		zigOptimize = "ReleaseFast"
+	)
+
+	now := time.Date(2026, 2, 8, 0, 0, 0, 0, time.UTC)
+	seq := 0
+	insertRun := func(branch, machine, optimize string, runDate time.Time) int64 {
+		t.Helper()
+		seq++
+		commitHash := fmt.Sprintf("c%06d", seq)
+		id, err := db.InsertRun(&Run{
+			CommitHash:     commitHash,
+			CommitHashFull: commitHash,
+			CommitMessage:  "test",
+			CommitDate:     runDate.Format(time.RFC3339),
+			Branch:         branch,
+			RunDate:        runDate.Format(time.RFC3339),
+			MachineID:      machine,
+			ZigOptimize:    optimize,
+		})
+		if err != nil {
+			t.Fatalf("insert run: %v", err)
+		}
+		return id
+	}
+
+	legacyOldID := insertRun("", machineID, zigOptimize, now.Add(-5*time.Hour))
+	legacyRecentID := insertRun("", machineID, zigOptimize, now.Add(-4*time.Hour))
+	mainOlderID := insertRun("main", machineID, zigOptimize, now.Add(-3*time.Hour))
+	_ = insertRun("feature/abc", machineID, zigOptimize, now.Add(-2*time.Hour))
+	_ = insertRun("main", "other-runner", zigOptimize, now.Add(-90*time.Minute))
+	referenceID := insertRun("main", machineID, zigOptimize, now)
+	_ = insertRun("main", machineID, zigOptimize, now.Add(1*time.Hour))
+
+	runs, err := db.GetComparableRunsWindow(referenceID, 10)
+	if err != nil {
+		t.Fatalf("get comparable runs: %v", err)
+	}
+
+	want := []int64{referenceID, mainOlderID, legacyRecentID, legacyOldID}
+	if len(runs) != len(want) {
+		t.Fatalf("got %d runs, want %d", len(runs), len(want))
+	}
+	for i := range want {
+		if runs[i].ID != want[i] {
+			t.Fatalf("runs[%d].id = %d, want %d", i, runs[i].ID, want[i])
+		}
+	}
+}
+
+func TestGetComparableRunsWindowLegacyReferenceIncludesMain(t *testing.T) {
+	db := openTestDB(t)
+
+	const (
+		machineID   = "bench-runner"
+		zigOptimize = "ReleaseFast"
+	)
+
+	now := time.Date(2026, 2, 8, 0, 0, 0, 0, time.UTC)
+	seq := 0
+	insertRun := func(branch string, runDate time.Time) int64 {
+		t.Helper()
+		seq++
+		commitHash := fmt.Sprintf("d%06d", seq)
+		id, err := db.InsertRun(&Run{
+			CommitHash:     commitHash,
+			CommitHashFull: commitHash,
+			CommitMessage:  "test",
+			CommitDate:     runDate.Format(time.RFC3339),
+			Branch:         branch,
+			RunDate:        runDate.Format(time.RFC3339),
+			MachineID:      machineID,
+			ZigOptimize:    zigOptimize,
+		})
+		if err != nil {
+			t.Fatalf("insert run: %v", err)
+		}
+		return id
+	}
+
+	mainOlderID := insertRun("main", now.Add(-3*time.Hour))
+	legacyOlderID := insertRun("", now.Add(-2*time.Hour))
+	referenceID := insertRun("", now.Add(-1*time.Hour))
+
+	runs, err := db.GetComparableRunsWindow(referenceID, 10)
+	if err != nil {
+		t.Fatalf("get comparable runs: %v", err)
+	}
+
+	want := []int64{referenceID, legacyOlderID, mainOlderID}
+	if len(runs) != len(want) {
+		t.Fatalf("got %d runs, want %d", len(runs), len(want))
+	}
+	for i := range want {
+		if runs[i].ID != want[i] {
+			t.Fatalf("runs[%d].id = %d, want %d", i, runs[i].ID, want[i])
+		}
 	}
 }
 
