@@ -522,6 +522,72 @@ func (db *DB) GetLatestRun() (*Run, error) {
 	return &r, nil
 }
 
+// GetLatestRunForBranch returns the most recent run for a given branch.
+// An empty or "main" branch matches legacy NULL/empty values too.
+func (db *DB) GetLatestRunForBranch(branch string) (*Run, error) {
+	var query string
+	var args []interface{}
+	if branch == "main" || branch == "" {
+		query = `
+			SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
+			FROM runs
+			WHERE branch = 'main' OR branch IS NULL OR branch = ''
+			ORDER BY run_date DESC LIMIT 1`
+	} else {
+		query = `
+			SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
+			FROM runs
+			WHERE branch = ?
+			ORDER BY run_date DESC LIMIT 1`
+		args = append(args, branch)
+	}
+
+	var r Run
+	var commitHashFull, commitMessage, commitDate, branchVal, machineID, notes, zigOptimize sql.NullString
+	err := db.QueryRow(query, args...).Scan(
+		&r.ID, &r.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branchVal, &r.RunDate, &machineID, &notes, &zigOptimize)
+	if err != nil {
+		return nil, err
+	}
+	r.CommitHashFull = commitHashFull.String
+	r.CommitMessage = commitMessage.String
+	r.CommitDate = commitDate.String
+	r.Branch = branchVal.String
+	r.MachineID = machineID.String
+	r.Notes = notes.String
+	r.ZigOptimize = zigOptimize.String
+	return &r, nil
+}
+
+// GetBranchesWithRuns returns distinct branch names that have at least one run,
+// ordered with "main" first, then alphabetically. Legacy NULL/empty branches
+// are normalized to "main".
+func (db *DB) GetBranchesWithRuns() ([]string, error) {
+	rows, err := db.Query(`
+		SELECT DISTINCT CASE
+			WHEN branch IS NULL OR branch = '' THEN 'main'
+			ELSE branch
+		END AS normalized_branch
+		FROM runs
+		ORDER BY
+			CASE WHEN normalized_branch = 'main' THEN 0 ELSE 1 END,
+			normalized_branch`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var branches []string
+	for rows.Next() {
+		var b string
+		if err := rows.Scan(&b); err != nil {
+			return nil, err
+		}
+		branches = append(branches, b)
+	}
+	return branches, rows.Err()
+}
+
 func (db *DB) HasCommit(commitHashFull string) (bool, error) {
 	var count int
 	err := db.QueryRow(`SELECT COUNT(*) FROM runs WHERE commit_hash_full = ?`, commitHashFull).Scan(&count)

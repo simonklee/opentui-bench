@@ -138,11 +138,15 @@ export const api = {
       minPoints?: number;
       baselineOffset?: number;
       method?: RegressionsMethod;
+      branch?: string;
     },
   ) => {
     const params = new URLSearchParams();
     if (runId) {
       params.set("run_id", String(runId));
+    }
+    if (options?.branch) {
+      params.set("branch", options.branch);
     }
     if (options?.window) {
       params.set("window", String(options.window));
@@ -159,5 +163,8 @@ export const api = {
     const query = params.toString();
     const url = query ? `/api/regressions?${query}` : "/api/regressions";
     return fetchJson<RegressionsResponse>(url);
+  },
+  getBranches: async () => {
+    return fetchJson<string[]>("/api/branches");
   },
 };

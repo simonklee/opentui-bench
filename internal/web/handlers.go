@@ -1263,7 +1263,14 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Parse optional run_id parameter (defaults to latest run)
+	// Parse optional branch parameter (defaults to "main").
+	// When no run_id is given, this selects the latest run on that branch.
+	branch := r.URL.Query().Get("branch")
+	if branch == "" {
+		branch = "main"
+	}
+
+	// Parse optional run_id parameter (defaults to latest run on branch)
 	var runID int64
 	if idStr := r.URL.Query().Get("run_id"); idStr != "" {
 		var err error
@@ -1273,13 +1280,14 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		latestRun, err := s.db.GetLatestRun()
+		latestRun, err := s.db.GetLatestRunForBranch(branch)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				// No runs yet, return empty response
+				// No runs yet for this branch, return empty response
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"run_id":          nil,
+					"branch":          branch,
 					"window":          defaultWindow,
 					"min_points":      defaultMinPoints,
 					"baseline_offset": defaultBaselineOffset,
@@ -1656,9 +1664,8 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get branch from the comparable runs (they all share the same branch)
-	var branch string
-	if len(runs) > 0 {
+	// Use branch from comparable runs if available (normalizes legacy empty values).
+	if len(runs) > 0 && runs[0].Branch != "" {
 		branch = runs[0].Branch
 	}
 
@@ -1677,6 +1684,16 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
+	branches, err := s.db.GetBranchesWithRuns()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(branches)
 }
 
 // --- Job endpoints ---

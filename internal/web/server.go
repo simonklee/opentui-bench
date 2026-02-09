@@ -101,6 +101,7 @@ func (s *Server) Start(openBrowser bool) error {
 	mux.HandleFunc("/api/trend", s.handleTrend)
 	mux.HandleFunc("/api/benchmarks", s.handleBenchmarks)
 	mux.HandleFunc("/api/regressions", s.handleRegressions)
+	mux.HandleFunc("/api/branches", s.handleBranches)
 	mux.HandleFunc("/api/has-commit/", s.handleHasCommit)
 	mux.HandleFunc("/api/latest-commit", s.handleLatestCommit)
 	mux.HandleFunc("/api/jobs", s.handleJobsRoute)

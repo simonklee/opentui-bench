@@ -4,7 +4,7 @@ import { useNavigate, useSearchParams } from "@solidjs/router";
 import { api } from "../services/api";
 import type { Regression, RegressionsMethod } from "../services/api";
 import { formatNs } from "../utils/format";
-import { Check, AlertTriangle, Loader2, ArrowRight } from "lucide-solid";
+import { Check, AlertTriangle, Loader2, ArrowRight, GitBranch } from "lucide-solid";
 
 type DetectionFilter = "all" | "t_test" | "change_point";
 
@@ -135,12 +135,23 @@ const RegressionRow: Component<{ regression: Regression; runId?: number | null }
 const Regressions: Component = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const [detectionFilter, setDetectionFilter] = createSignal<DetectionFilter>("all");
+  const [branches] = createResource(() => api.getBranches());
+  const branch = (): string => {
+    const b = searchParams.branch;
+    if (Array.isArray(b)) return b[0] || "main";
+    return b || "main";
+  };
   const method = (): RegressionsMethod =>
     searchParams.method === "legacy" ? "legacy" : "hybrid";
-  const [data] = createResource(method, (selectedMethod) =>
-    api.getRegressions(undefined, { method: selectedMethod }),
+
+  const regressionKey = () => `${method()}:${branch()}`;
+  const [data] = createResource(regressionKey, () =>
+    api.getRegressions(undefined, { method: method(), branch: branch() }),
   );
 
+  const setBranch = (next: string) => {
+    setSearchParams({ branch: next === "main" ? undefined : next });
+  };
   const setMethod = (next: RegressionsMethod) => {
     setSearchParams({ method: next });
   };
@@ -166,23 +177,26 @@ const Regressions: Component = () => {
       <div class="flex-none h-[57px] px-6 border-b border-border bg-bg-dark flex justify-between items-center">
         <div class="flex items-center gap-3">
           <h2 class="text-[14px] font-bold text-black uppercase tracking-widest">Regressions</h2>
-          <Show when={data() && !data.loading}>
-            {(() => {
-              const branch = data()?.branch;
-              const displayBranch = branch && branch !== "" ? branch : "main";
-              const isFeatureBranch = branch && branch !== "" && branch !== "main";
-              return (
-                <span
-                  class={`text-[10px] font-mono font-medium px-1.5 py-0.5 rounded-sm ${
-                    isFeatureBranch
-                      ? "bg-purple-100 text-purple-700"
-                      : "bg-bg-hover text-text-muted"
-                  }`}
-                >
-                  {displayBranch}
-                </span>
-              );
-            })()}
+          <Show when={branches()}>
+            <div class="flex items-center gap-1">
+              <GitBranch size={12} class="text-text-muted" />
+              <For each={branches()}>
+                {(b) => (
+                  <button
+                    class={`px-1.5 py-0.5 text-[10px] font-mono font-medium rounded-sm transition-colors ${
+                      branch() === b
+                        ? b === "main"
+                          ? "bg-black text-white"
+                          : "bg-purple-100 text-purple-700 ring-1 ring-purple-300"
+                        : "bg-bg-hover text-text-muted hover:text-black"
+                    }`}
+                    onClick={() => setBranch(b)}
+                  >
+                    {b}
+                  </button>
+                )}
+              </For>
+            </div>
           </Show>
         </div>
         <div class="flex items-center gap-1">
