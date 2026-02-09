@@ -1326,17 +1326,54 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get comparable runs window
-	runs, err := s.db.GetComparableRunsWindow(runID, window)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	// Get comparable runs window.
+	// For feature branches, use main history as the baseline so we can detect
+	// regressions even if the branch only has one run.
+	var runs []db.Run
+	isFeatureBranch := branch != "main"
+
+	if isFeatureBranch {
+		// Get the branch run itself.
+		branchRun, err := s.db.GetRun(runID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Get the latest main run to anchor the history window.
+		mainRun, err := s.db.GetLatestRunForBranch("main")
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				// No main runs at all — can't build a baseline.
+				runs = []db.Run{*branchRun}
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else {
+			// Fetch main-branch history.
+			mainRuns, err := s.db.GetComparableRunsWindow(mainRun.ID, window)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			// Branch run first (newest), then main history (newest-first).
+			runs = append([]db.Run{*branchRun}, mainRuns...)
+		}
+	} else {
+		var err error
+		runs, err = s.db.GetComparableRunsWindow(runID, window)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	if len(runs) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"run_id":               runID,
+			"branch":               branch,
 			"window":               window,
 			"min_points":           minPoints,
 			"baseline_offset":      baselineOffset,
