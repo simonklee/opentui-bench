@@ -54,17 +54,16 @@ const Compare: Component = () => {
   });
   const hasMultipleBranches = createMemo(() => grouped().length > 1);
 
-  // Check URL params at mount time (before any async operations) to avoid race conditions
-  const urlParams = new URLSearchParams(window.location.search);
-  const hadUrlParamsOnMount = urlParams.has("base") || urlParams.has("curr");
   const [didAutoSelect, setDidAutoSelect] = createSignal(false);
 
-  // Auto-select runs only on first load with no URL params
-  // Uses lastViewedRunId if available to maintain context
+  // Auto-select runs only on first load with no URL params.
+  // Use the router's searchParams (not window.location.search) so that
+  // navigations like navigate("/compare?base=103&curr=105") are detected
+  // immediately when this component mounts.
   createEffect(() => {
     const r = runs();
-    // Skip if URL had params on mount, or we already auto-selected
-    if (hadUrlParamsOnMount || didAutoSelect()) return;
+    // Skip if URL already has base/curr params, or we already auto-selected
+    if (searchParams.base || searchParams.curr || didAutoSelect()) return;
 
     if (r && r.length > 0) {
       setDidAutoSelect(true);
