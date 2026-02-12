@@ -160,7 +160,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
         <div class="flex flex-col gap-12 pb-12">
           {/* Trend Column */}
           <div class="flex flex-col">
-            <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 sm:gap-0 mb-6 border-b border-border pb-2">
+            <div class="flex flex-col md:flex-row md:justify-between md:items-center gap-4 md:gap-0 mb-6 border-b border-border pb-2">
               <div class="flex items-center gap-2 relative">
                 <h3 class="text-[12px] font-bold text-black uppercase tracking-widest">
                   Performance History
@@ -243,46 +243,56 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                   </div>
                 </Show>
               </div>
-              <div class="flex gap-2 items-center self-start sm:self-auto">
-                <Button active={props.chartRange === 30} onClick={() => props.setChartRange(30)}>
-                  30
-                </Button>
-                <Button active={props.chartRange === 70} onClick={() => props.setChartRange(70)}>
-                  70
-                </Button>
-                <Button active={props.chartRange === 100} onClick={() => props.setChartRange(100)}>
-                  MAX
-                </Button>
-                <div class="ml-2 flex items-center gap-1">
-                  <Button
-                    active={chartValueMode() === "absolute"}
-                    onClick={() => setChartValueMode("absolute")}
-                  >
-                    ns
-                  </Button>
-                  <Button
-                    active={chartValueMode() === "index"}
-                    onClick={() => setChartValueMode("index")}
-                  >
-                    index
-                  </Button>
-                </div>
-                <div class="ml-2 flex items-center gap-1">
-                  <Button active={reasonFilter() === "all"} onClick={() => setReasonFilter("all")}>
-                    all
-                  </Button>
-                  <Button
-                    active={reasonFilter() === "compared"}
-                    onClick={() => setReasonFilter("compared")}
-                  >
-                    compared
-                  </Button>
-                  <Button
-                    active={reasonFilter() === "pre_epoch"}
-                    onClick={() => setReasonFilter("pre_epoch")}
-                  >
-                    pre-epoch
-                  </Button>
+              <div class="self-start md:self-auto">
+                <div class="flex items-center gap-2 md:gap-3 flex-wrap">
+                  <div class="flex items-center gap-1">
+                    <Button active={props.chartRange === 30} onClick={() => props.setChartRange(30)}>
+                      30
+                    </Button>
+                    <Button active={props.chartRange === 70} onClick={() => props.setChartRange(70)}>
+                      70
+                    </Button>
+                    <Button active={props.chartRange === 100} onClick={() => props.setChartRange(100)}>
+                      MAX
+                    </Button>
+                  </div>
+                  <label class="flex items-center gap-1">
+                    <span class="text-[9px] sm:text-[10px] uppercase tracking-wider text-text-muted font-bold">Value</span>
+                    <div class="relative">
+                      <select
+                        class="appearance-none pl-2 pr-6 py-1 border border-border rounded-none text-[11px] bg-white text-black outline-none cursor-pointer font-mono font-medium hover:border-black transition-colors"
+                        value={chartValueMode()}
+                        onChange={(e) => setChartValueMode(e.currentTarget.value as "absolute" | "index")}
+                      >
+                        <option value="absolute">ns</option>
+                        <option value="index">index</option>
+                      </select>
+                      <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1.5 text-black">
+                        <svg class="h-2.5 w-2.5 fill-current" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+                          <path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z" />
+                        </svg>
+                      </div>
+                    </div>
+                  </label>
+                  <label class="flex items-center gap-1">
+                    <span class="text-[9px] sm:text-[10px] uppercase tracking-wider text-text-muted font-bold">Filter</span>
+                    <div class="relative">
+                      <select
+                        class="appearance-none pl-2 pr-6 py-1 border border-border rounded-none text-[11px] bg-white text-black outline-none cursor-pointer font-mono font-medium hover:border-black transition-colors"
+                        value={reasonFilter()}
+                        onChange={(e) => setReasonFilter(e.currentTarget.value as "all" | "compared" | "pre_epoch")}
+                      >
+                        <option value="all">all points</option>
+                        <option value="compared">compared</option>
+                        <option value="pre_epoch">pre-epoch</option>
+                      </select>
+                      <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1.5 text-black">
+                        <svg class="h-2.5 w-2.5 fill-current" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+                          <path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z" />
+                        </svg>
+                      </div>
+                    </div>
+                  </label>
                 </div>
               </div>
             </div>
@@ -331,7 +341,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
 
           {/* Flamegraph Column */}
           <div class="flex flex-col h-auto md:h-[600px]">
-            <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 sm:gap-0 mb-6 border-b border-border pb-2">
+            <div class="flex flex-col md:flex-row md:justify-between md:items-center gap-4 md:gap-0 mb-6 border-b border-border pb-2">
               <div class="flex items-center gap-2 relative">
                 <h3 class="text-[12px] font-bold text-black uppercase tracking-widest">
                   Execution Profile
@@ -383,7 +393,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                   </div>
                 </Show>
               </div>
-              <div class="flex gap-2 items-center self-start sm:self-auto flex-wrap">
+              <div class="flex gap-2 items-center self-start md:self-auto flex-wrap">
                 <Button
                   active={props.flamegraphView === "flamegraph"}
                   onClick={() => props.setFlamegraphView("flamegraph")}

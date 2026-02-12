@@ -197,78 +197,49 @@ const Regressions: Component = () => {
   return (
     <div class="flex flex-col h-full w-full">
       {/* Header */}
-      <div class="flex-none h-[57px] px-6 border-b border-border bg-bg-dark flex justify-between items-center">
-        <div class="flex items-center gap-3">
-          <h2 class="text-[14px] font-bold text-black uppercase tracking-widest">Regressions</h2>
-          <Show when={branches()}>
-            <div class="flex items-center gap-1">
-              <GitBranch size={12} class="text-text-muted" />
+      <div class="flex-none h-[57px] px-4 sm:px-6 border-b border-border bg-bg-dark flex items-center gap-2 sm:gap-3">
+        <h2 class="text-[13px] sm:text-[14px] font-bold text-black uppercase tracking-widest shrink-0">Regressions</h2>
+        <div class="flex-1 min-w-0" />
+        <Show when={branches()}>
+          <div class="relative shrink-0">
+            <select
+              class="appearance-none pl-2 pr-6 py-1 border border-border rounded-none text-[10px] sm:text-[11px] bg-white text-black outline-none cursor-pointer font-mono font-medium hover:border-black transition-colors"
+              style={{ width: `${Math.min(Math.max(branch().length * 7 + 28, 60), 200)}px` }}
+              value={branch()}
+              onChange={(e) => setBranch(e.currentTarget.value)}
+            >
               <For each={branches()}>
-                {(b) => (
-                  <button
-                    class={`px-1.5 py-0.5 text-[10px] font-mono font-medium rounded-sm transition-colors ${
-                      branch() === b
-                        ? b === "main"
-                          ? "bg-black text-white"
-                          : "bg-purple-100 text-purple-700 ring-1 ring-purple-300"
-                        : "bg-bg-hover text-text-muted hover:text-black"
-                    }`}
-                    onClick={() => setBranch(b)}
-                  >
-                    {b}
-                  </button>
-                )}
+                {(b) => <option value={b}>{b}</option>}
               </For>
+            </select>
+            <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1 text-black">
+              <GitBranch size={11} />
             </div>
-          </Show>
-        </div>
-        <div class="flex items-center gap-1">
-          <button
-            class={`px-2.5 py-1 text-[11px] font-mono border transition-colors ${
-              method() === "legacy"
-                ? "border-black bg-black text-white"
-                : "border-border bg-white text-text-muted hover:text-black"
-            }`}
-            onClick={() => setMethod("legacy")}
+          </div>
+        </Show>
+        <div class="relative shrink-0">
+          <select
+            class="appearance-none pl-2 pr-5 py-1 border border-border rounded-none text-[10px] sm:text-[11px] bg-white text-black outline-none cursor-pointer font-mono font-medium hover:border-black transition-colors"
+            value={method() === "legacy" ? "legacy" : `hybrid:${dfMode()}`}
+            onChange={(e) => {
+              const v = e.currentTarget.value;
+              if (v === "legacy") {
+                setMethod("legacy");
+              } else {
+                setMethod("hybrid");
+                setDFMode(v.split(":")[1] as RegressionDFMode);
+              }
+            }}
           >
-            Legacy
-          </button>
-          <button
-            class={`px-2.5 py-1 text-[11px] font-mono border transition-colors ${
-              method() === "hybrid"
-                ? "border-black bg-black text-white"
-                : "border-border bg-white text-text-muted hover:text-black"
-            }`}
-            onClick={() => setMethod("hybrid")}
-          >
-            Hybrid
-          </button>
-          <Show when={method() === "hybrid"}>
-            <div class="ml-2 flex items-center gap-1">
-              <button
-                class={`px-2.5 py-1 text-[11px] font-mono border transition-colors ${
-                  dfMode() === "baseline"
-                    ? "border-black bg-black text-white"
-                    : "border-border bg-white text-text-muted hover:text-black"
-                }`}
-                onClick={() => setDFMode("baseline")}
-                title="Degrees of freedom from baseline history (more sensitive)"
-              >
-                DF baseline
-              </button>
-              <button
-                class={`px-2.5 py-1 text-[11px] font-mono border transition-colors ${
-                  dfMode() === "latest"
-                    ? "border-black bg-black text-white"
-                    : "border-border bg-white text-text-muted hover:text-black"
-                }`}
-                onClick={() => setDFMode("latest")}
-                title="Degrees of freedom from latest run samples (more conservative)"
-              >
-                DF latest
-              </button>
-            </div>
-          </Show>
+            <option value="legacy">Legacy</option>
+            <option value="hybrid:baseline">Hybrid (baseline)</option>
+            <option value="hybrid:latest">Hybrid (latest)</option>
+          </select>
+          <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1 text-black">
+            <svg class="h-2.5 w-2.5 fill-current" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+              <path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z" />
+            </svg>
+          </div>
         </div>
       </div>
 
