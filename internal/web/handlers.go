@@ -1324,7 +1324,7 @@ const (
 	defaultBaselineOffset        = 3
 	defaultAlpha                 = 0.01
 	defaultFDR                   = defaultAlpha
-	defaultMinAbsoluteNs         = 1000.0
+	defaultMinAbsoluteNs         = 5000.0
 	globalShiftMinBenchmarks     = 50
 	globalShiftMinPositiveShare  = 0.75
 	globalShiftMinGeoIncreasePct = 10.0

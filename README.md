@@ -17,6 +17,7 @@ make build
 ./bench show <commit>
 ./bench compare <commit1> <commit2>
 ./bench trend "benchmark_name"
+./bench backtest                         # Replay historical alerts with scorecards
 
 # Start web UI
 make serve
