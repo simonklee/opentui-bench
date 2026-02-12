@@ -2,11 +2,12 @@ import { createResource, createSignal, Show, For } from "solid-js";
 import type { Component } from "solid-js";
 import { useNavigate, useSearchParams } from "@solidjs/router";
 import { api } from "../services/api";
-import type { Regression, RegressionsMethod, RegressionDFMode } from "../services/api";
+import type { Regression, RegressionDFMode } from "../services/api";
 import { formatNs } from "../utils/format";
 import { Check, AlertTriangle, Loader2, ArrowRight, GitBranch } from "lucide-solid";
 
 type DetectionFilter = "all" | "t_test" | "change_point";
+type SensitivityMode = "balanced" | "conservative";
 
 const GITHUB_REPO_URL = "https://github.com/anomalyco/opentui";
 
@@ -146,24 +147,23 @@ const Regressions: Component = () => {
     if (Array.isArray(b)) return b[0] || "main";
     return b || "main";
   };
-  const method = (): RegressionsMethod =>
-    searchParams.method === "legacy" ? "legacy" : "hybrid";
   const dfMode = (): RegressionDFMode =>
     searchParams.df_mode === "latest" ? "latest" : "baseline";
+  const sensitivity = (): SensitivityMode =>
+    dfMode() === "latest" ? "conservative" : "balanced";
 
-  const regressionKey = () => `${method()}:${dfMode()}:${branch()}`;
+  const regressionKey = () => `${dfMode()}:${branch()}`;
   const [data] = createResource(regressionKey, () =>
-    api.getRegressions(undefined, { method: method(), dfMode: dfMode(), branch: branch() }),
+    api.getRegressions(undefined, { dfMode: dfMode(), branch: branch() }),
   );
 
   const setBranch = (next: string) => {
     setSearchParams({ branch: next === "main" ? undefined : next });
   };
-  const setMethod = (next: RegressionsMethod) => {
-    setSearchParams({ method: next });
-  };
-  const setDFMode = (next: RegressionDFMode) => {
-    setSearchParams({ df_mode: next });
+  const setSensitivity = (next: SensitivityMode) => {
+    setSearchParams({
+      df_mode: next === "conservative" ? "latest" : "baseline",
+    });
   };
 
   const allRegressions = () => data()?.regressions ?? [];
@@ -197,48 +197,42 @@ const Regressions: Component = () => {
   return (
     <div class="flex flex-col h-full w-full">
       {/* Header */}
-      <div class="flex-none h-[57px] px-4 sm:px-6 border-b border-border bg-bg-dark flex items-center gap-2 sm:gap-3">
+      <div class="flex-none min-h-[57px] px-4 sm:px-6 py-2 sm:py-0 border-b border-border bg-bg-dark flex items-center gap-2 sm:gap-3 flex-wrap sm:flex-nowrap">
         <h2 class="text-[13px] sm:text-[14px] font-bold text-black uppercase tracking-widest shrink-0">Regressions</h2>
-        <div class="flex-1 min-w-0" />
-        <Show when={branches()}>
+        <div class="hidden sm:block flex-1 min-w-0" />
+        <div class="ml-auto w-full sm:w-auto flex items-center justify-end gap-1 sm:gap-2 flex-wrap">
+          <Show when={branches()}>
+            <div class="relative shrink-0">
+              <select
+                class="appearance-none pl-2 pr-6 py-1 border border-border rounded-none text-[10px] sm:text-[11px] bg-white text-black outline-none cursor-pointer font-mono font-medium hover:border-black transition-colors"
+                style={{ width: `${Math.min(Math.max(branch().length * 7 + 28, 64), 150)}px` }}
+                value={branch()}
+                onChange={(e) => setBranch(e.currentTarget.value)}
+              >
+                <For each={branches()}>
+                  {(b) => <option value={b}>{b}</option>}
+                </For>
+              </select>
+              <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1 text-black">
+                <GitBranch size={11} />
+              </div>
+            </div>
+          </Show>
           <div class="relative shrink-0">
             <select
-              class="appearance-none pl-2 pr-6 py-1 border border-border rounded-none text-[10px] sm:text-[11px] bg-white text-black outline-none cursor-pointer font-mono font-medium hover:border-black transition-colors"
-              style={{ width: `${Math.min(Math.max(branch().length * 7 + 28, 60), 200)}px` }}
-              value={branch()}
-              onChange={(e) => setBranch(e.currentTarget.value)}
+              class="appearance-none pl-2 pr-5 py-1 border border-border rounded-none text-[10px] sm:text-[11px] bg-white text-black outline-none cursor-pointer font-mono font-medium hover:border-black transition-colors"
+              value={sensitivity()}
+              onChange={(e) => setSensitivity(e.currentTarget.value as SensitivityMode)}
+              title="Regression sensitivity mode"
             >
-              <For each={branches()}>
-                {(b) => <option value={b}>{b}</option>}
-              </For>
+              <option value="balanced">Balanced sensitivity</option>
+              <option value="conservative">Conservative sensitivity</option>
             </select>
             <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1 text-black">
-              <GitBranch size={11} />
+              <svg class="h-2.5 w-2.5 fill-current" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+                <path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z" />
+              </svg>
             </div>
-          </div>
-        </Show>
-        <div class="relative shrink-0">
-          <select
-            class="appearance-none pl-2 pr-5 py-1 border border-border rounded-none text-[10px] sm:text-[11px] bg-white text-black outline-none cursor-pointer font-mono font-medium hover:border-black transition-colors"
-            value={method() === "legacy" ? "legacy" : `hybrid:${dfMode()}`}
-            onChange={(e) => {
-              const v = e.currentTarget.value;
-              if (v === "legacy") {
-                setMethod("legacy");
-              } else {
-                setMethod("hybrid");
-                setDFMode(v.split(":")[1] as RegressionDFMode);
-              }
-            }}
-          >
-            <option value="legacy">Legacy</option>
-            <option value="hybrid:baseline">Hybrid (baseline)</option>
-            <option value="hybrid:latest">Hybrid (latest)</option>
-          </select>
-          <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1 text-black">
-            <svg class="h-2.5 w-2.5 fill-current" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
-              <path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z" />
-            </svg>
           </div>
         </div>
       </div>
@@ -308,11 +302,9 @@ const Regressions: Component = () => {
                 </div>
               </Show>
 
-              <Show when={method() === "hybrid"}>
-                <div class="mt-2 text-[11px] font-mono text-text-muted">
-                  Statistical mode: {dfMode() === "baseline" ? "DF baseline (sensitive)" : "DF latest (conservative)"}
-                </div>
-              </Show>
+              <div class="mt-2 text-[11px] font-mono text-text-muted">
+                Sensitivity: {sensitivity() === "balanced" ? "balanced (DF baseline, recommended)" : "conservative (DF latest)"}
+              </div>
 
               <Show when={!data()?.insufficient_history}>
                 <div class="mt-2 text-[11px] font-mono text-text-muted">
@@ -331,7 +323,7 @@ const Regressions: Component = () => {
           </div>
 
           {/* Detection method filter */}
-          <Show when={hasRegressions() && method() === "hybrid"}>
+          <Show when={hasRegressions() && tTestCount() > 0 && changePointCount() > 0}>
             <div class="flex items-center gap-1">
               <button
                 class={`px-2 py-1 text-[10px] font-mono border transition-colors ${

@@ -1332,12 +1332,9 @@ const (
 	changePointAlpha             = 0.05
 	changePointPerms             = 199
 	changePointMaxAgeRuns        = 2
-	regressionMethodLegacy       = "legacy"
-	regressionMethodHybrid       = "hybrid"
 	regressionDFModeBaseline     = "baseline"
 	regressionDFModeLatest       = "latest"
 	defaultRegressionDFMode      = regressionDFModeBaseline
-	defaultRegressionMethod      = regressionMethodHybrid
 )
 
 func (s *Server) handleDatabaseDownload(w http.ResponseWriter, r *http.Request) {
@@ -1370,15 +1367,9 @@ func (s *Server) handleDatabaseDownload(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
-	method := defaultRegressionMethod
 	if raw := r.URL.Query().Get("method"); raw != "" {
-		switch raw {
-		case regressionMethodLegacy, regressionMethodHybrid:
-			method = raw
-		default:
-			http.Error(w, "invalid method, expected 'legacy' or 'hybrid'", http.StatusBadRequest)
-			return
-		}
+		http.Error(w, "method parameter is no longer supported; use df_mode only", http.StatusBadRequest)
+		return
 	}
 
 	dfMode := defaultRegressionDFMode
@@ -1422,7 +1413,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 					"min_points":           defaultMinPoints,
 					"effective_min_points": defaultMinPoints,
 					"baseline_offset":      defaultBaselineOffset,
-					"method":               method,
 					"df_mode":              dfMode,
 					"insufficient_history": true,
 					"insufficient_reason":  "no_runs_for_branch",
@@ -1514,7 +1504,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			"window":               window,
 			"min_points":           minPoints,
 			"baseline_offset":      baselineOffset,
-			"method":               method,
 			"insufficient_history": true,
 			"regressions":          []interface{}{},
 		})
@@ -1670,7 +1659,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		MinPoints                     int            `json:"min_points"`
 		EffectiveMinPoints            int            `json:"effective_min_points"`
 		BaselineOffset                int            `json:"baseline_offset"`
-		Method                        string         `json:"method"`
 		DFMode                        string         `json:"df_mode"`
 		EpochRunID                    *int64         `json:"epoch_run_id,omitempty"`
 		TotalBenchmarks               int            `json:"total_benchmarks"`
@@ -1862,7 +1850,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 
-			if method == regressionMethodHybrid && bench.cp != nil && bench.cp.isRecent {
+			if bench.cp != nil && bench.cp.isRecent {
 				hypotheses = append(hypotheses, hypothesis{
 					benchIndex: i,
 					kind:       "change_point",
@@ -2001,7 +1989,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		MinPoints:                     minPoints,
 		EffectiveMinPoints:            effectiveMinPoints,
 		BaselineOffset:                baselineOffset,
-		Method:                        method,
 		DFMode:                        dfMode,
 		TotalBenchmarks:               len(benchmarkNames),
 		AnalyzedBenchmarks:            analyzableBenchmarks,

@@ -63,7 +63,6 @@ export interface TrendResponse {
   baseline_ci_upper_ns?: number;
 }
 
-export type RegressionsMethod = "legacy" | "hybrid";
 export type RegressionDFMode = "baseline" | "latest";
 
 export interface CompareResult {
@@ -109,7 +108,6 @@ export interface RegressionsResponse {
   min_points: number;
   effective_min_points?: number;
   baseline_offset: number;
-  method: RegressionsMethod;
   df_mode?: RegressionDFMode;
   epoch_run_id?: number;
   total_benchmarks?: number;
@@ -158,7 +156,6 @@ export const api = {
       window?: number;
       minPoints?: number;
       baselineOffset?: number;
-      method?: RegressionsMethod;
       dfMode?: RegressionDFMode;
       branch?: string;
     },
@@ -178,9 +175,6 @@ export const api = {
     }
     if (options?.baselineOffset !== undefined) {
       params.set("baseline_offset", String(options.baselineOffset));
-    }
-    if (options?.method) {
-      params.set("method", options.method);
     }
     if (options?.dfMode) {
       params.set("df_mode", options.dfMode);
