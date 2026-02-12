@@ -43,6 +43,7 @@ export interface TrendPoint {
   ci_upper_ns?: number;
   sem_ns?: number;
   regression_status?: "ok" | "regressed" | "baseline" | "insufficient";
+  regression_reason?: string;
   baseline_run_id?: number;
   change_percent?: number;
 }
@@ -50,12 +51,20 @@ export interface TrendPoint {
 export interface TrendResponse {
   points: TrendPoint[];
   change_points?: { run_id: number; magnitude_ns: number; p_value: number }[];
+  global_shifts?: {
+    run_id: number;
+    positive_share: number;
+    geo_increase_pct: number;
+    compared_benchmarks: number;
+  }[];
+  epoch_run_id?: number;
   baseline_run_id?: number;
   baseline_ci_lower_ns?: number;
   baseline_ci_upper_ns?: number;
 }
 
 export type RegressionsMethod = "legacy" | "hybrid";
+export type RegressionDFMode = "baseline" | "latest";
 
 export interface CompareResult {
   comparisons: {
@@ -96,10 +105,22 @@ export interface RegressionsResponse {
   run_id: number | null;
   branch: string;
   window: number;
+  compared_runs?: number;
   min_points: number;
+  effective_min_points?: number;
   baseline_offset: number;
   method: RegressionsMethod;
+  df_mode?: RegressionDFMode;
+  epoch_run_id?: number;
+  total_benchmarks?: number;
+  analyzed_benchmarks?: number;
   insufficient_history?: boolean;
+  insufficient_reason?: string;
+  exclusion_counts?: Record<string, number>;
+  global_shift_detected?: boolean;
+  global_shift_positive_share?: number;
+  global_shift_geo_increase_pct?: number;
+  global_shift_compared_benchmarks?: number;
   regressions: Regression[];
 }
 
@@ -138,6 +159,7 @@ export const api = {
       minPoints?: number;
       baselineOffset?: number;
       method?: RegressionsMethod;
+      dfMode?: RegressionDFMode;
       branch?: string;
     },
   ) => {
@@ -159,6 +181,9 @@ export const api = {
     }
     if (options?.method) {
       params.set("method", options.method);
+    }
+    if (options?.dfMode) {
+      params.set("df_mode", options.dfMode);
     }
     const query = params.toString();
     const url = query ? `/api/regressions?${query}` : "/api/regressions";

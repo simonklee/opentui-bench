@@ -2,7 +2,7 @@ import { createResource, createSignal, Show, For } from "solid-js";
 import type { Component } from "solid-js";
 import { useNavigate, useSearchParams } from "@solidjs/router";
 import { api } from "../services/api";
-import type { Regression, RegressionsMethod } from "../services/api";
+import type { Regression, RegressionsMethod, RegressionDFMode } from "../services/api";
 import { formatNs } from "../utils/format";
 import { Check, AlertTriangle, Loader2, ArrowRight, GitBranch } from "lucide-solid";
 
@@ -27,6 +27,11 @@ const truncateMessage = (msg: string, maxLen = 50): string => {
   const firstLine = msg.split("\n")[0] ?? "";
   if (firstLine.length <= maxLen) return firstLine;
   return firstLine.slice(0, maxLen - 1) + "…";
+};
+
+const formatReason = (reason?: string): string => {
+  if (!reason) return "unknown";
+  return reason.replaceAll("_", " ");
 };
 
 const CommitLink: Component<{ hash?: string; hashFull?: string }> = (props) => {
@@ -143,10 +148,12 @@ const Regressions: Component = () => {
   };
   const method = (): RegressionsMethod =>
     searchParams.method === "legacy" ? "legacy" : "hybrid";
+  const dfMode = (): RegressionDFMode =>
+    searchParams.df_mode === "latest" ? "latest" : "baseline";
 
-  const regressionKey = () => `${method()}:${branch()}`;
+  const regressionKey = () => `${method()}:${dfMode()}:${branch()}`;
   const [data] = createResource(regressionKey, () =>
-    api.getRegressions(undefined, { method: method(), branch: branch() }),
+    api.getRegressions(undefined, { method: method(), dfMode: dfMode(), branch: branch() }),
   );
 
   const setBranch = (next: string) => {
@@ -154,6 +161,9 @@ const Regressions: Component = () => {
   };
   const setMethod = (next: RegressionsMethod) => {
     setSearchParams({ method: next });
+  };
+  const setDFMode = (next: RegressionDFMode) => {
+    setSearchParams({ df_mode: next });
   };
 
   const allRegressions = () => data()?.regressions ?? [];
@@ -166,6 +176,19 @@ const Regressions: Component = () => {
   const hasRegressions = () => regressionCount() > 0;
   const insufficientHistory = () => !!data()?.insufficient_history;
   const showInsufficientHistory = () => insufficientHistory() && !hasRegressions();
+  const globalShiftDetected = () => !!data()?.global_shift_detected;
+  const effectiveMinPoints = () => data()?.effective_min_points ?? data()?.min_points;
+  const isAdaptiveMinPoints = () => effectiveMinPoints() !== data()?.min_points;
+  const comparedRuns = () => data()?.compared_runs ?? 0;
+  const analyzedBenchmarks = () => data()?.analyzed_benchmarks ?? 0;
+  const totalBenchmarks = () => data()?.total_benchmarks ?? 0;
+  const topExclusions = () => {
+    const counts = data()?.exclusion_counts;
+    if (!counts) return [] as [string, number][];
+    return Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3);
+  };
 
   // Count by detection method for filter badges
   const tTestCount = () => allRegressions().filter((r) => r.detection_method === "t_test").length;
@@ -220,6 +243,32 @@ const Regressions: Component = () => {
           >
             Hybrid
           </button>
+          <Show when={method() === "hybrid"}>
+            <div class="ml-2 flex items-center gap-1">
+              <button
+                class={`px-2.5 py-1 text-[11px] font-mono border transition-colors ${
+                  dfMode() === "baseline"
+                    ? "border-black bg-black text-white"
+                    : "border-border bg-white text-text-muted hover:text-black"
+                }`}
+                onClick={() => setDFMode("baseline")}
+                title="Degrees of freedom from baseline history (more sensitive)"
+              >
+                DF baseline
+              </button>
+              <button
+                class={`px-2.5 py-1 text-[11px] font-mono border transition-colors ${
+                  dfMode() === "latest"
+                    ? "border-black bg-black text-white"
+                    : "border-border bg-white text-text-muted hover:text-black"
+                }`}
+                onClick={() => setDFMode("latest")}
+                title="Degrees of freedom from latest run samples (more conservative)"
+              >
+                DF latest
+              </button>
+            </div>
+          </Show>
         </div>
       </div>
 
@@ -259,6 +308,45 @@ const Regressions: Component = () => {
                 <div class="flex items-center gap-2 text-warning">
                   <AlertTriangle size={18} />
                   <span class="text-[14px] font-medium">Not enough history for analysis</span>
+                </div>
+                <div class="mt-2 text-[11px] font-mono text-text-muted">
+                  Primary reason: {formatReason(data()?.insufficient_reason)}
+                </div>
+                <Show when={topExclusions().length > 0}>
+                  <div class="mt-1 text-[11px] font-mono text-text-muted">
+                    Exclusions: {topExclusions().map(([k, v]) => `${formatReason(k)}=${v}`).join(", ")}
+                  </div>
+                </Show>
+              </Show>
+
+              <Show when={globalShiftDetected()}>
+                <div class="mt-2 inline-flex items-center gap-2 rounded-sm border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] font-mono text-amber-800">
+                  <span>Global shift detected</span>
+                  <span>
+                    +{(data()?.global_shift_geo_increase_pct ?? 0).toFixed(1)}% geo
+                  </span>
+                  <span>
+                    {Math.round((data()?.global_shift_positive_share ?? 0) * 100)}% benchmarks
+                  </span>
+                </div>
+              </Show>
+
+              <Show when={isAdaptiveMinPoints()}>
+                <div class="mt-2 text-[11px] font-mono text-text-muted">
+                  Adaptive baseline warmup active (min points {data()?.min_points} to {effectiveMinPoints()})
+                </div>
+              </Show>
+
+              <Show when={method() === "hybrid"}>
+                <div class="mt-2 text-[11px] font-mono text-text-muted">
+                  Statistical mode: {dfMode() === "baseline" ? "DF baseline (sensitive)" : "DF latest (conservative)"}
+                </div>
+              </Show>
+
+              <Show when={!data()?.insufficient_history}>
+                <div class="mt-2 text-[11px] font-mono text-text-muted">
+                  Coverage: {analyzedBenchmarks()}/{totalBenchmarks()} benchmarks analyzed over {comparedRuns()} comparable runs
+                  <Show when={data()?.epoch_run_id}> (epoch starts at run #{data()?.epoch_run_id})</Show>
                 </div>
               </Show>
             </Show>

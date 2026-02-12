@@ -29,7 +29,32 @@ interface BenchmarkDetailModalProps {
 const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
   const [showProfileHelp, setShowProfileHelp] = createSignal(false);
   const [showTrendHelp, setShowTrendHelp] = createSignal(false);
+  const [chartValueMode, setChartValueMode] = createSignal<"absolute" | "index">("absolute");
+  const [reasonFilter, setReasonFilter] = createSignal<"all" | "compared" | "pre_epoch">("all");
   const [searchParams] = useSearchParams();
+
+  const latestGlobalShift = () => {
+    const shifts = props.trendData?.global_shifts;
+    if (!shifts || shifts.length === 0) return undefined;
+    return shifts.reduce((latest, curr) => (curr.run_id > latest.run_id ? curr : latest));
+  };
+
+  const reasonLabel = (reason: string) => {
+    if (reason === "pre_epoch_not_compared") return "pre-epoch context";
+    if (reason === "insufficient_baseline_history") return "insufficient baseline history";
+    if (reason === "baseline_reference") return "baseline reference";
+    return reason.replaceAll("_", " ");
+  };
+
+  const topTrendReasons = () => {
+    const points = props.trendData?.points || [];
+    const counts = new Map<string, number>();
+    for (const p of points) {
+      if (!p.regression_reason) continue;
+      counts.set(p.regression_reason, (counts.get(p.regression_reason) || 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+  };
 
   // Helper for stat blocks
   const StatBlock = (p: { label: string; value: any; sub?: any }) => (
@@ -134,7 +159,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
 
         <div class="flex flex-col gap-12 pb-12">
           {/* Trend Column */}
-          <div class="flex flex-col h-auto md:h-[400px]">
+          <div class="flex flex-col">
             <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 sm:gap-0 mb-6 border-b border-border pb-2">
               <div class="flex items-center gap-2 relative">
                 <h3 class="text-[12px] font-bold text-black uppercase tracking-widest">
@@ -157,8 +182,8 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                       <div>
                         <div class="font-bold mb-1">Error Bars (95% CI)</div>
                         <p class="text-text-muted leading-relaxed">
-                          Shows the 95% Confidence Interval of the mean. We are 95% confident the
-                          true mean lies within this range. Narrower bars indicate higher precision
+                          Shows the 95% Confidence Interval around the median estimate. Narrower
+                          bars indicate higher precision
                           (more stable results or more samples).
                         </p>
                       </div>
@@ -166,8 +191,8 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                       <div>
                         <div class="font-bold mb-1">Shaded Band (Standard Deviation)</div>
                         <p class="text-text-muted leading-relaxed">
-                          The light gray background band represents ±1 Standard Deviation from the
-                          mean, showing the variability of individual benchmark runs.
+                          The light gray background band represents +-1 Standard Deviation around
+                          the median, showing the variability of individual benchmark runs.
                         </p>
                       </div>
 
@@ -175,6 +200,43 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                         <div class="font-bold mb-1">Interaction</div>
                         <p class="text-text-muted leading-relaxed">
                           Click any data point to inspect that specific run's details.
+                        </p>
+                      </div>
+
+                      <div>
+                        <div class="font-bold mb-1">Global Shift Markers</div>
+                        <p class="text-text-muted leading-relaxed">
+                          Orange dashed vertical lines indicate harness-level shifts detected across
+                          many benchmarks. Compare within an epoch for fair trend interpretation.
+                        </p>
+                      </div>
+
+                      <div>
+                        <div class="font-bold mb-1">Value Modes</div>
+                        <p class="text-text-muted leading-relaxed">
+                          Use <span class="font-mono">ns</span> for absolute timings and
+                          <span class="font-mono"> index</span> for normalized history where 100
+                          is the epoch anchor.
+                        </p>
+                      </div>
+
+                      <div>
+                        <div class="font-bold mb-1">Status Reasons</div>
+                        <p class="text-text-muted leading-relaxed">
+                          Tooltips include reason codes for baseline/insufficient points and
+                          pre-epoch context points so you can see why a point is or is not compared.
+                        </p>
+                      </div>
+
+                      <div>
+                        <div class="font-bold mb-1">Point Filters</div>
+                        <p class="text-text-muted leading-relaxed">
+                          Use filter buttons to view all points, only compared points, or only
+                          pre-epoch context points.
+                        </p>
+                        <p class="text-text-muted leading-relaxed mt-1">
+                          The chart legend also shows point-color meaning for compared vs
+                          pre-epoch context.
                         </p>
                       </div>
                     </div>
@@ -191,9 +253,40 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                 <Button active={props.chartRange === 100} onClick={() => props.setChartRange(100)}>
                   MAX
                 </Button>
+                <div class="ml-2 flex items-center gap-1">
+                  <Button
+                    active={chartValueMode() === "absolute"}
+                    onClick={() => setChartValueMode("absolute")}
+                  >
+                    ns
+                  </Button>
+                  <Button
+                    active={chartValueMode() === "index"}
+                    onClick={() => setChartValueMode("index")}
+                  >
+                    index
+                  </Button>
+                </div>
+                <div class="ml-2 flex items-center gap-1">
+                  <Button active={reasonFilter() === "all"} onClick={() => setReasonFilter("all")}>
+                    all
+                  </Button>
+                  <Button
+                    active={reasonFilter() === "compared"}
+                    onClick={() => setReasonFilter("compared")}
+                  >
+                    compared
+                  </Button>
+                  <Button
+                    active={reasonFilter() === "pre_epoch"}
+                    onClick={() => setReasonFilter("pre_epoch")}
+                  >
+                    pre-epoch
+                  </Button>
+                </div>
               </div>
             </div>
-            <div class="h-[300px] md:flex-1 md:min-h-0 relative border border-border p-4">
+            <div class="h-[300px] relative border border-border p-4">
               <Show
                 when={props.trendData}
                 fallback={
@@ -205,9 +298,12 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                 <TrendChart
                   data={props.trendData!.points}
                   changePoints={props.trendData!.change_points}
+                  globalShifts={props.trendData!.global_shifts}
                   overlayData={props.branchTrendData?.points}
                   overlayBranch={props.branch}
                   range={props.chartRange}
+                  valueMode={chartValueMode()}
+                  reasonFilter={reasonFilter()}
                   currentRunId={props.runId}
                   baselineCILowerNs={props.trendData!.baseline_ci_lower_ns}
                   baselineCIUpperNs={props.trendData!.baseline_ci_upper_ns}
@@ -219,6 +315,18 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
               <span>Error Bars: 95% CI</span>
               <span>Shaded: ±1 SD</span>
             </div>
+            <Show when={latestGlobalShift()}>
+              <div class="mt-2 text-[10px] text-amber-800 font-mono uppercase tracking-wider">
+                Global shift at run #{latestGlobalShift()!.run_id}: +
+                {latestGlobalShift()!.geo_increase_pct.toFixed(1)}% geometric increase across{" "}
+                {latestGlobalShift()!.compared_benchmarks} benchmarks
+              </div>
+            </Show>
+            <Show when={topTrendReasons().length > 0}>
+              <div class="mt-1 text-[10px] text-text-muted font-mono uppercase tracking-wider">
+                Status reasons: {topTrendReasons().map(([k, v]) => `${reasonLabel(k)}=${v}`).join(", ")}
+              </div>
+            </Show>
           </div>
 
           {/* Flamegraph Column */}

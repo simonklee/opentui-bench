@@ -27,6 +27,13 @@ func TestRegressionDegreesOfFreedom(t *testing.T) {
 			t.Fatalf("expected df=1, got %d", df)
 		}
 	})
+
+	t.Run("latest mode prefers latest sample count", func(t *testing.T) {
+		df := regressionDegreesOfFreedomWithMode(3, 20, "latest")
+		if df != 2 {
+			t.Fatalf("expected latest-mode df=2, got %d", df)
+		}
+	})
 }
 
 func TestTCriticalOneSided(t *testing.T) {

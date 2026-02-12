@@ -139,6 +139,50 @@ const changePointLinesPlugin = {
   },
 };
 
+const globalShiftLinesPlugin = {
+  id: "globalShiftLines",
+  afterDatasetsDraw(chart: any) {
+    const options = chart.options?.plugins?.globalShiftLines;
+    const points = options?.points as
+      | { run_id: number; positive_share: number; geo_increase_pct: number; compared_benchmarks: number }[]
+      | undefined;
+    const runIdToIndex = options?.runIdToIndex as Record<string, number> | undefined;
+    const xScale = chart.scales?.x;
+    const yScale = chart.scales?.y;
+    if (!points || points.length === 0 || !runIdToIndex || !xScale || !yScale) {
+      return;
+    }
+
+    const { ctx } = chart;
+    for (const shift of points) {
+      const idx = runIdToIndex[String(shift.run_id)];
+      if (idx === undefined) {
+        continue;
+      }
+
+      const x = xScale.getPixelForValue(idx);
+      const color = "#b45309";
+      const label = `global +${shift.geo_increase_pct.toFixed(1)}%`;
+
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([8, 4]);
+      ctx.beginPath();
+      ctx.moveTo(x, yScale.top);
+      ctx.lineTo(x, yScale.bottom);
+      ctx.stroke();
+
+      ctx.setLineDash([]);
+      ctx.fillStyle = color;
+      ctx.font = "10px var(--font-mono)";
+      ctx.textAlign = "left";
+      ctx.fillText(label, x + 4, yScale.top + 22);
+      ctx.restore();
+    }
+  },
+};
+
 Chart.register(
   Title,
   Tooltip,
@@ -153,17 +197,27 @@ Chart.register(
   errorBarPlugin,
   baselineBandPlugin,
   changePointLinesPlugin,
+  globalShiftLinesPlugin,
 );
 
 // Branch overlay color
 const BRANCH_COLOR = "#7c3aed"; // purple-600
+const PRE_EPOCH_COLOR = "#9ca3af"; // gray-400
 
 interface Props {
   data: TrendPoint[];
   changePoints?: { run_id: number; magnitude_ns: number; p_value: number }[];
+  globalShifts?: {
+    run_id: number;
+    positive_share: number;
+    geo_increase_pct: number;
+    compared_benchmarks: number;
+  }[];
   overlayData?: TrendPoint[];
   overlayBranch?: string;
   range?: number;
+  valueMode?: "absolute" | "index";
+  reasonFilter?: "all" | "compared" | "pre_epoch";
   currentRunId?: number;
   onPointClick?: (runId: number, resultId: number) => void;
   baselineCILowerNs?: number;
@@ -286,12 +340,52 @@ function buildLabels(points: TrendPoint[]): string[][] {
   return points.map(buildLabel);
 }
 
+function humanizeReason(reason?: string): string {
+  if (!reason) return "unknown";
+  if (reason === "pre_epoch_not_compared") return "pre-epoch context point";
+  if (reason === "insufficient_baseline_history") return "insufficient baseline history";
+  if (reason === "baseline_reference") return "baseline reference point";
+  return reason.replaceAll("_", " ");
+}
+
 const TrendChart: Component<Props> = (props) => {
   const hasOverlay = () => !!props.overlayData && props.overlayData.length > 0;
+  const isIndexMode = () => props.valueMode === "index";
+  const passesReasonFilter = (p: TrendPoint) => {
+    const filter = props.reasonFilter || "all";
+    if (filter === "all") return true;
+    if (filter === "pre_epoch") return p.regression_reason === "pre_epoch_not_compared";
+    return p.regression_reason !== "pre_epoch_not_compared";
+  };
+
+  const toIndex = (value: number | null | undefined, anchorNs: number | null) => {
+    if (value === null || value === undefined || anchorNs === null || anchorNs <= 0) {
+      return null;
+    }
+    return (value / anchorNs) * 100;
+  };
+
+  const latestGlobalShiftRunId = () => {
+    const shifts = props.globalShifts || [];
+    if (shifts.length === 0) return undefined;
+    return shifts.reduce((latest, curr) => (curr.run_id > latest.run_id ? curr : latest)).run_id;
+  };
+
+  const getAnchorNs = (points: (TrendPoint | null)[]) => {
+    const valid = points.filter((p): p is TrendPoint => p !== null);
+    if (valid.length === 0) return null;
+    const shiftRunId = latestGlobalShiftRunId();
+    if (shiftRunId !== undefined) {
+      const shiftPoint = valid.find((p) => p.run_id === shiftRunId);
+      if (shiftPoint && shiftPoint.median_ns > 0) return shiftPoint.median_ns;
+    }
+    const first = valid[0]!;
+    return first.median_ns > 0 ? first.median_ns : null;
+  };
 
   const showData = () => {
     const limit = props.range || 100;
-    return (props.data || []).slice(0, limit).reverse();
+    return (props.data || []).filter(passesReasonFilter).slice(0, limit).reverse();
   };
 
   // Cache the merged timeline so it's computed once per render
@@ -299,10 +393,14 @@ const TrendChart: Component<Props> = (props) => {
   let cachedMerged: ReturnType<typeof buildMergedTimeline> | null = null;
   const getMergedTimeline = () => {
     const limit = props.range || 100;
-    const key = `${props.data?.length}-${props.overlayData?.length}-${limit}`;
+    const key = `${props.data?.length}-${props.overlayData?.length}-${limit}-${props.reasonFilter || "all"}`;
     if (key !== cachedMergedKey || !cachedMerged) {
       cachedMergedKey = key;
-      cachedMerged = buildMergedTimeline(props.data || [], props.overlayData!, limit);
+      cachedMerged = buildMergedTimeline(
+        (props.data || []).filter(passesReasonFilter),
+        (props.overlayData || []).filter(passesReasonFilter),
+        limit,
+      );
     }
     return cachedMerged;
   };
@@ -332,19 +430,45 @@ const TrendChart: Component<Props> = (props) => {
     if (hasOverlay()) {
       // Merged timeline mode
       const { labels, mainData, branchData, allPoints } = getMergedTimeline();
+      const anchorNs = getAnchorNs(mainData);
 
       // Main series values (null where no main point)
-      const mainValues = mainData.map((d) => (d ? d.median_ns : null));
-      const mainCiLower = mainData.map((d) => (d ? (d.ci_lower_ns ?? d.median_ns) : null));
-      const mainCiUpper = mainData.map((d) => (d ? (d.ci_upper_ns ?? d.median_ns) : null));
-      const mainSdLower = mainData.map((d) =>
-        d ? Math.max(d.median_ns - d.std_dev_ns, 0) : null,
+      const mainValues = mainData.map((d) =>
+        d ? (isIndexMode() ? toIndex(d.median_ns, anchorNs) : d.median_ns) : null,
       );
-      const mainSdUpper = mainData.map((d) => (d ? d.median_ns + d.std_dev_ns : null));
+      const mainCiLower = mainData.map((d) =>
+        d
+          ? isIndexMode()
+            ? toIndex(d.ci_lower_ns ?? d.median_ns, anchorNs)
+            : (d.ci_lower_ns ?? d.median_ns)
+          : null,
+      );
+      const mainCiUpper = mainData.map((d) =>
+        d
+          ? isIndexMode()
+            ? toIndex(d.ci_upper_ns ?? d.median_ns, anchorNs)
+            : (d.ci_upper_ns ?? d.median_ns)
+          : null,
+      );
+      const mainSdLower = mainData.map((d) =>
+        d
+          ? isIndexMode()
+            ? toIndex(Math.max(d.median_ns - d.std_dev_ns, 0), anchorNs)
+            : Math.max(d.median_ns - d.std_dev_ns, 0)
+          : null,
+      );
+      const mainSdUpper = mainData.map((d) =>
+        d
+          ? isIndexMode()
+            ? toIndex(d.median_ns + d.std_dev_ns, anchorNs)
+            : d.median_ns + d.std_dev_ns
+          : null,
+      );
 
       // Main point styling
       const mainBgColors = mainData.map((d) => {
         if (!d) return "transparent";
+        if (d.regression_reason === "pre_epoch_not_compared") return "#f3f4f6";
         if (d.regression_status === "regressed") return "#cf222e";
         if (d.regression_status === "baseline") return "#1a7f37";
         if (d.regression_status === "insufficient") return "#d1d5db";
@@ -352,6 +476,7 @@ const TrendChart: Component<Props> = (props) => {
       });
       const mainBorderColors = mainData.map((d) => {
         if (!d) return "transparent";
+        if (d.regression_reason === "pre_epoch_not_compared") return PRE_EPOCH_COLOR;
         if (d.regression_status === "regressed") return "#cf222e";
         if (d.regression_status === "baseline") return "#1a7f37";
         if (d.regression_status === "insufficient") return "#9ca3af";
@@ -359,6 +484,7 @@ const TrendChart: Component<Props> = (props) => {
       });
       const mainRadii = mainData.map((d) => {
         if (!d) return 0;
+        if (d.regression_reason === "pre_epoch_not_compared") return 2;
         if (d.regression_status === "regressed") return 6;
         if (d.regression_status === "baseline") return 5;
         if (d.regression_status === "insufficient") return 4;
@@ -366,12 +492,22 @@ const TrendChart: Component<Props> = (props) => {
       });
 
       // Branch series values (null where no branch point)
-      const branchValues = branchData!.map((d) => (d ? d.median_ns : null));
+      const branchValues = branchData!.map((d) =>
+        d ? (isIndexMode() ? toIndex(d.median_ns, anchorNs) : d.median_ns) : null,
+      );
       const branchCiLower = branchData!.map((d) =>
-        d ? (d.ci_lower_ns ?? d.median_ns) : null,
+        d
+          ? isIndexMode()
+            ? toIndex(d.ci_lower_ns ?? d.median_ns, anchorNs)
+            : (d.ci_lower_ns ?? d.median_ns)
+          : null,
       );
       const branchCiUpper = branchData!.map((d) =>
-        d ? (d.ci_upper_ns ?? d.median_ns) : null,
+        d
+          ? isIndexMode()
+            ? toIndex(d.ci_upper_ns ?? d.median_ns, anchorNs)
+            : (d.ci_upper_ns ?? d.median_ns)
+          : null,
       );
 
       // Branch point styling: fork point looks like main, actual branch points are purple
@@ -462,12 +598,24 @@ const TrendChart: Component<Props> = (props) => {
 
     // Standard mode (no overlay) — original behavior
     const data = showData();
-    const ciLower = data.map((d) => d.ci_lower_ns ?? d.median_ns);
-    const ciUpper = data.map((d) => d.ci_upper_ns ?? d.median_ns);
-    const sdLower = data.map((d) => Math.max(d.median_ns - d.std_dev_ns, 0));
-    const sdUpper = data.map((d) => d.median_ns + d.std_dev_ns);
+    const anchorNs = getAnchorNs(data);
+    const ciLower = data.map((d) =>
+      isIndexMode() ? toIndex(d.ci_lower_ns ?? d.median_ns, anchorNs) : (d.ci_lower_ns ?? d.median_ns),
+    );
+    const ciUpper = data.map((d) =>
+      isIndexMode() ? toIndex(d.ci_upper_ns ?? d.median_ns, anchorNs) : (d.ci_upper_ns ?? d.median_ns),
+    );
+    const sdLower = data.map((d) =>
+      isIndexMode()
+        ? toIndex(Math.max(d.median_ns - d.std_dev_ns, 0), anchorNs)
+        : Math.max(d.median_ns - d.std_dev_ns, 0),
+    );
+    const sdUpper = data.map((d) =>
+      isIndexMode() ? toIndex(d.median_ns + d.std_dev_ns, anchorNs) : d.median_ns + d.std_dev_ns,
+    );
 
     const pointBgColors = data.map((d) => {
+      if (d.regression_reason === "pre_epoch_not_compared") return "#f3f4f6";
       if (d.regression_status === "regressed") return "#cf222e";
       if (d.regression_status === "baseline") return "#1a7f37";
       if (d.run_id === currentRunId) return "#000000";
@@ -475,12 +623,14 @@ const TrendChart: Component<Props> = (props) => {
       return "#ffffff";
     });
     const pointBorderColors = data.map((d) => {
+      if (d.regression_reason === "pre_epoch_not_compared") return PRE_EPOCH_COLOR;
       if (d.regression_status === "regressed") return "#cf222e";
       if (d.regression_status === "baseline") return "#1a7f37";
       if (d.regression_status === "insufficient") return "#9ca3af";
       return "#000000";
     });
     const pointRadii = data.map((d) => {
+      if (d.regression_reason === "pre_epoch_not_compared") return 2;
       if (d.regression_status === "regressed") return 6;
       if (d.regression_status === "baseline") return 5;
       if (d.run_id === currentRunId) return 5;
@@ -510,7 +660,7 @@ const TrendChart: Component<Props> = (props) => {
         },
         {
           label: "Median",
-          data: data.map((d) => d.median_ns),
+          data: data.map((d) => (isIndexMode() ? toIndex(d.median_ns, anchorNs) : d.median_ns)),
           borderColor: "#000000",
           backgroundColor: "#ffffff",
           borderWidth: 1.5,
@@ -538,6 +688,14 @@ const TrendChart: Component<Props> = (props) => {
       return bp ?? mp ?? null;
     }
     return showData()[index] ?? null;
+  };
+
+  const currentAnchorNs = () => {
+    if (hasOverlay()) {
+      const { mainData } = getMergedTimeline();
+      return getAnchorNs(mainData);
+    }
+    return getAnchorNs(showData());
   };
 
   const chartOptions = (): any => ({
@@ -604,11 +762,15 @@ const TrendChart: Component<Props> = (props) => {
           }
         : { display: false },
       baselineBand: {
-        lower: props.baselineCILowerNs,
-        upper: props.baselineCIUpperNs,
+        lower: isIndexMode() ? toIndex(props.baselineCILowerNs, currentAnchorNs()) : props.baselineCILowerNs,
+        upper: isIndexMode() ? toIndex(props.baselineCIUpperNs, currentAnchorNs()) : props.baselineCIUpperNs,
       },
       changePointLines: {
         points: props.changePoints || [],
+        runIdToIndex: getChangePointRunIndexMap(),
+      },
+      globalShiftLines: {
+        points: props.globalShifts || [],
         runIdToIndex: getChangePointRunIndexMap(),
       },
       tooltip: {
@@ -667,10 +829,26 @@ const TrendChart: Component<Props> = (props) => {
               `Range: ${formatNs(d.min_ns)} - ${formatNs(d.max_ns)}`,
               `Samples: ${d.sample_count}`,
             ];
+            if (isIndexMode()) {
+              const anchorNs = currentAnchorNs();
+              if (anchorNs && anchorNs > 0) {
+                lines.unshift(`Index: ${((d.median_ns / anchorNs) * 100).toFixed(2)} (100 = anchor)`);
+              }
+            }
             if (d.regression_status === "regressed" && d.change_percent !== undefined) {
               lines.push(`Regression: +${d.change_percent.toFixed(1)}% vs baseline`);
             } else if (d.regression_status === "baseline") {
               lines.push(`Status: Baseline`);
+              if (d.regression_reason) {
+                lines.push(`Reason: ${humanizeReason(d.regression_reason)}`);
+              }
+            } else if (d.regression_status === "insufficient") {
+              lines.push(`Status: Insufficient`);
+              if (d.regression_reason) {
+                lines.push(`Reason: ${humanizeReason(d.regression_reason)}`);
+              }
+            } else if (d.regression_reason === "pre_epoch_not_compared") {
+              lines.push(`Epoch: ${humanizeReason(d.regression_reason)}`);
             }
             if (isBranch && d.branch) {
               lines.push(`Branch: ${d.branch}`);
@@ -696,6 +874,9 @@ const TrendChart: Component<Props> = (props) => {
           },
           color: "#666666",
           callback: function (value: any) {
+            if (isIndexMode()) {
+              return `${Number(value).toFixed(1)}`;
+            }
             return formatNs(value);
           },
         },
@@ -726,27 +907,34 @@ const TrendChart: Component<Props> = (props) => {
   });
 
   const hasChangePoints = () => (props.changePoints?.length ?? 0) > 0;
+  const hasGlobalShifts = () => (props.globalShifts?.length ?? 0) > 0;
+  const reasonFilterLabel = () => {
+    const filter = props.reasonFilter || "all";
+    if (filter === "compared") return "compared points";
+    if (filter === "pre_epoch") return "pre-epoch points";
+    return "all points";
+  };
 
   return (
-    <div class="relative w-full h-full">
-      <Line data={chartData()} options={chartOptions()} width={500} height={300} />
-      <Show when={hasOverlay()}>
-        <div class="mt-2 flex justify-between text-[10px] text-text-muted font-mono uppercase tracking-wider">
-          <span>
-            <span class="inline-block w-3 h-[2px] bg-black mr-1 align-middle"></span>
+    <div class="relative w-full h-full flex flex-col">
+      <div class="flex-1 min-h-0">
+        <Line data={chartData()} options={chartOptions()} width={500} height={300} />
+      </div>
+      <div class="shrink-0 mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-text-muted font-mono uppercase tracking-wider">
+        <Show when={hasOverlay()}>
+          <span class="flex items-center gap-1">
+            <span class="inline-block w-3 h-[2px] bg-black"></span>
             main
           </span>
-          <span>
+          <span class="flex items-center gap-1">
             <span
-              class="inline-block w-3 h-[2px] mr-1 align-middle"
-              style={`background: ${BRANCH_COLOR}; border-top: 2px dashed ${BRANCH_COLOR}; height: 0;`}
+              class="inline-block w-3 h-0 border-t-2 border-dashed"
+              style={`border-color: ${BRANCH_COLOR};`}
             ></span>
             {props.overlayBranch}
           </span>
-        </div>
-      </Show>
-      <Show when={hasChangePoints()}>
-        <div class="mt-1 flex gap-4 text-[10px] text-text-muted font-mono uppercase tracking-wider">
+        </Show>
+        <Show when={hasChangePoints()}>
           <span class="flex items-center gap-1">
             <span class="inline-block w-3 h-0 border-t border-dashed" style="border-color: #cf222e;"></span>
             Regression shift
@@ -755,8 +943,26 @@ const TrendChart: Component<Props> = (props) => {
             <span class="inline-block w-3 h-0 border-t border-dashed" style="border-color: #0969da;"></span>
             Improvement shift
           </span>
-        </div>
-      </Show>
+        </Show>
+        <Show when={hasGlobalShifts()}>
+          <span class="flex items-center gap-1">
+            <span class="inline-block w-3 h-0 border-t-2 border-dashed" style="border-color: #b45309;"></span>
+            Global shift
+          </span>
+          <Show when={isIndexMode()}>
+            <span>Index mode (100 = epoch anchor)</span>
+          </Show>
+        </Show>
+        <span>Filter: {reasonFilterLabel()}</span>
+        <span class="flex items-center gap-1">
+          <span class="inline-block w-2 h-2 rounded-full border border-black bg-white"></span>
+          Compared points
+        </span>
+        <span class="flex items-center gap-1">
+          <span class="inline-block w-2 h-2 rounded-full border" style={`border-color: ${PRE_EPOCH_COLOR}; background: #f3f4f6;`}></span>
+          Pre-epoch context
+        </span>
+      </div>
     </div>
   );
 };

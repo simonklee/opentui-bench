@@ -256,6 +256,15 @@ func ComputeBaseline(history []RunStat, minPoints int, baselineOffset int) (*Bas
 // Uses median-based comparison with a one-sided t-test and a variance-tuned effect size gate.
 // Medians are robust to outliers from GC pauses and OS scheduling.
 func DetectRegression(latest RunStat, baseline *BaselineStats, alpha float64) RegressionResult {
+	return DetectRegressionWithDFMode(latest, baseline, alpha, "baseline")
+}
+
+// DetectRegressionWithDFMode tests if the latest run is statistically slower than the baseline
+// with configurable degrees-of-freedom policy.
+// dfMode options:
+// - "baseline": prefer baseline history size (default)
+// - "latest": prefer latest run sample size (conservative for low n)
+func DetectRegressionWithDFMode(latest RunStat, baseline *BaselineStats, alpha float64, dfMode string) RegressionResult {
 	// Check if latest has valid data
 	if latest.SampleCount < 2 || latest.StdDev <= 0 {
 		return RegressionResult{
@@ -297,7 +306,7 @@ func DetectRegression(latest RunStat, baseline *BaselineStats, alpha float64) Re
 	// We anchor to baseline history size when available because latest runs often
 	// have very small sample counts (for example n=3), making latest-only df
 	// unrealistically strict for run-over-run detection.
-	df := regressionDegreesOfFreedom(int(latest.SampleCount), baseline.PointCount)
+	df := regressionDegreesOfFreedomWithMode(int(latest.SampleCount), baseline.PointCount, dfMode)
 
 	// One-sided t-critical value
 	tCrit := TCriticalOneSided(df, alpha)
@@ -337,12 +346,18 @@ func DetectRegression(latest RunStat, baseline *BaselineStats, alpha float64) Re
 // History should be in chronological order (oldest first).
 // Returns nil if no introducing run is found.
 func FindIntroducingRun(history []RunStat, baseline *BaselineStats, alpha float64) *int64 {
+	return FindIntroducingRunWithDFMode(history, baseline, alpha, "baseline")
+}
+
+// FindIntroducingRunWithDFMode walks through history and finds first introducing run
+// using the configured degrees-of-freedom policy.
+func FindIntroducingRunWithDFMode(history []RunStat, baseline *BaselineStats, alpha float64, dfMode string) *int64 {
 	if baseline == nil || len(history) == 0 {
 		return nil
 	}
 
 	for _, run := range history {
-		result := DetectRegression(run, baseline, alpha)
+		result := DetectRegressionWithDFMode(run, baseline, alpha, dfMode)
 		if result.Status == "regressed" {
 			id := run.RunID
 			return &id
@@ -393,6 +408,20 @@ func variance(values []float64, mean float64) float64 {
 // significance testing. Baseline history count is preferred when available,
 // with latest-run sample count as fallback.
 func regressionDegreesOfFreedom(latestCount int, baselineCount int) int {
+	return regressionDegreesOfFreedomWithMode(latestCount, baselineCount, "baseline")
+}
+
+func regressionDegreesOfFreedomWithMode(latestCount int, baselineCount int, mode string) int {
+	if mode == "latest" {
+		if latestCount > 1 {
+			return latestCount - 1
+		}
+		if baselineCount > 1 {
+			return baselineCount - 1
+		}
+		return 1
+	}
+
 	if baselineCount > 1 {
 		return baselineCount - 1
 	}

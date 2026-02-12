@@ -356,6 +356,7 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		CiUpperNs        int64    `json:"ci_upper_ns"`
 		SemNs            int64    `json:"sem_ns"`
 		RegressionStatus string   `json:"regression_status"`
+		RegressionReason *string  `json:"regression_reason,omitempty"`
 		BaselineRunID    *int64   `json:"baseline_run_id,omitempty"`
 		ChangePercent    *float64 `json:"change_percent,omitempty"`
 	}
@@ -366,9 +367,18 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		PValue      float64 `json:"p_value"`
 	}
 
+	type globalShift struct {
+		RunID              int64   `json:"run_id"`
+		PositiveShare      float64 `json:"positive_share"`
+		GeoIncreasePct     float64 `json:"geo_increase_pct"`
+		ComparedBenchmarks int     `json:"compared_benchmarks"`
+	}
+
 	type trendResponse struct {
 		Points            []trendPoint  `json:"points"`
 		ChangePoints      []changePoint `json:"change_points,omitempty"`
+		GlobalShifts      []globalShift `json:"global_shifts,omitempty"`
+		EpochRunID        *int64        `json:"epoch_run_id,omitempty"`
 		BaselineRunID     *int64        `json:"baseline_run_id,omitempty"`
 		BaselineCILowerNs *int64        `json:"baseline_ci_lower_ns,omitempty"`
 		BaselineCIUpperNs *int64        `json:"baseline_ci_upper_ns,omitempty"`
@@ -391,10 +401,97 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Compute baseline from all history except the latest run
+	// Compute baseline from all history except the latest run.
+	// If global shifts are detected, use the latest shift run as an epoch boundary.
 	var baseline *stats.BaselineStats
+	latestGlobalShiftRunID := int64(0)
+
+	// Detect global harness-level shifts between adjacent runs in this trend window.
+	resultsCache := make(map[int64][]db.Result)
+	getResults := func(runID int64) ([]db.Result, error) {
+		if cached, ok := resultsCache[runID]; ok {
+			return cached, nil
+		}
+		fetched, err := s.db.GetResultsForRun(runID)
+		if err != nil {
+			return nil, err
+		}
+		resultsCache[runID] = fetched
+		return fetched, nil
+	}
+
+	var globalShifts []globalShift
+	for i := 0; i+1 < len(trends); i++ {
+		newerRunID := trends[i].Run.ID
+		olderRunID := trends[i+1].Run.ID
+
+		newerResults, err := getResults(newerRunID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		olderResults, err := getResults(olderRunID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		type resultKey struct {
+			Category string
+			Name     string
+		}
+		olderMap := make(map[resultKey]int64, len(olderResults))
+		for _, r := range olderResults {
+			olderMap[resultKey{Category: r.Category, Name: r.Name}] = r.P50Ns
+		}
+
+		positiveCount := 0
+		compared := 0
+		logSum := 0.0
+		for _, newer := range newerResults {
+			older, ok := olderMap[resultKey{Category: newer.Category, Name: newer.Name}]
+			if !ok || older <= 0 || newer.P50Ns <= 0 {
+				continue
+			}
+			compared++
+			if newer.P50Ns > older {
+				positiveCount++
+			}
+			logSum += math.Log(float64(newer.P50Ns) / float64(older))
+		}
+
+		if compared < globalShiftMinBenchmarks {
+			continue
+		}
+
+		positiveShare := float64(positiveCount) / float64(compared)
+		geoIncreasePct := (math.Exp(logSum/float64(compared)) - 1.0) * 100.0
+		if positiveShare >= globalShiftMinPositiveShare && geoIncreasePct >= globalShiftMinGeoIncreasePct {
+			globalShifts = append(globalShifts, globalShift{
+				RunID:              newerRunID,
+				PositiveShare:      positiveShare,
+				GeoIncreasePct:     geoIncreasePct,
+				ComparedBenchmarks: compared,
+			})
+		}
+	}
+	for _, shift := range globalShifts {
+		if shift.RunID > latestGlobalShiftRunID {
+			latestGlobalShiftRunID = shift.RunID
+		}
+	}
 	if len(history) > 1 {
-		baseline, _ = stats.ComputeBaseline(history[1:], defaultMinPoints, defaultBaselineOffset)
+		baselineHistory := history[1:]
+		if latestGlobalShiftRunID != 0 {
+			filtered := make([]stats.RunStat, 0, len(baselineHistory))
+			for _, h := range baselineHistory {
+				if h.RunID >= latestGlobalShiftRunID {
+					filtered = append(filtered, h)
+				}
+			}
+			baselineHistory = filtered
+		}
+		baseline, _ = stats.ComputeBaseline(baselineHistory, defaultMinPoints, defaultBaselineOffset)
 	}
 
 	var points []trendPoint
@@ -419,11 +516,19 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 			SemNs:         sem,
 		}
 
-		// Determine regression status
-		if baseline == nil {
+		// Determine regression status.
+		if latestGlobalShiftRunID != 0 && point.RunID < latestGlobalShiftRunID {
+			point.RegressionStatus = "ok"
+			reason := "pre_epoch_not_compared"
+			point.RegressionReason = &reason
+		} else if baseline == nil {
 			point.RegressionStatus = "insufficient"
+			reason := "insufficient_baseline_history"
+			point.RegressionReason = &reason
 		} else if i < len(history) && history[i].RunID == baseline.RunID {
 			point.RegressionStatus = "baseline"
+			reason := "baseline_reference"
+			point.RegressionReason = &reason
 			point.BaselineRunID = &baseline.RunID
 			point.ChangePercent = nil
 		} else if i < len(history) {
@@ -461,6 +566,11 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 	response := trendResponse{
 		Points:       points,
 		ChangePoints: changePoints,
+		GlobalShifts: globalShifts,
+	}
+	if latestGlobalShiftRunID != 0 {
+		id := latestGlobalShiftRunID
+		response.EpochRunID = &id
 	}
 
 	if baseline != nil {
@@ -1209,17 +1319,25 @@ func (s *Server) ensureResultBelongsToRun(runID int64, resultID int64) error {
 
 // Default parameters for regression detection
 const (
-	defaultWindow           = 30
-	defaultMinPoints        = 5
-	defaultBaselineOffset   = 3
-	defaultAlpha            = 0.01
-	defaultFDR              = defaultAlpha
-	changePointMinSegment   = 5
-	changePointAlpha        = 0.05
-	changePointPerms        = 199
-	regressionMethodLegacy  = "legacy"
-	regressionMethodHybrid  = "hybrid"
-	defaultRegressionMethod = regressionMethodHybrid
+	defaultWindow                = 30
+	defaultMinPoints             = 5
+	defaultBaselineOffset        = 3
+	defaultAlpha                 = 0.01
+	defaultFDR                   = defaultAlpha
+	defaultMinAbsoluteNs         = 1000.0
+	globalShiftMinBenchmarks     = 50
+	globalShiftMinPositiveShare  = 0.75
+	globalShiftMinGeoIncreasePct = 10.0
+	changePointMinSegment        = 5
+	changePointAlpha             = 0.05
+	changePointPerms             = 199
+	changePointMaxAgeRuns        = 2
+	regressionMethodLegacy       = "legacy"
+	regressionMethodHybrid       = "hybrid"
+	regressionDFModeBaseline     = "baseline"
+	regressionDFModeLatest       = "latest"
+	defaultRegressionDFMode      = regressionDFModeBaseline
+	defaultRegressionMethod      = regressionMethodHybrid
 )
 
 func (s *Server) handleDatabaseDownload(w http.ResponseWriter, r *http.Request) {
@@ -1263,6 +1381,17 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	dfMode := defaultRegressionDFMode
+	if raw := r.URL.Query().Get("df_mode"); raw != "" {
+		switch raw {
+		case regressionDFModeBaseline, regressionDFModeLatest:
+			dfMode = raw
+		default:
+			http.Error(w, "invalid df_mode, expected 'baseline' or 'latest'", http.StatusBadRequest)
+			return
+		}
+	}
+
 	// Parse optional branch parameter (defaults to "main").
 	// When no run_id is given, this selects the latest run on that branch.
 	branch := r.URL.Query().Get("branch")
@@ -1286,13 +1415,21 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 				// No runs yet for this branch, return empty response
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"run_id":          nil,
-					"branch":          branch,
-					"window":          defaultWindow,
-					"min_points":      defaultMinPoints,
-					"baseline_offset": defaultBaselineOffset,
-					"method":          method,
-					"regressions":     []interface{}{},
+					"run_id":               nil,
+					"branch":               branch,
+					"window":               defaultWindow,
+					"compared_runs":        0,
+					"min_points":           defaultMinPoints,
+					"effective_min_points": defaultMinPoints,
+					"baseline_offset":      defaultBaselineOffset,
+					"method":               method,
+					"df_mode":              dfMode,
+					"insufficient_history": true,
+					"insufficient_reason":  "no_runs_for_branch",
+					"total_benchmarks":     0,
+					"analyzed_benchmarks":  0,
+					"exclusion_counts":     map[string]int{"no_runs_for_branch": 1},
+					"regressions":          []interface{}{},
 				})
 
 				return
@@ -1387,9 +1524,11 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	// Collect run IDs
 	runIDs := make([]int64, len(runs))
 	runByID := make(map[int64]db.Run)
+	runAgeByID := make(map[int64]int)
 	for i, run := range runs {
 		runIDs[i] = run.ID
 		runByID[run.ID] = run
+		runAgeByID[run.ID] = i
 	}
 
 	// Get all benchmark names across these runs
@@ -1401,6 +1540,102 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 
 	// Find the latest run (first in the list since it's sorted DESC)
 	latestRunID := runs[0].ID
+	globalShiftDetected := false
+	globalShiftPositiveShare := 0.0
+	globalShiftGeoIncreasePct := 0.0
+	globalShiftComparedBenchmarks := 0
+	latestShiftRunID := int64(0)
+	resultsCache := make(map[int64][]db.Result)
+	getResults := func(runID int64) ([]db.Result, error) {
+		if cached, ok := resultsCache[runID]; ok {
+			return cached, nil
+		}
+		fetched, err := s.db.GetResultsForRun(runID)
+		if err != nil {
+			return nil, err
+		}
+		resultsCache[runID] = fetched
+		return fetched, nil
+	}
+	type shiftMetrics struct {
+		detected      bool
+		positiveShare float64
+		geoPct        float64
+		compared      int
+	}
+	computeShift := func(newerRunID int64, olderRunID int64) (shiftMetrics, error) {
+		newerResults, err := getResults(newerRunID)
+		if err != nil {
+			return shiftMetrics{}, err
+		}
+		olderResults, err := getResults(olderRunID)
+		if err != nil {
+			return shiftMetrics{}, err
+		}
+
+		type resultKey struct {
+			Category string
+			Name     string
+		}
+		olderMap := make(map[resultKey]int64, len(olderResults))
+		for _, r := range olderResults {
+			olderMap[resultKey{Category: r.Category, Name: r.Name}] = r.P50Ns
+		}
+
+		positiveCount := 0
+		compared := 0
+		logSum := 0.0
+		for _, newer := range newerResults {
+			older, ok := olderMap[resultKey{Category: newer.Category, Name: newer.Name}]
+			if !ok || older <= 0 || newer.P50Ns <= 0 {
+				continue
+			}
+			compared++
+			if newer.P50Ns > older {
+				positiveCount++
+			}
+			logSum += math.Log(float64(newer.P50Ns) / float64(older))
+		}
+
+		if compared == 0 {
+			return shiftMetrics{}, nil
+		}
+
+		positiveShare := float64(positiveCount) / float64(compared)
+		geoPct := (math.Exp(logSum/float64(compared)) - 1.0) * 100.0
+		detected := compared >= globalShiftMinBenchmarks &&
+			positiveShare >= globalShiftMinPositiveShare &&
+			geoPct >= globalShiftMinGeoIncreasePct
+
+		return shiftMetrics{
+			detected:      detected,
+			positiveShare: positiveShare,
+			geoPct:        geoPct,
+			compared:      compared,
+		}, nil
+	}
+	if len(runs) >= 2 {
+		metrics, err := computeShift(runs[0].ID, runs[1].ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		globalShiftDetected = metrics.detected
+		globalShiftPositiveShare = metrics.positiveShare
+		globalShiftGeoIncreasePct = metrics.geoPct
+		globalShiftComparedBenchmarks = metrics.compared
+	}
+	for i := 0; i+1 < len(runs); i++ {
+		metrics, err := computeShift(runs[i].ID, runs[i+1].ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if metrics.detected {
+			latestShiftRunID = runs[i].ID
+			break
+		}
+	}
 
 	type regression struct {
 		Name                     string   `json:"name"`
@@ -1428,19 +1663,33 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type regressionsResponse struct {
-		RunID               *int64       `json:"run_id"`
-		Branch              string       `json:"branch"`
-		Window              int          `json:"window"`
-		MinPoints           int          `json:"min_points"`
-		BaselineOffset      int          `json:"baseline_offset"`
-		Method              string       `json:"method"`
-		InsufficientHistory bool         `json:"insufficient_history"`
-		Regressions         []regression `json:"regressions"`
+		RunID                         *int64         `json:"run_id"`
+		Branch                        string         `json:"branch"`
+		Window                        int            `json:"window"`
+		ComparedRuns                  int            `json:"compared_runs"`
+		MinPoints                     int            `json:"min_points"`
+		EffectiveMinPoints            int            `json:"effective_min_points"`
+		BaselineOffset                int            `json:"baseline_offset"`
+		Method                        string         `json:"method"`
+		DFMode                        string         `json:"df_mode"`
+		EpochRunID                    *int64         `json:"epoch_run_id,omitempty"`
+		TotalBenchmarks               int            `json:"total_benchmarks"`
+		AnalyzedBenchmarks            int            `json:"analyzed_benchmarks"`
+		InsufficientHistory           bool           `json:"insufficient_history"`
+		InsufficientReason            string         `json:"insufficient_reason,omitempty"`
+		ExclusionCounts               map[string]int `json:"exclusion_counts,omitempty"`
+		GlobalShiftDetected           bool           `json:"global_shift_detected"`
+		GlobalShiftPositiveShare      float64        `json:"global_shift_positive_share"`
+		GlobalShiftGeoIncreasePct     float64        `json:"global_shift_geo_increase_pct"`
+		GlobalShiftComparedBenchmarks int            `json:"global_shift_compared_benchmarks"`
+		Regressions                   []regression   `json:"regressions"`
 	}
 
 	type cpCandidate struct {
 		point       stats.ChangePoint
 		effectPct   float64
+		magnitudeNs float64
+		isRecent    bool
 		practicalOK bool
 	}
 
@@ -1464,6 +1713,18 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	var regressions []regression
 	var benchResults []benchResult
 	analyzableBenchmarks := 0
+	exclusionCounts := map[string]int{}
+	incrementExclusion := func(reason string) {
+		exclusionCounts[reason]++
+	}
+	effectiveMinPoints := minPoints
+	if latestShiftRunID != 0 {
+		if shiftAge, ok := runAgeByID[latestShiftRunID]; ok && shiftAge <= baselineOffset+minPoints {
+			if effectiveMinPoints > 3 {
+				effectiveMinPoints = 3
+			}
+		}
+	}
 
 	// Analyze each benchmark
 	for _, benchName := range benchmarkNames {
@@ -1477,6 +1738,11 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		// Check if latest run has this benchmark
 		latestResult, hasLatest := resultsMap[latestRunID]
 		if !hasLatest {
+			incrementExclusion("missing_latest")
+			continue
+		}
+		if latestResult.SampleCount < 2 || latestResult.StdDevNs <= 0 {
+			incrementExclusion("invalid_latest_stats")
 			continue
 		}
 
@@ -1500,6 +1766,9 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			if run.ID == latestRunID {
 				continue
 			}
+			if latestShiftRunID != 0 && runAgeByID[run.ID] > runAgeByID[latestShiftRunID] {
+				continue
+			}
 			result, ok := resultsMap[run.ID]
 			if !ok {
 				continue
@@ -1518,10 +1787,25 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			series = append(series, toRunStat(run.ID, result))
 		}
 
+		if len(history) < baselineOffset+effectiveMinPoints {
+			incrementExclusion("history_too_short")
+			continue
+		}
+		validHistory := 0
+		for _, h := range history {
+			if h.SampleCount >= 2 && h.StdDev > 0 && h.Sem > 0 {
+				validHistory++
+			}
+		}
+		if validHistory < effectiveMinPoints {
+			incrementExclusion("invalid_history_stats")
+			continue
+		}
+
 		// Compute baseline
-		baseline, err := stats.ComputeBaseline(history, minPoints, baselineOffset)
+		baseline, err := stats.ComputeBaseline(history, effectiveMinPoints, baselineOffset)
 		if err != nil {
-			// Insufficient data for this benchmark
+			incrementExclusion("baseline_compute_error")
 			continue
 		}
 		analyzableBenchmarks++
@@ -1529,7 +1813,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		latestStat := toRunStat(latestRunID, latestResult)
 
 		// Detect regression
-		result := stats.DetectRegression(latestStat, baseline, defaultAlpha)
+		result := stats.DetectRegressionWithDFMode(latestStat, baseline, defaultAlpha, dfMode)
 
 		changePct := 0.0
 		if baseline.Median > 0 {
@@ -1547,7 +1831,9 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 				cp = &cpCandidate{
 					point:       point,
 					effectPct:   point.EffectPercent,
-					practicalOK: point.EffectPercent >= result.MinEffectPercent,
+					magnitudeNs: point.Magnitude,
+					isRecent:    runAgeByID[point.RunID] <= changePointMaxAgeRuns,
+					practicalOK: point.EffectPercent >= result.MinEffectPercent && point.Magnitude >= defaultMinAbsoluteNs,
 				}
 				break
 			}
@@ -1560,7 +1846,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			history:    history,
 			resultsMap: resultsMap,
 			changePct:  changePct,
-			testOK:     changePct >= result.MinEffectPercent,
+			testOK:     changePct >= result.MinEffectPercent && (latestStat.Median-baseline.Median) >= defaultMinAbsoluteNs,
 			cp:         cp,
 		})
 	}
@@ -1576,15 +1862,11 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 
-			if method == regressionMethodHybrid {
-				cpPValue := 1.0
-				if bench.cp != nil {
-					cpPValue = bench.cp.point.PValue
-				}
+			if method == regressionMethodHybrid && bench.cp != nil && bench.cp.isRecent {
 				hypotheses = append(hypotheses, hypothesis{
 					benchIndex: i,
 					kind:       "change_point",
-					pValue:     cpPValue,
+					pValue:     bench.cp.point.PValue,
 				})
 			}
 		}
@@ -1620,7 +1902,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 				case "change_point":
 					detectionMethod = "change_point"
 					if bench.cp != nil {
-						practicalOK = bench.cp.practicalOK
+						practicalOK = bench.cp.practicalOK && bench.cp.isRecent
 						changePct = bench.cp.effectPct
 					}
 				}
@@ -1655,7 +1937,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 				for j, h := range bench.history {
 					chronoHistory[len(bench.history)-1-j] = h
 				}
-				introducingID = stats.FindIntroducingRun(chronoHistory, bench.baseline, defaultAlpha)
+				introducingID = stats.FindIntroducingRunWithDFMode(chronoHistory, bench.baseline, defaultAlpha, dfMode)
 			}
 
 			ciLower, ciUpper, _ := stats.CI95(bench.latest.P50Ns, bench.latest.StdDevNs, bench.latest.SampleCount)
@@ -1706,15 +1988,45 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		branch = runs[0].Branch
 	}
 
+	// Treat broad one-step shifts as re-baseline events rather than per-benchmark regressions.
+	if globalShiftDetected {
+		regressions = nil
+	}
+
 	response := regressionsResponse{
-		RunID:               &runID,
-		Branch:              branch,
-		Window:              window,
-		MinPoints:           minPoints,
-		BaselineOffset:      baselineOffset,
-		Method:              method,
-		InsufficientHistory: analyzableBenchmarks == 0,
-		Regressions:         regressions,
+		RunID:                         &runID,
+		Branch:                        branch,
+		Window:                        window,
+		ComparedRuns:                  len(runs),
+		MinPoints:                     minPoints,
+		EffectiveMinPoints:            effectiveMinPoints,
+		BaselineOffset:                baselineOffset,
+		Method:                        method,
+		DFMode:                        dfMode,
+		TotalBenchmarks:               len(benchmarkNames),
+		AnalyzedBenchmarks:            analyzableBenchmarks,
+		InsufficientHistory:           analyzableBenchmarks == 0,
+		ExclusionCounts:               exclusionCounts,
+		GlobalShiftDetected:           globalShiftDetected,
+		GlobalShiftPositiveShare:      globalShiftPositiveShare,
+		GlobalShiftGeoIncreasePct:     globalShiftGeoIncreasePct,
+		GlobalShiftComparedBenchmarks: globalShiftComparedBenchmarks,
+		Regressions:                   regressions,
+	}
+	if analyzableBenchmarks == 0 {
+		topReason := ""
+		topCount := -1
+		for reason, count := range exclusionCounts {
+			if count > topCount {
+				topReason = reason
+				topCount = count
+			}
+		}
+		response.InsufficientReason = topReason
+	}
+	if latestShiftRunID != 0 {
+		id := latestShiftRunID
+		response.EpochRunID = &id
 	}
 
 	w.Header().Set("Content-Type", "application/json")
