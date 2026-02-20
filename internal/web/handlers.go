@@ -1978,7 +1978,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 
 	// Treat broad one-step shifts as re-baseline events rather than per-benchmark regressions.
 	if globalShiftDetected {
-		regressions = nil
+		regressions = []regression{}
 	}
 
 	response := regressionsResponse{

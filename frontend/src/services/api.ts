@@ -122,6 +122,46 @@ export interface RegressionsResponse {
   regressions: Regression[];
 }
 
+export interface RegressionHistoryEntry {
+  run_id: number;
+  commit_hash: string;
+  commit_hash_full: string;
+  commit_message: string;
+  run_date: string;
+  branch: string;
+  cached: boolean;
+  cached_at?: string;
+  regression_count: number;
+  compared_runs: number;
+  min_points: number;
+  effective_min_points: number;
+  baseline_offset: number;
+  epoch_run_id?: number;
+  total_benchmarks: number;
+  analyzed_benchmarks: number;
+  insufficient_history: boolean;
+  insufficient_reason?: string;
+  global_shift_detected: boolean;
+  global_shift_positive_share: number;
+  global_shift_geo_increase_pct: number;
+  global_shift_compared_benchmarks: number;
+  regressions: Regression[];
+}
+
+export interface RegressionHistoryResponse {
+  branch: string;
+  window: number;
+  min_points: number;
+  baseline_offset: number;
+  df_mode: RegressionDFMode;
+  generation_key: string;
+  scanned_runs: number;
+  entry_count: number;
+  cached_runs: number;
+  computed_runs: number;
+  entries: RegressionHistoryEntry[];
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) {
@@ -182,6 +222,37 @@ export const api = {
     const query = params.toString();
     const url = query ? `/api/regressions?${query}` : "/api/regressions";
     return fetchJson<RegressionsResponse>(url);
+  },
+  getRegressionHistory: async (options?: {
+    window?: number;
+    minPoints?: number;
+    baselineOffset?: number;
+    dfMode?: RegressionDFMode;
+    branch?: string;
+    limit?: number;
+  }) => {
+    const params = new URLSearchParams();
+    if (options?.branch) {
+      params.set("branch", options.branch);
+    }
+    if (options?.window) {
+      params.set("window", String(options.window));
+    }
+    if (options?.minPoints) {
+      params.set("min_points", String(options.minPoints));
+    }
+    if (options?.baselineOffset !== undefined) {
+      params.set("baseline_offset", String(options.baselineOffset));
+    }
+    if (options?.dfMode) {
+      params.set("df_mode", options.dfMode);
+    }
+    if (options?.limit) {
+      params.set("limit", String(options.limit));
+    }
+    const query = params.toString();
+    const url = query ? `/api/regressions/history?${query}` : "/api/regressions/history";
+    return fetchJson<RegressionHistoryResponse>(url);
   },
   getBranches: async () => {
     return fetchJson<string[]>("/api/branches");

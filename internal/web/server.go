@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"opentui-bench/internal/cache"
 	"opentui-bench/internal/db"
@@ -28,6 +29,9 @@ type Server struct {
 	svgCache      *cache.SVGCache
 	flamegraphSem chan struct{}
 	pprofManager  *PProfManager
+
+	regressionCodeHashOnce sync.Once
+	regressionCodeHash     string
 }
 
 func NewServer(database *db.DB, addr string) (*Server, error) {
@@ -100,6 +104,7 @@ func (s *Server) Start(openBrowser bool) error {
 	mux.HandleFunc("/api/compare", s.handleCompare)
 	mux.HandleFunc("/api/trend", s.handleTrend)
 	mux.HandleFunc("/api/benchmarks", s.handleBenchmarks)
+	mux.HandleFunc("/api/regressions/history", s.handleRegressionsHistory)
 	mux.HandleFunc("/api/regressions", s.handleRegressions)
 	mux.HandleFunc("/api/branches", s.handleBranches)
 	mux.HandleFunc("/api/has-commit/", s.handleHasCommit)

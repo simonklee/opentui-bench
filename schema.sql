@@ -52,6 +52,25 @@ CREATE TABLE IF NOT EXISTS mem_stats (
 
 CREATE INDEX IF NOT EXISTS idx_mem_stats_result ON mem_stats(result_id);
 
+-- Cached regression snapshots for history rendering
+CREATE TABLE IF NOT EXISTS regression_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    branch TEXT NOT NULL,
+    window INTEGER NOT NULL,
+    min_points INTEGER NOT NULL,
+    baseline_offset INTEGER NOT NULL,
+    df_mode TEXT NOT NULL,
+    generation_key TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(run_id, branch, window, min_points, baseline_offset, df_mode)
+);
+
+CREATE INDEX IF NOT EXISTS idx_regression_cache_branch_run ON regression_cache(branch, run_id DESC);
+CREATE INDEX IF NOT EXISTS idx_regression_cache_generation ON regression_cache(generation_key);
+
 -- View for easy querying with run context
 CREATE VIEW IF NOT EXISTS results_with_run AS
 SELECT 

@@ -40,7 +40,9 @@ const BenchmarkFilterBar: Component<BenchmarkFilterBarProps> = (props) => {
               >
                 #{props.run.commit_hash.substring(0, 7)}
               </a>
-              <Show when={props.run.branch && props.run.branch !== "" && props.run.branch !== "main"}>
+              <Show
+                when={props.run.branch && props.run.branch !== "" && props.run.branch !== "main"}
+              >
                 <span class="text-[10px] font-mono font-medium normal-case hidden sm:inline-block bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-sm">
                   {props.run.branch}
                 </span>

@@ -29,7 +29,9 @@ function groupRunsByBranch(runs: Run[]): { branch: string; runs: Run[] }[] {
   const result: { branch: string; runs: Run[] }[] = [];
   const mainGroup = groups.get("main");
   if (mainGroup) result.push({ branch: "main", runs: mainGroup });
-  for (const [branch, branchRuns] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+  for (const [branch, branchRuns] of [...groups.entries()].sort((a, b) =>
+    a[0].localeCompare(b[0]),
+  )) {
     if (branch !== "main") result.push({ branch, runs: branchRuns });
   }
   return result;
@@ -247,20 +249,19 @@ const Compare: Component = () => {
                     onChange={handleBaseChange}
                   >
                     <option value="">Select Run</option>
-                    <Show when={hasMultipleBranches()} fallback={
-                      <For each={runs()}>
-                        {(r) => (
-                          <option value={String(r.id)}>{formatRunOption(r)}</option>
-                        )}
-                      </For>
-                    }>
+                    <Show
+                      when={hasMultipleBranches()}
+                      fallback={
+                        <For each={runs()}>
+                          {(r) => <option value={String(r.id)}>{formatRunOption(r)}</option>}
+                        </For>
+                      }
+                    >
                       <For each={grouped()}>
                         {(group) => (
                           <optgroup label={group.branch}>
                             <For each={group.runs}>
-                              {(r) => (
-                                <option value={String(r.id)}>{formatRunOption(r)}</option>
-                              )}
+                              {(r) => <option value={String(r.id)}>{formatRunOption(r)}</option>}
                             </For>
                           </optgroup>
                         )}
@@ -278,7 +279,9 @@ const Compare: Component = () => {
                           >
                             #{run().commit_hash.substring(0, 7)}
                           </a>
-                          <Show when={run().branch && run().branch !== "" && run().branch !== "main"}>
+                          <Show
+                            when={run().branch && run().branch !== "" && run().branch !== "main"}
+                          >
                             <span class="px-1 py-0.5 text-[9px] font-mono font-medium bg-purple-100 text-purple-700 rounded-sm">
                               {run().branch}
                             </span>
@@ -315,20 +318,19 @@ const Compare: Component = () => {
                   onChange={handleCurrChange}
                 >
                   <option value="">Select Run</option>
-                  <Show when={hasMultipleBranches()} fallback={
-                    <For each={runs()}>
-                      {(r) => (
-                        <option value={String(r.id)}>{formatRunOption(r)}</option>
-                      )}
-                    </For>
-                  }>
+                  <Show
+                    when={hasMultipleBranches()}
+                    fallback={
+                      <For each={runs()}>
+                        {(r) => <option value={String(r.id)}>{formatRunOption(r)}</option>}
+                      </For>
+                    }
+                  >
                     <For each={grouped()}>
                       {(group) => (
                         <optgroup label={group.branch}>
                           <For each={group.runs}>
-                            {(r) => (
-                              <option value={String(r.id)}>{formatRunOption(r)}</option>
-                            )}
+                            {(r) => <option value={String(r.id)}>{formatRunOption(r)}</option>}
                           </For>
                         </optgroup>
                       )}

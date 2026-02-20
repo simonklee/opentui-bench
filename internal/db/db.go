@@ -103,6 +103,23 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+
+CREATE TABLE IF NOT EXISTS regression_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    branch TEXT NOT NULL,
+    window INTEGER NOT NULL,
+    min_points INTEGER NOT NULL,
+    baseline_offset INTEGER NOT NULL,
+    df_mode TEXT NOT NULL,
+    generation_key TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(run_id, branch, window, min_points, baseline_offset, df_mode)
+);
+CREATE INDEX IF NOT EXISTS idx_regression_cache_branch_run ON regression_cache(branch, run_id DESC);
+CREATE INDEX IF NOT EXISTS idx_regression_cache_generation ON regression_cache(generation_key);
 `
 
 type DB struct {
@@ -322,6 +339,23 @@ type Run struct {
 	MachineID      string
 	Notes          string
 	ZigOptimize    string
+}
+
+type RegressionCacheKey struct {
+	RunID          int64
+	Branch         string
+	Window         int
+	MinPoints      int
+	BaselineOffset int
+	DFMode         string
+}
+
+type RegressionCacheEntry struct {
+	Key           RegressionCacheKey
+	GenerationKey string
+	ResponseJSON  string
+	CreatedAt     string
+	UpdatedAt     string
 }
 
 type Result struct {
@@ -559,10 +593,62 @@ func (db *DB) GetLatestRunForBranch(branch string) (*Run, error) {
 	return &r, nil
 }
 
+// ListRunsForBranch returns runs for the requested branch ordered by newest first.
+// "main" includes legacy NULL/empty branch values.
+func (db *DB) ListRunsForBranch(branch string, limit int) ([]Run, error) {
+	query := `
+		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
+		FROM runs
+		WHERE `
+	args := []interface{}{}
+
+	if branch == "main" || branch == "" {
+		query += `(branch = 'main' OR branch IS NULL OR branch = '')`
+	} else {
+		query += `branch = ?`
+		args = append(args, branch)
+	}
+
+	query += ` ORDER BY run_date DESC`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	var runs []Run
+	for rows.Next() {
+		var r Run
+		var commitHashFull, commitMessage, commitDate, branchVal, machineID, notes, zigOptimize sql.NullString
+		if err := rows.Scan(&r.ID, &r.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branchVal, &r.RunDate, &machineID, &notes, &zigOptimize); err != nil {
+			return nil, err
+		}
+		r.CommitHashFull = commitHashFull.String
+		r.CommitMessage = commitMessage.String
+		r.CommitDate = commitDate.String
+		r.Branch = branchVal.String
+		r.MachineID = machineID.String
+		r.Notes = notes.String
+		r.ZigOptimize = zigOptimize.String
+		runs = append(runs, r)
+	}
+
+	return runs, rows.Err()
+}
+
 // GetBranchesWithRuns returns distinct branch names that have at least one run,
 // ordered with "main" first, then alphabetically. Legacy NULL/empty branches
 // are normalized to "main".
-func (db *DB) GetBranchesWithRuns() ([]string, error) {
+func (db *DB) GetBranchesWithRuns() (branches []string, err error) {
 	rows, err := db.Query(`
 		SELECT DISTINCT CASE
 			WHEN branch IS NULL OR branch = '' THEN 'main'
@@ -575,17 +661,24 @@ func (db *DB) GetBranchesWithRuns() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
-	var branches []string
 	for rows.Next() {
 		var b string
-		if err := rows.Scan(&b); err != nil {
+		if err = rows.Scan(&b); err != nil {
 			return nil, err
 		}
 		branches = append(branches, b)
 	}
-	return branches, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return branches, nil
 }
 
 func (db *DB) HasCommit(commitHashFull string) (bool, error) {
@@ -1301,6 +1394,67 @@ func (db *DB) CancelJob(jobID int64) error {
 // UpdateJobCommitHash sets the resolved commit hash on a job (used by worker when resolving branch HEAD).
 func (db *DB) UpdateJobCommitHash(jobID int64, commitHash string) error {
 	_, err := db.Exec(`UPDATE jobs SET commit_hash = ? WHERE id = ?`, commitHash, jobID)
+	return err
+}
+
+func (db *DB) GetRegressionCache(key RegressionCacheKey, generationKey string) (*RegressionCacheEntry, error) {
+	var entry RegressionCacheEntry
+	err := db.QueryRow(`
+		SELECT run_id, branch, window, min_points, baseline_offset, df_mode, generation_key, response_json, created_at, updated_at
+		FROM regression_cache
+		WHERE run_id = ? AND branch = ? AND window = ? AND min_points = ? AND baseline_offset = ? AND df_mode = ? AND generation_key = ?`,
+		key.RunID, key.Branch, key.Window, key.MinPoints, key.BaselineOffset, key.DFMode, generationKey,
+	).Scan(
+		&entry.Key.RunID,
+		&entry.Key.Branch,
+		&entry.Key.Window,
+		&entry.Key.MinPoints,
+		&entry.Key.BaselineOffset,
+		&entry.Key.DFMode,
+		&entry.GenerationKey,
+		&entry.ResponseJSON,
+		&entry.CreatedAt,
+		&entry.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &entry, nil
+}
+
+func (db *DB) UpsertRegressionCache(entry *RegressionCacheEntry) error {
+	now := timeNow()
+	if entry.CreatedAt == "" {
+		entry.CreatedAt = now
+	}
+	entry.UpdatedAt = now
+
+	_, err := db.Exec(`
+		INSERT INTO regression_cache (
+			run_id, branch, window, min_points, baseline_offset, df_mode,
+			generation_key, response_json, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(run_id, branch, window, min_points, baseline_offset, df_mode)
+		DO UPDATE SET
+			generation_key = excluded.generation_key,
+			response_json = excluded.response_json,
+			updated_at = excluded.updated_at`,
+		entry.Key.RunID,
+		entry.Key.Branch,
+		entry.Key.Window,
+		entry.Key.MinPoints,
+		entry.Key.BaselineOffset,
+		entry.Key.DFMode,
+		entry.GenerationKey,
+		entry.ResponseJSON,
+		entry.CreatedAt,
+		entry.UpdatedAt,
+	)
+
 	return err
 }
 

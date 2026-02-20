@@ -144,7 +144,12 @@ const globalShiftLinesPlugin = {
   afterDatasetsDraw(chart: any) {
     const options = chart.options?.plugins?.globalShiftLines;
     const points = options?.points as
-      | { run_id: number; positive_share: number; geo_increase_pct: number; compared_benchmarks: number }[]
+      | {
+          run_id: number;
+          positive_share: number;
+          geo_increase_pct: number;
+          compared_benchmarks: number;
+        }[]
       | undefined;
     const runIdToIndex = options?.runIdToIndex as Record<string, number> | undefined;
     const xScale = chart.scales?.x;
@@ -235,11 +240,7 @@ interface Props {
  * Returns: { labels, mainData, branchData, allPoints }
  * where mainData/branchData are arrays aligned to labels (null where absent).
  */
-function buildMergedTimeline(
-  mainPoints: TrendPoint[],
-  branchPoints: TrendPoint[],
-  limit: number,
-) {
+function buildMergedTimeline(mainPoints: TrendPoint[], branchPoints: TrendPoint[], limit: number) {
   // Both arrays come in newest-first from API; reverse to chronological
   const main = mainPoints.slice(0, limit).reverse();
   const branch = branchPoints.slice(0, limit).reverse();
@@ -600,10 +601,14 @@ const TrendChart: Component<Props> = (props) => {
     const data = showData();
     const anchorNs = getAnchorNs(data);
     const ciLower = data.map((d) =>
-      isIndexMode() ? toIndex(d.ci_lower_ns ?? d.median_ns, anchorNs) : (d.ci_lower_ns ?? d.median_ns),
+      isIndexMode()
+        ? toIndex(d.ci_lower_ns ?? d.median_ns, anchorNs)
+        : (d.ci_lower_ns ?? d.median_ns),
     );
     const ciUpper = data.map((d) =>
-      isIndexMode() ? toIndex(d.ci_upper_ns ?? d.median_ns, anchorNs) : (d.ci_upper_ns ?? d.median_ns),
+      isIndexMode()
+        ? toIndex(d.ci_upper_ns ?? d.median_ns, anchorNs)
+        : (d.ci_upper_ns ?? d.median_ns),
     );
     const sdLower = data.map((d) =>
       isIndexMode()
@@ -762,8 +767,12 @@ const TrendChart: Component<Props> = (props) => {
           }
         : { display: false },
       baselineBand: {
-        lower: isIndexMode() ? toIndex(props.baselineCILowerNs, currentAnchorNs()) : props.baselineCILowerNs,
-        upper: isIndexMode() ? toIndex(props.baselineCIUpperNs, currentAnchorNs()) : props.baselineCIUpperNs,
+        lower: isIndexMode()
+          ? toIndex(props.baselineCILowerNs, currentAnchorNs())
+          : props.baselineCILowerNs,
+        upper: isIndexMode()
+          ? toIndex(props.baselineCIUpperNs, currentAnchorNs())
+          : props.baselineCIUpperNs,
       },
       changePointLines: {
         points: props.changePoints || [],
@@ -832,7 +841,9 @@ const TrendChart: Component<Props> = (props) => {
             if (isIndexMode()) {
               const anchorNs = currentAnchorNs();
               if (anchorNs && anchorNs > 0) {
-                lines.unshift(`Index: ${((d.median_ns / anchorNs) * 100).toFixed(2)} (100 = anchor)`);
+                lines.unshift(
+                  `Index: ${((d.median_ns / anchorNs) * 100).toFixed(2)} (100 = anchor)`,
+                );
               }
             }
             if (d.regression_status === "regressed" && d.change_percent !== undefined) {
@@ -936,17 +947,26 @@ const TrendChart: Component<Props> = (props) => {
         </Show>
         <Show when={hasChangePoints()}>
           <span class="flex items-center gap-1">
-            <span class="inline-block w-3 h-0 border-t border-dashed" style="border-color: #cf222e;"></span>
+            <span
+              class="inline-block w-3 h-0 border-t border-dashed"
+              style="border-color: #cf222e;"
+            ></span>
             Regression shift
           </span>
           <span class="flex items-center gap-1">
-            <span class="inline-block w-3 h-0 border-t border-dashed" style="border-color: #0969da;"></span>
+            <span
+              class="inline-block w-3 h-0 border-t border-dashed"
+              style="border-color: #0969da;"
+            ></span>
             Improvement shift
           </span>
         </Show>
         <Show when={hasGlobalShifts()}>
           <span class="flex items-center gap-1">
-            <span class="inline-block w-3 h-0 border-t-2 border-dashed" style="border-color: #b45309;"></span>
+            <span
+              class="inline-block w-3 h-0 border-t-2 border-dashed"
+              style="border-color: #b45309;"
+            ></span>
             Global shift
           </span>
           <Show when={isIndexMode()}>
@@ -959,7 +979,10 @@ const TrendChart: Component<Props> = (props) => {
           Compared points
         </span>
         <span class="flex items-center gap-1">
-          <span class="inline-block w-2 h-2 rounded-full border" style={`border-color: ${PRE_EPOCH_COLOR}; background: #f3f4f6;`}></span>
+          <span
+            class="inline-block w-2 h-2 rounded-full border"
+            style={`border-color: ${PRE_EPOCH_COLOR}; background: #f3f4f6;`}
+          ></span>
           Pre-epoch context
         </span>
       </div>

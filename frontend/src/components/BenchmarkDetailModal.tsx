@@ -183,8 +183,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                         <div class="font-bold mb-1">Error Bars (95% CI)</div>
                         <p class="text-text-muted leading-relaxed">
                           Shows the 95% Confidence Interval around the median estimate. Narrower
-                          bars indicate higher precision
-                          (more stable results or more samples).
+                          bars indicate higher precision (more stable results or more samples).
                         </p>
                       </div>
 
@@ -215,8 +214,8 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                         <div class="font-bold mb-1">Value Modes</div>
                         <p class="text-text-muted leading-relaxed">
                           Use <span class="font-mono">ns</span> for absolute timings and
-                          <span class="font-mono"> index</span> for normalized history where 100
-                          is the epoch anchor.
+                          <span class="font-mono"> index</span> for normalized history where 100 is
+                          the epoch anchor.
                         </p>
                       </div>
 
@@ -235,8 +234,8 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                           pre-epoch context points.
                         </p>
                         <p class="text-text-muted leading-relaxed mt-1">
-                          The chart legend also shows point-color meaning for compared vs
-                          pre-epoch context.
+                          The chart legend also shows point-color meaning for compared vs pre-epoch
+                          context.
                         </p>
                       </div>
                     </div>
@@ -246,48 +245,73 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
               <div class="self-start md:self-auto">
                 <div class="flex items-center gap-2 md:gap-3 flex-wrap">
                   <div class="flex items-center gap-1">
-                    <Button active={props.chartRange === 30} onClick={() => props.setChartRange(30)}>
+                    <Button
+                      active={props.chartRange === 30}
+                      onClick={() => props.setChartRange(30)}
+                    >
                       30
                     </Button>
-                    <Button active={props.chartRange === 70} onClick={() => props.setChartRange(70)}>
+                    <Button
+                      active={props.chartRange === 70}
+                      onClick={() => props.setChartRange(70)}
+                    >
                       70
                     </Button>
-                    <Button active={props.chartRange === 100} onClick={() => props.setChartRange(100)}>
+                    <Button
+                      active={props.chartRange === 100}
+                      onClick={() => props.setChartRange(100)}
+                    >
                       MAX
                     </Button>
                   </div>
                   <label class="flex items-center gap-1">
-                    <span class="text-[9px] sm:text-[10px] uppercase tracking-wider text-text-muted font-bold">Value</span>
+                    <span class="text-[9px] sm:text-[10px] uppercase tracking-wider text-text-muted font-bold">
+                      Value
+                    </span>
                     <div class="relative">
                       <select
                         class="appearance-none pl-2 pr-6 py-1 border border-border rounded-none text-[11px] bg-white text-black outline-none cursor-pointer font-mono font-medium hover:border-black transition-colors"
                         value={chartValueMode()}
-                        onChange={(e) => setChartValueMode(e.currentTarget.value as "absolute" | "index")}
+                        onChange={(e) =>
+                          setChartValueMode(e.currentTarget.value as "absolute" | "index")
+                        }
                       >
                         <option value="absolute">ns</option>
                         <option value="index">index</option>
                       </select>
                       <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1.5 text-black">
-                        <svg class="h-2.5 w-2.5 fill-current" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+                        <svg
+                          class="h-2.5 w-2.5 fill-current"
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 20 20"
+                        >
                           <path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z" />
                         </svg>
                       </div>
                     </div>
                   </label>
                   <label class="flex items-center gap-1">
-                    <span class="text-[9px] sm:text-[10px] uppercase tracking-wider text-text-muted font-bold">Filter</span>
+                    <span class="text-[9px] sm:text-[10px] uppercase tracking-wider text-text-muted font-bold">
+                      Filter
+                    </span>
                     <div class="relative">
                       <select
                         class="appearance-none pl-2 pr-6 py-1 border border-border rounded-none text-[11px] bg-white text-black outline-none cursor-pointer font-mono font-medium hover:border-black transition-colors"
                         value={reasonFilter()}
-                        onChange={(e) => setReasonFilter(e.currentTarget.value as "all" | "compared" | "pre_epoch")}
+                        onChange={(e) =>
+                          setReasonFilter(e.currentTarget.value as "all" | "compared" | "pre_epoch")
+                        }
                       >
                         <option value="all">all points</option>
                         <option value="compared">compared</option>
                         <option value="pre_epoch">pre-epoch</option>
                       </select>
                       <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1.5 text-black">
-                        <svg class="h-2.5 w-2.5 fill-current" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+                        <svg
+                          class="h-2.5 w-2.5 fill-current"
+                          xmlns="http://www.w3.org/2000/svg"
+                          viewBox="0 0 20 20"
+                        >
                           <path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z" />
                         </svg>
                       </div>
@@ -334,7 +358,10 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
             </Show>
             <Show when={topTrendReasons().length > 0}>
               <div class="mt-1 text-[10px] text-text-muted font-mono uppercase tracking-wider">
-                Status reasons: {topTrendReasons().map(([k, v]) => `${reasonLabel(k)}=${v}`).join(", ")}
+                Status reasons:{" "}
+                {topTrendReasons()
+                  .map(([k, v]) => `${reasonLabel(k)}=${v}`)
+                  .join(", ")}
               </div>
             </Show>
           </div>
