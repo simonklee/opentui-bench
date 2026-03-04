@@ -156,7 +156,7 @@ func (r *RemoteRecorder) UploadArtifact(runID, resultID int64, artifact Collecte
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("upload artifact: status %d: %s", resp.StatusCode, string(respBody))
 	}
@@ -192,10 +192,15 @@ func (r *RemoteRecorder) HasCommit(commitHashFull string) (bool, error) {
 	return result.Exists, nil
 }
 
-// LatestCommit returns the most recently recorded commit hash (full).
+// LatestCommit returns the most recently recorded commit hash (full) for the
+// given branch. If branch is empty, returns the latest across all branches.
 // Returns empty string if no runs exist.
-func (r *RemoteRecorder) LatestCommit() (string, error) {
-	req, err := http.NewRequest(http.MethodGet, r.BaseURL+"/api/latest-commit", nil)
+func (r *RemoteRecorder) LatestCommit(branch string) (string, error) {
+	u := r.BaseURL + "/api/latest-commit"
+	if branch != "" {
+		u += "?branch=" + url.QueryEscape(branch)
+	}
+	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}

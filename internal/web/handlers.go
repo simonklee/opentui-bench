@@ -2525,7 +2525,7 @@ func (s *Server) handleUploadArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	artID, err := s.db.InsertArtifact(&db.Artifact{
+	err = s.db.InsertArtifactIfMissing(&db.Artifact{
 		ResultID:  resultID,
 		Kind:      kind,
 		DataBlob:  data,
@@ -2538,9 +2538,8 @@ func (s *Server) handleUploadArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
+	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"id":   artID,
 		"kind": kind,
 		"size": len(data),
 	})
@@ -2572,13 +2571,20 @@ func (s *Server) handleHasCommit(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLatestCommit handles GET /api/latest-commit
+// Accepts optional ?branch= query parameter to filter by branch.
 func (s *Server) handleLatestCommit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	run, err := s.db.GetLatestRun()
+	var run *db.Run
+	var err error
+	if branch := r.URL.Query().Get("branch"); branch != "" {
+		run, err = s.db.GetLatestRunForBranch(branch)
+	} else {
+		run, err = s.db.GetLatestRun()
+	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			w.Header().Set("Content-Type", "application/json")

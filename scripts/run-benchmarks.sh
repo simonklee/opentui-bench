@@ -212,7 +212,7 @@ run_benchmarks() {
 
 	# Ask the API for the latest recorded commit
 	local latest_recorded
-	latest_recorded=$(curl -s "$API_URL/api/latest-commit" | jq -r '.commit_hash_full // empty | select(. != "null")')
+	latest_recorded=$(curl -s "$API_URL/api/latest-commit?branch=main" | jq -r '.commit_hash_full // empty | select(. != "null")')
 
 	local commits
 	if [[ -n "$latest_recorded" ]] && git cat-file -e "$latest_recorded" 2>/dev/null; then
