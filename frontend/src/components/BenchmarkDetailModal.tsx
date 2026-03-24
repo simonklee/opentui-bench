@@ -7,6 +7,24 @@ import TrendChart from "./TrendChart";
 import FlamegraphViewer from "./FlamegraphViewer";
 import type { BenchmarkResult, TrendResponse } from "../services/api";
 import TrendIndicator from "./TrendIndicator";
+import type { RegressionNavigationContext } from "../hooks/useBenchmarkDetail";
+
+const GITHUB_REPO_URL = "https://github.com/anomalyco/opentui";
+
+const CommitHashLink: Component<{ hash: string; hashFull?: string; class?: string }> = (props) => {
+  const href = `${GITHUB_REPO_URL}/commit/${props.hashFull ?? props.hash}`;
+
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      class={`hover:text-black hover:underline ${props.class ?? ""}`}
+    >
+      #{props.hash.slice(0, 7)}
+    </a>
+  );
+};
 
 interface BenchmarkDetailModalProps {
   benchmark: BenchmarkResult;
@@ -20,6 +38,7 @@ interface BenchmarkDetailModalProps {
   hasCpuProfile: boolean;
   chartRange: number;
   setChartRange: (v: number) => void;
+  regressionContext?: RegressionNavigationContext;
   onClose: () => void;
   onDownloadCpu: () => void;
   onOpenPProf: () => void;
@@ -56,6 +75,74 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
     return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
   };
 
+  const isViewingLatestRegression = () => props.regressionContext?.latestRunId === props.runId;
+  const currentCommitHashFull = () => {
+    const context = props.regressionContext;
+    if (!context) return undefined;
+    if (context.latestRunId === props.runId) return context.latestCommitHashFull;
+    if (context.introducedRunId === props.runId) return context.introducedCommitHashFull;
+    return undefined;
+  };
+
+  const regressionSummary = () => {
+    const context = props.regressionContext;
+    if (!context) return undefined;
+
+    const changeLabel =
+      context.changePercent !== undefined ? ` (+${context.changePercent.toFixed(1)}%)` : "";
+
+    if (isViewingLatestRegression()) {
+      if (context.introducedCommitHash) {
+        return (
+          <>
+            <span>Latest regression sighting: </span>
+            <CommitHashLink
+              hash={context.latestCommitHash}
+              hashFull={context.latestCommitHashFull}
+              class="text-text-muted"
+            />
+            <span>{changeLabel}</span>
+            <span> · introduced at </span>
+            <CommitHashLink
+              hash={context.introducedCommitHash}
+              hashFull={context.introducedCommitHashFull}
+              class="text-text-muted"
+            />
+          </>
+        );
+      }
+      return (
+        <>
+          <span>Latest regression sighting: </span>
+          <CommitHashLink
+            hash={context.latestCommitHash}
+            hashFull={context.latestCommitHashFull}
+            class="text-text-muted"
+          />
+          <span>{changeLabel}</span>
+        </>
+      );
+    }
+
+    return (
+      <>
+        <span>Viewing </span>
+        <CommitHashLink
+          hash={props.commitHash}
+          hashFull={currentCommitHashFull()}
+          class="text-text-muted"
+        />
+        <span> in the context of regression </span>
+        <CommitHashLink
+          hash={context.latestCommitHash}
+          hashFull={context.latestCommitHashFull}
+          class="text-text-muted"
+        />
+        <span>{changeLabel}</span>
+      </>
+    );
+  };
+
   // Helper for stat blocks
   const StatBlock = (p: { label: string; value: any; sub?: any }) => (
     <div class="flex flex-col gap-0.5 md:gap-1">
@@ -75,27 +162,34 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
     <div class="absolute inset-0 bg-white z-50 flex flex-col font-ui">
       {/* Header */}
       <div class="flex-none px-4 md:px-8 py-3 md:py-4 border-b border-black flex justify-between items-center bg-white">
-        <nav class="flex items-center gap-2 md:gap-3 text-[13px] overflow-hidden">
-          <button
-            onClick={props.onClose}
-            class="text-text-muted hover:text-black uppercase tracking-wider font-bold cursor-pointer whitespace-nowrap text-[11px] md:text-[13px]"
-          >
-            Benchmarks
-          </button>
-          <span class="text-text-muted">/</span>
-          <span class="font-mono text-[11px] md:text-[13px] text-text-muted">
-            #{props.commitHash.slice(0, 7)}
-          </span>
-          <Show when={props.branch && props.branch !== "main" && props.branch !== ""}>
-            <span class="ml-1 px-1.5 py-0.5 text-[10px] font-mono font-medium bg-purple-100 text-purple-700 rounded-sm">
-              {props.branch}
+        <div class="min-w-0 flex-1">
+          <nav class="flex items-center gap-2 md:gap-3 text-[13px] overflow-hidden">
+            <button
+              onClick={props.onClose}
+              class="text-text-muted hover:text-black uppercase tracking-wider font-bold cursor-pointer whitespace-nowrap text-[11px] md:text-[13px]"
+            >
+              Benchmarks
+            </button>
+            <span class="text-text-muted">/</span>
+            <span class="font-mono text-[11px] md:text-[13px] text-text-muted">
+              <CommitHashLink hash={props.commitHash} hashFull={currentCommitHashFull()} />
             </span>
+            <Show when={props.branch && props.branch !== "main" && props.branch !== ""}>
+              <span class="ml-1 px-1.5 py-0.5 text-[10px] font-mono font-medium bg-purple-100 text-purple-700 rounded-sm">
+                {props.branch}
+              </span>
+            </Show>
+            <span class="text-text-muted">/</span>
+            <span class="font-mono font-bold text-black text-[13px] md:text-[15px] truncate">
+              {props.benchmark.name}
+            </span>
+          </nav>
+          <Show when={props.regressionContext}>
+            <div class="mt-1 text-[10px] md:text-[11px] font-mono text-text-muted truncate">
+              {regressionSummary()}
+            </div>
           </Show>
-          <span class="text-text-muted">/</span>
-          <span class="font-mono font-bold text-black text-[13px] md:text-[15px] truncate">
-            {props.benchmark.name}
-          </span>
-        </nav>
+        </div>
         <div class="flex-none ml-4">
           <Button
             onClick={props.onClose}
@@ -105,7 +199,6 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
           </Button>
         </div>
       </div>
-
       <div class="flex-1 overflow-auto p-4 md:p-8 bg-white">
         {/* Stats Grid */}
         <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-y-4 gap-x-2 md:gap-8 mb-4 md:mb-12 pb-4 md:pb-8 border-b border-border">

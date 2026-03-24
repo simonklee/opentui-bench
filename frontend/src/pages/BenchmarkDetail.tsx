@@ -29,7 +29,8 @@ const BenchmarkDetail: Component = () => {
     runBranch,
     hasCpuProfile,
     closeDetail,
-    navigate,
+    navigateToBenchmark,
+    regressionContext,
   } = useBenchmarkDetail();
 
   // UI State that belongs to the view layer
@@ -88,8 +89,7 @@ const BenchmarkDetail: Component = () => {
   });
 
   const handleTrendClick = (runId: number, resultId: number) => {
-    // Navigate to the clicked run and select the same benchmark
-    navigate(`/benchmarks/${runId}?bench_id=${resultId}`);
+    navigateToBenchmark(runId, resultId);
   };
 
   return (
@@ -128,6 +128,7 @@ const BenchmarkDetail: Component = () => {
           hasCpuProfile={hasCpuProfile()}
           chartRange={chartRange()}
           setChartRange={setChartRange}
+          regressionContext={regressionContext()}
           onClose={closeDetail}
           onDownloadCpu={downloadCpuProfile}
           onOpenPProf={openPProfUI}

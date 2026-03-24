@@ -84,15 +84,46 @@ const CommitLink: Component<{ hash?: string; hashFull?: string }> = (props) => {
   );
 };
 
-const RegressionRow: Component<{ regression: RegressionWithContext }> = (props) => {
+const RegressionRow: Component<{ regression: RegressionWithContext; dfMode: RegressionDFMode }> = (
+  props,
+) => {
   const navigate = useNavigate();
   const reg = () => props.regression;
 
   const handleClick = () => {
-    // Navigate to the run that introduced the regression
-    const targetRunId = reg().introduced_run_id ?? reg().run_id ?? reg().baseline_run_id;
-    const targetResultId = reg().introduced_result_id ?? reg().latest_result_id;
-    navigate(`/benchmarks/${targetRunId}?bench_id=${targetResultId}`);
+    const regression = reg();
+    const targetRunId = regression.run_id;
+    const targetResultId = regression.latest_result_id;
+
+    const params = new URLSearchParams();
+    params.set("bench_id", String(targetResultId));
+    params.set("from", "regressions");
+    params.set("regression_run_id", String(regression.run_id));
+    params.set("regression_result_id", String(regression.latest_result_id));
+    params.set("regression_commit_hash", regression.commit_hash);
+    params.set("regression_commit_hash_full", regression.commit_hash_full);
+    params.set("regression_run_date", regression.run_date);
+    params.set("regression_change_pct", String(regression.change_percent));
+    params.set("regression_branch", regression.branch || "main");
+    params.set("regression_df_mode", props.dfMode);
+
+    if (regression.introduced_run_id !== undefined) {
+      params.set("regression_intro_run_id", String(regression.introduced_run_id));
+    }
+    if (regression.introduced_result_id !== undefined) {
+      params.set("regression_intro_result_id", String(regression.introduced_result_id));
+    }
+    if (regression.introduced_commit_hash) {
+      params.set("regression_intro_commit_hash", regression.introduced_commit_hash);
+    }
+    if (regression.introduced_commit_hash_full) {
+      params.set("regression_intro_commit_hash_full", regression.introduced_commit_hash_full);
+    }
+    if (regression.introduced_run_date) {
+      params.set("regression_intro_run_date", regression.introduced_run_date);
+    }
+
+    navigate(`/benchmarks/${targetRunId}?${params.toString()}`);
   };
 
   return (
@@ -429,7 +460,7 @@ const Regressions: Component = () => {
             </thead>
             <tbody>
               <For each={filteredRegressions()}>
-                {(regression) => <RegressionRow regression={regression} />}
+                {(regression) => <RegressionRow regression={regression} dfMode={dfMode()} />}
               </For>
             </tbody>
           </table>

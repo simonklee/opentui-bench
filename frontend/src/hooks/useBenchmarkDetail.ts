@@ -1,7 +1,7 @@
 import { createResource, createSignal, createMemo, createEffect } from "solid-js";
 import { useParams, useSearchParams, useNavigate } from "@solidjs/router";
 import { api } from "../services/api";
-import type { BenchmarkResult, TrendResponse } from "../services/api";
+import type { BenchmarkResult, RegressionDFMode, TrendResponse } from "../services/api";
 import { globalCategory, globalFilter, setGlobalCategory, setGlobalFilter } from "../store";
 import { useFilteredBenchmarks } from "./useFilteredBenchmarks";
 import { useFilterParams } from "./useFilterParams";
@@ -9,6 +9,43 @@ import { useFilterParams } from "./useFilterParams";
 /** Returns true if the branch represents a non-main feature branch. */
 function isBranchRun(branch: string | undefined | null): boolean {
   return !!branch && branch !== "" && branch !== "main";
+}
+
+function firstSearchParam(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+  return value;
+}
+
+function parseSearchParamInt(value: string | string[] | undefined): number | undefined {
+  const raw = firstSearchParam(value);
+  if (!raw) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+function parseSearchParamFloat(value: string | string[] | undefined): number | undefined {
+  const raw = firstSearchParam(value);
+  if (!raw) return undefined;
+  const parsed = Number.parseFloat(raw);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+export interface RegressionNavigationContext {
+  latestRunId: number;
+  latestResultId: number;
+  latestCommitHash: string;
+  latestCommitHashFull?: string;
+  latestRunDate?: string;
+  introducedRunId?: number;
+  introducedResultId?: number;
+  introducedCommitHash?: string;
+  introducedCommitHashFull?: string;
+  introducedRunDate?: string;
+  changePercent?: number;
+  branch: string;
+  dfMode: RegressionDFMode;
 }
 
 export function useBenchmarkDetail() {
@@ -27,6 +64,24 @@ export function useBenchmarkDetail() {
   const [sortBy, setSortBy] = createSignal<keyof BenchmarkResult | "mem_stats">("avg_ns");
   const [sortDesc, setSortDesc] = createSignal(false);
   const [hasCpuProfile, setHasCpuProfile] = createSignal(false);
+
+  const buildSearchString = (overrides: Record<string, string | number | null | undefined>) => {
+    const next = new URLSearchParams();
+    for (const [key, value] of Object.entries(searchParams)) {
+      const raw = firstSearchParam(value);
+      if (raw !== undefined) {
+        next.set(key, raw);
+      }
+    }
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value === null || value === undefined) {
+        next.delete(key);
+      } else {
+        next.set(key, String(value));
+      }
+    }
+    return next.toString();
+  };
 
   // Sync URL params with state
   createEffect(() => {
@@ -102,9 +157,57 @@ export function useBenchmarkDetail() {
       navigate(`/compare?${params.toString()}`);
       return;
     }
+    if (searchParams.from === "regressions") {
+      const params = new URLSearchParams();
+      const branch = firstSearchParam(searchParams.regression_branch);
+      const dfMode = firstSearchParam(searchParams.regression_df_mode);
+      if (branch && branch !== "main") {
+        params.set("branch", branch);
+      }
+      if (dfMode && dfMode !== "baseline") {
+        params.set("df_mode", dfMode);
+      }
+      navigate(params.toString() ? `/?${params.toString()}` : "/");
+      return;
+    }
     setSelectedBenchmarkId(null);
     setSearchParams({ ...searchParams, bench_id: null });
   };
+
+  const navigateToBenchmark = (runId: number, resultId: number) => {
+    const query = buildSearchString({ bench_id: resultId });
+    navigate(`/benchmarks/${runId}${query ? `?${query}` : ""}`);
+  };
+
+  const regressionContext = createMemo<RegressionNavigationContext | undefined>(() => {
+    if (firstSearchParam(searchParams.from) !== "regressions") {
+      return undefined;
+    }
+
+    const latestRunId = parseSearchParamInt(searchParams.regression_run_id);
+    const latestResultId = parseSearchParamInt(searchParams.regression_result_id);
+    const latestCommitHash = firstSearchParam(searchParams.regression_commit_hash);
+    if (!latestRunId || !latestResultId || !latestCommitHash) {
+      return undefined;
+    }
+
+    const dfModeRaw = firstSearchParam(searchParams.regression_df_mode);
+    return {
+      latestRunId,
+      latestResultId,
+      latestCommitHash,
+      latestCommitHashFull: firstSearchParam(searchParams.regression_commit_hash_full),
+      latestRunDate: firstSearchParam(searchParams.regression_run_date),
+      introducedRunId: parseSearchParamInt(searchParams.regression_intro_run_id),
+      introducedResultId: parseSearchParamInt(searchParams.regression_intro_result_id),
+      introducedCommitHash: firstSearchParam(searchParams.regression_intro_commit_hash),
+      introducedCommitHashFull: firstSearchParam(searchParams.regression_intro_commit_hash_full),
+      introducedRunDate: firstSearchParam(searchParams.regression_intro_run_date),
+      changePercent: parseSearchParamFloat(searchParams.regression_change_pct),
+      branch: firstSearchParam(searchParams.regression_branch) || "main",
+      dfMode: dfModeRaw === "latest" ? "latest" : "baseline",
+    };
+  });
 
   const selectedBenchmark = createMemo(() => {
     return run()?.results.find((r) => r.id === selectedBenchmarkId());
@@ -192,6 +295,8 @@ export function useBenchmarkDetail() {
     runBranch,
     hasCpuProfile,
     closeDetail,
+    navigateToBenchmark,
+    regressionContext,
     navigate,
     searchParams,
   };
