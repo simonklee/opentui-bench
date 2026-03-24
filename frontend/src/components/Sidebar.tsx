@@ -8,11 +8,11 @@ import {
   LayoutDashboard,
   List,
   GitCompare,
+  GitBranch,
   PanelLeftClose,
   PanelLeftOpen,
   HelpCircle,
   Activity,
-  Github,
 } from "lucide-solid";
 
 const Sidebar: Component = () => {
@@ -21,7 +21,7 @@ const Sidebar: Component = () => {
   const [runs] = createResource(() => api.getRuns(1));
 
   const navItemClass =
-    "nav-item flex items-center p-3 text-[13px] font-medium transition-all duration-150 cursor-pointer text-text-muted hover:text-black group border-r-2 border-transparent hover:bg-bg-hover";
+    "nav-item flex w-full items-center border-0 bg-transparent p-3 text-left text-[13px] font-medium transition-all duration-150 cursor-pointer text-text-muted hover:text-black group border-r-2 border-transparent hover:bg-bg-hover";
   const activeClass = "!text-black !font-bold bg-bg-hover !border-black";
 
   // Transition class for the label text
@@ -50,13 +50,14 @@ const Sidebar: Component = () => {
       <div
         class={`h-[56px] flex items-center border-b border-border ${isSidebarExpanded() ? "justify-between px-5" : "justify-center"}`}
       >
-        <div
-          class={`font-mono font-bold text-black text-[14px] flex items-center cursor-pointer overflow-hidden whitespace-nowrap transition-all duration-300 ${isSidebarExpanded() ? "max-w-[200px] opacity-100" : "max-w-0 opacity-0"}`}
+        <button
+          type="button"
+          class={`border-0 bg-transparent p-0 text-left font-mono font-bold text-black text-[14px] flex items-center cursor-pointer overflow-hidden whitespace-nowrap transition-all duration-300 ${isSidebarExpanded() ? "max-w-[200px] opacity-100" : "max-w-0 opacity-0"}`}
           onClick={() => navigate("/")}
         >
           <Activity size={20} class="flex-shrink-0 mr-2" />
           <span class="tracking-widest text-[12px]">OpenTUI Bench</span>
-        </div>
+        </button>
 
         <button
           onClick={() => setIsSidebarExpanded(!isSidebarExpanded())}
@@ -68,7 +69,8 @@ const Sidebar: Component = () => {
       </div>
 
       <div class="py-4 flex flex-col gap-1 flex-1">
-        <div
+        <button
+          type="button"
           class={`${navItemClass} ${isSidebarExpanded() ? "" : "justify-center"} ${location.pathname === "/" ? activeClass + " active" : ""}`}
           onClick={() => navigate("/")}
           title={!isSidebarExpanded() ? "Regressions" : ""}
@@ -79,8 +81,9 @@ const Sidebar: Component = () => {
             class="opacity-70 group-[.active]:opacity-100 flex-shrink-0"
           />
           <span class={labelClass()}>REGRESSIONS</span>
-        </div>
-        <div
+        </button>
+        <button
+          type="button"
           class={`${navItemClass} ${isSidebarExpanded() ? "" : "justify-center"} ${location.pathname === "/runs" ? activeClass + " active" : ""}`}
           onClick={() => navigate("/runs")}
           title={!isSidebarExpanded() ? "Runs" : ""}
@@ -91,8 +94,9 @@ const Sidebar: Component = () => {
             class="opacity-70 group-[.active]:opacity-100 flex-shrink-0"
           />
           <span class={labelClass()}>RUNS</span>
-        </div>
-        <div
+        </button>
+        <button
+          type="button"
           class={`${navItemClass} ${isSidebarExpanded() ? "" : "justify-center"} ${location.pathname.startsWith("/benchmarks") ? activeClass + " active" : ""}`}
           onClick={handleBenchmarksClick}
           title={!isSidebarExpanded() ? "Benchmarks" : ""}
@@ -103,8 +107,9 @@ const Sidebar: Component = () => {
             class="opacity-70 group-[.active]:opacity-100 flex-shrink-0"
           />
           <span class={labelClass()}>BENCHMARKS</span>
-        </div>
-        <div
+        </button>
+        <button
+          type="button"
           class={`${navItemClass} ${isSidebarExpanded() ? "" : "justify-center"} ${location.pathname === "/compare" ? activeClass + " active" : ""}`}
           onClick={handleCompareClick}
           title={!isSidebarExpanded() ? "Compare" : ""}
@@ -115,7 +120,7 @@ const Sidebar: Component = () => {
             class="opacity-70 group-[.active]:opacity-100 flex-shrink-0"
           />
           <span class={labelClass()}>COMPARE</span>
-        </div>
+        </button>
       </div>
 
       <div
@@ -131,11 +136,12 @@ const Sidebar: Component = () => {
             class="hover:text-black transition-colors flex items-center gap-1"
             title="opentui-bench on GitHub"
           >
-            <Github size={12} />
+            <GitBranch size={12} />
             <span>Source</span>
           </a>
-          <span
-            class="cursor-pointer hover:text-black hover:underline"
+          <button
+            type="button"
+            class="cursor-pointer border-0 bg-transparent p-0 hover:text-black hover:underline"
             onClick={() => {
               if (confirm("Download the full SQLite database (~350 MB)?")) {
                 const form = document.createElement("form");
@@ -149,10 +155,14 @@ const Sidebar: Component = () => {
             title="Download SQLite database"
           >
             Export
-          </span>
-          <span class="cursor-pointer hover:text-black hover:underline" onClick={toggleHelp}>
+          </button>
+          <button
+            type="button"
+            class="cursor-pointer border-0 bg-transparent p-0 hover:text-black hover:underline"
+            onClick={toggleHelp}
+          >
             Shortcuts
-          </span>
+          </button>
         </div>
         <div
           class={`transition-all duration-300 ${isSidebarExpanded() ? "opacity-0 w-0 overflow-hidden" : "opacity-100 w-auto"}`}

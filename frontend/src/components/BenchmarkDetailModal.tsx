@@ -172,7 +172,12 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                   ?
                 </button>
                 <Show when={showTrendHelp()}>
-                  <div class="fixed inset-0 z-[60]" onClick={() => setShowTrendHelp(false)}></div>
+                  <button
+                    type="button"
+                    aria-label="Close visualization guide"
+                    class="fixed inset-0 z-[60] border-0 bg-transparent p-0"
+                    onClick={() => setShowTrendHelp(false)}
+                  ></button>
                   <div class="absolute left-0 top-full mt-2 w-[320px] bg-white border border-black shadow-2xl z-[70] p-4 text-[12px] text-black">
                     <div class="font-bold uppercase tracking-widest mb-3 border-b border-border pb-2">
                       Visualization Guide
@@ -380,7 +385,12 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                   ?
                 </button>
                 <Show when={showProfileHelp()}>
-                  <div class="fixed inset-0 z-[60]" onClick={() => setShowProfileHelp(false)}></div>
+                  <button
+                    type="button"
+                    aria-label="Close CPU profile help"
+                    class="fixed inset-0 z-[60] border-0 bg-transparent p-0"
+                    onClick={() => setShowProfileHelp(false)}
+                  ></button>
                   <div class="absolute left-0 top-full mt-2 w-[320px] bg-white border border-black shadow-2xl z-[70] p-4 text-[12px] text-black">
                     <div class="font-bold uppercase tracking-widest mb-3 border-b border-border pb-2">
                       CPU Profile
