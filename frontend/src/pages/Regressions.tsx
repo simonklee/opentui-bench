@@ -19,6 +19,31 @@ type RegressionWithContext = Regression & {
 };
 
 const GITHUB_REPO_URL = "https://github.com/anomalyco/opentui";
+const defaultRegressionHistoryLimit = 100;
+
+const regressionEpisodeKey = (regression: RegressionWithContext): string =>
+  [
+    regression.category,
+    regression.name,
+    regression.introduced_run_id ?? "none",
+    regression.detection_method,
+  ].join("::");
+
+const uniqueRegressionEpisodes = (
+  regressions: RegressionWithContext[],
+): RegressionWithContext[] => {
+  const episodes = new Map<string, RegressionWithContext>();
+  for (const regression of regressions) {
+    const key = regressionEpisodeKey(regression);
+    if (!episodes.has(key)) {
+      episodes.set(key, regression);
+    }
+  }
+
+  return Array.from(episodes.values()).sort(
+    (a, b) => b.run_id - a.run_id || b.change_percent - a.change_percent,
+  );
+};
 
 const formatRelativeDate = (dateStr: string): string => {
   const date = new Date(dateStr);
@@ -166,12 +191,12 @@ const Regressions: Component = () => {
     searchParams.df_mode === "latest" ? "latest" : "baseline";
   const sensitivity = (): SensitivityMode => (dfMode() === "latest" ? "conservative" : "balanced");
 
-  const regressionKey = () => `${dfMode()}:${branch()}`;
+  const regressionKey = () => `${dfMode()}:${branch()}:${defaultRegressionHistoryLimit}`;
   const [history] = createResource(regressionKey, () =>
     api.getRegressionHistory({
       dfMode: dfMode(),
       branch: branch(),
-      limit: 200,
+      limit: defaultRegressionHistoryLimit,
     }),
   );
 
@@ -199,25 +224,28 @@ const Regressions: Component = () => {
         branch: entry.branch,
       })),
     );
+  const regressionEpisodes = (): RegressionWithContext[] =>
+    uniqueRegressionEpisodes(allRegressions());
   const filteredRegressions = () => {
     const filter = detectionFilter();
-    if (filter === "all") return allRegressions();
-    return allRegressions().filter((r) => r.detection_method === filter);
+    if (filter === "all") return regressionEpisodes();
+    return regressionEpisodes().filter((r) => r.detection_method === filter);
   };
-  const regressionCount = () => allRegressions().length;
+  const regressionCount = () => regressionEpisodes().length;
   const hasRegressions = () => regressionCount() > 0;
   const scannedRuns = () => history()?.scanned_runs ?? 0;
   const regressionRuns = () =>
-    new Set(allRegressions().map((regression) => regression.run_id)).size;
+    historyEntries().filter((entry) => (entry.regressions?.length ?? 0) > 0).length;
   const cachedRuns = () => history()?.cached_runs ?? 0;
   const computedRuns = () => history()?.computed_runs ?? 0;
   const globalShiftRuns = () =>
     historyEntries().filter((entry) => entry.global_shift_detected).length;
 
   // Count by detection method for filter badges
-  const tTestCount = () => allRegressions().filter((r) => r.detection_method === "t_test").length;
+  const tTestCount = () =>
+    regressionEpisodes().filter((r) => r.detection_method === "t_test").length;
   const changePointCount = () =>
-    allRegressions().filter((r) => r.detection_method === "change_point").length;
+    regressionEpisodes().filter((r) => r.detection_method === "change_point").length;
 
   return (
     <div class="flex flex-col h-full w-full">
@@ -284,7 +312,7 @@ const Regressions: Component = () => {
                   <div class="flex items-center gap-2 text-success">
                     <Check size={18} strokeWidth={3} />
                     <span class="text-[14px] font-medium">
-                      No regressions found across {scannedRuns()} scanned run
+                      No regression episodes found across {scannedRuns()} scanned run
                       {scannedRuns() !== 1 ? "s" : ""}
                     </span>
                   </div>
@@ -293,7 +321,7 @@ const Regressions: Component = () => {
                 <div class="flex items-center gap-2 text-danger">
                   <AlertTriangle size={18} />
                   <span class="text-[14px] font-medium">
-                    {regressionCount()} regression{regressionCount() !== 1 ? "s" : ""} across{" "}
+                    {regressionCount()} regression episode{regressionCount() !== 1 ? "s" : ""} across{" "}
                     {regressionRuns()} historical run{regressionRuns() !== 1 ? "s" : ""}
                   </span>
                 </div>
@@ -301,7 +329,7 @@ const Regressions: Component = () => {
 
               <Show when={latestRegressionEntry()}>
                 <div class="mt-2 text-[11px] font-mono text-text-muted flex items-center gap-1.5">
-                  <span>Latest regression run:</span>
+                  <span>Latest sighting:</span>
                   <CommitLink
                     hash={latestRegressionEntry()?.commit_hash}
                     hashFull={latestRegressionEntry()?.commit_hash_full}
@@ -320,6 +348,10 @@ const Regressions: Component = () => {
               </Show>
 
               <div class="mt-2 text-[11px] font-mono text-text-muted">
+                View: latest {scannedRuns()} scanned runs, grouped by episode
+              </div>
+
+              <div class="mt-1 text-[11px] font-mono text-text-muted">
                 Cache: {cachedRuns()} reused, {computedRuns()} computed on this load
               </div>
 
@@ -387,7 +419,7 @@ const Regressions: Component = () => {
           <table class="w-full">
             <thead class="sticky top-0 bg-white border-b border-border">
               <tr class="text-left text-[11px] text-text-muted uppercase tracking-wider">
-                <th class="py-3 px-4 font-medium">Run</th>
+                <th class="py-3 px-4 font-medium">Latest Seen</th>
                 <th class="py-3 px-4 font-medium">Benchmark</th>
                 <th class="py-3 px-4 font-medium">Change</th>
                 <th class="py-3 px-4 font-medium">Baseline</th>
@@ -406,8 +438,8 @@ const Regressions: Component = () => {
         <Show when={!history.loading && !hasRegressions() && !history.error}>
           <div class="flex items-center justify-center h-full text-text-muted">
             <div class="text-center">
-              <div class="text-[14px] mb-2">No historical regressions to show</div>
-              <div class="text-[12px]">Performance is stable across scanned runs</div>
+              <div class="text-[14px] mb-2">No historical regression episodes to show</div>
+              <div class="text-[12px]">Performance is stable across the recent scanned runs</div>
             </div>
           </div>
         </Show>

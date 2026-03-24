@@ -6,6 +6,8 @@ import (
 	"sort"
 )
 
+const minPracticalRegressionEffectPercent = 1.5
+
 // RunStat represents the statistical summary of a single benchmark run.
 // Median is the primary metric for regression detection (robust to outliers).
 type RunStat struct {
@@ -280,7 +282,7 @@ func DetectRegressionWithDFMode(latest RunStat, baseline *BaselineStats, alpha f
 
 	// Variance-tuned minimum effect threshold
 	// Noisy benchmarks need larger effect to flag; stable ones can detect smaller changes
-	minEffectPct := math.Max(1.0, 2.0*baseline.CV*100.0)
+	minEffectPct := math.Max(minPracticalRegressionEffectPercent, 2.0*baseline.CV*100.0)
 
 	// Compute the difference using medians
 	diff := latest.Median - baseline.Median

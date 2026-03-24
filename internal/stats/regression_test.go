@@ -138,6 +138,51 @@ func TestDetectRegressionUsesBaselinePointCount(t *testing.T) {
 	})
 }
 
+func TestDetectRegressionMinimumPracticalEffectFloor(t *testing.T) {
+	baseline := &BaselineStats{
+		RunID:      1,
+		Median:     100000,
+		Variance:   1,
+		PointCount: 20,
+		CILower:    99999,
+		CIUpper:    100001,
+		CV:         0,
+	}
+
+	t.Run("suppresses statistically significant sub-floor changes", func(t *testing.T) {
+		latest := RunStat{
+			RunID:       2,
+			Median:      101200,
+			Sem:         1,
+			SampleCount: 30,
+			StdDev:      5,
+		}
+
+		result := DetectRegression(latest, baseline, 0.01)
+		if result.MinEffectPercent != minPracticalRegressionEffectPercent {
+			t.Fatalf("expected min effect floor %.1f, got %.2f", minPracticalRegressionEffectPercent, result.MinEffectPercent)
+		}
+		if result.Status != "ok" {
+			t.Fatalf("expected ok status for sub-floor change, got %q", result.Status)
+		}
+	})
+
+	t.Run("keeps over-floor changes eligible", func(t *testing.T) {
+		latest := RunStat{
+			RunID:       2,
+			Median:      101600,
+			Sem:         1,
+			SampleCount: 30,
+			StdDev:      5,
+		}
+
+		result := DetectRegression(latest, baseline, 0.01)
+		if result.Status != "regressed" {
+			t.Fatalf("expected regressed status for over-floor change, got %q", result.Status)
+		}
+	})
+}
+
 func TestComputeBaselineCIWidth(t *testing.T) {
 	buildHistory := func(n int) []RunStat {
 		pattern := []float64{95, 98, 101, 99, 102, 97, 100, 103, 96, 104}
