@@ -1,7 +1,10 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -84,5 +87,41 @@ func TestRegressionCacheGenerationKeyIncludesBaselineAnchor(t *testing.T) {
 	second := server.regressionCacheGenerationKey("feature/cache", 30, 5, 3, regressionDFModeBaseline, "main:101")
 	if first == second {
 		t.Fatal("expected generation keys to differ when baseline anchor changes")
+	}
+}
+
+func TestRegressionCacheGenerationKeyIsStable(t *testing.T) {
+	server := &Server{}
+
+	got := server.regressionCacheGenerationKey("main", 30, 5, 3, regressionDFModeBaseline, "self")
+	const want = "4d04bf945ae93ab72caf03d2112da50e5324e76eb5317cb7f2f882aeab19d5ec"
+	if got != want {
+		t.Fatalf("generation key = %q, want %q", got, want)
+	}
+}
+
+func TestRegressionHistoryReturnsWhenCacheWriteFails(t *testing.T) {
+	database := openRegressionHistoryTestDB(t)
+	server := &Server{db: database}
+
+	insertRegressionHistoryTestRun(t, database, "main", time.Date(2026, 2, 20, 10, 0, 0, 0, time.UTC), "a")
+	if _, err := database.Exec(`PRAGMA query_only = ON`); err != nil {
+		t.Fatalf("enable query_only: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/regressions/history?branch=main&limit=1", nil)
+	rec := httptest.NewRecorder()
+	server.handleRegressionsHistory(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var response regressionHistoryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.ComputedRuns != 1 {
+		t.Fatalf("computed_runs = %d, want 1", response.ComputedRuns)
 	}
 }

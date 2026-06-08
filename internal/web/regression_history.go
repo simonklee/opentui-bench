@@ -9,11 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +22,9 @@ const (
 	defaultRegressionHistoryLimit = 120
 	maxRegressionHistoryLimit     = 500
 
+	// Bump this when cached regression history payloads become incompatible.
+	// Do not include the executable hash in cache keys: unrelated rebuilds and
+	// embedded asset changes would force the landing page down the cold path.
 	regressionCacheAlgorithmVersion = "v2"
 )
 
@@ -224,12 +224,12 @@ func (s *Server) handleRegressionsHistory(w http.ResponseWriter, r *http.Request
 				GenerationKey: generationKey,
 				ResponseJSON:  payload,
 			}); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+				fmt.Printf("warning: store regression cache for run %d: %v\n", run.ID, err)
+			} else {
+				cachedAt = now
 			}
 
 			computedRuns++
-			cachedAt = now
 		}
 
 		var snapshot regressionSnapshot
@@ -329,9 +329,8 @@ func (s *Server) computeRegressionsSnapshot(ctx context.Context, runID int64, br
 
 func (s *Server) regressionCacheGenerationKey(branch string, window int, minPoints int, baselineOffset int, dfMode string, baselineAnchor string) string {
 	cacheSeed := fmt.Sprintf(
-		"%s|code=%s|branch=%s|window=%d|min_points=%d|baseline_offset=%d|df_mode=%s|baseline_anchor=%s|alpha=%g|fdr=%g|min_abs_ns=%g|global_shift=%d,%g,%g|change_point=%d,%g,%d,%d|default_df_mode=%s",
+		"algorithm=%s|branch=%s|window=%d|min_points=%d|baseline_offset=%d|df_mode=%s|baseline_anchor=%s|alpha=%g|fdr=%g|min_abs_ns=%g|global_shift=%d,%g,%g|change_point=%d,%g,%d,%d|default_df_mode=%s",
 		regressionCacheAlgorithmVersion,
-		s.regressionCodeFingerprint(),
 		branch,
 		window,
 		minPoints,
@@ -369,62 +368,6 @@ func (s *Server) regressionCacheBaselineAnchor(branch string) (string, error) {
 	}
 
 	return fmt.Sprintf("main:%d", mainRun.ID), nil
-}
-
-func (s *Server) regressionCodeFingerprint() string {
-	s.regressionCodeHashOnce.Do(func() {
-		hash, err := executableSHA256()
-		if err == nil {
-			s.regressionCodeHash = hash
-			return
-		}
-		s.regressionCodeHash = buildInfoFingerprint()
-	})
-
-	if s.regressionCodeHash == "" {
-		return "unknown"
-	}
-
-	return s.regressionCodeHash
-}
-
-func executableSHA256() (string, error) {
-	exePath, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-
-	f, err := os.Open(exePath)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = f.Close() }()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-func buildInfoFingerprint() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "unknown"
-	}
-
-	parts := []string{info.Main.Path, info.Main.Version}
-	for _, setting := range info.Settings {
-		switch setting.Key {
-		case "vcs.revision", "vcs.modified", "vcs.time", "GOOS", "GOARCH", "-compiler":
-			parts = append(parts, setting.Key+"="+setting.Value)
-		}
-	}
-
-	joined := strings.Join(parts, "|")
-	sum := sha256.Sum256([]byte(joined))
-	return "buildinfo:" + hex.EncodeToString(sum[:])
 }
 
 type inMemoryResponseWriter struct {

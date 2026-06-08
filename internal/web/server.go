@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 
 	"opentui-bench/internal/cache"
 	"opentui-bench/internal/db"
@@ -29,9 +28,6 @@ type Server struct {
 	svgCache      *cache.SVGCache
 	flamegraphSem chan struct{}
 	pprofManager  *PProfManager
-
-	regressionCodeHashOnce sync.Once
-	regressionCodeHash     string
 }
 
 func NewServer(database *db.DB, addr string) (*Server, error) {
