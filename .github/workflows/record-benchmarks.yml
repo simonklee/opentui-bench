@@ -2,22 +2,18 @@ name: Record Benchmarks
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '*/30 * * * *'
 
 jobs:
   trigger:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger benchmarks on Hetzner
+      - name: Restart benchmark worker on Hetzner
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.BENCH_HOST }}
           username: ${{ secrets.BENCH_USER }}
           key: ${{ secrets.BENCH_SSH_KEY }}
-          envs: FLY_API_TOKEN,API_KEY
-          script: ~/repos/opentui-bench/scripts/trigger-benchmarks.sh
+          script: |
+            systemctl --user restart opentui-bench-worker.service
+            systemctl --user --no-pager --full status opentui-bench-worker.service
           timeout: 30s
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          API_KEY: ${{ secrets.BENCH_API_KEY }}

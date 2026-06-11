@@ -1,0 +1,8 @@
+bench
+bench.db*
+*.db
+*.db-*
+frontend/node_modules
+frontend/dist
+node_modules
+.git

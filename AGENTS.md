@@ -41,9 +41,17 @@ make help            # Show all available commands
 
 ## Triggering Benchmark Runs
 
-Benchmarks run automatically every 30 minutes via cron (recording the next
-unrecorded commit on `origin/main`). To benchmark a different branch or commit,
-queue a job via the API. The Hetzner worker picks it up on its next poll.
+Benchmarks run continuously under `opentui-bench-worker.service` on Hetzner.
+The worker records unrecorded `origin/main` commits and processes one queued
+feature job between main commits. When caught up, it polls every minute.
+
+```bash
+ssh hetzner-opentui systemctl --user status opentui-bench-worker.service
+ssh hetzner-opentui journalctl --user -u opentui-bench-worker.service -f
+```
+
+To benchmark a different branch or commit, queue a job via the API. The worker
+picks it up between main commits or on its next idle poll.
 
 ```bash
 # Queue a benchmark for a feature branch

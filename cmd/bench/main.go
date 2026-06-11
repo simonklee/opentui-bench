@@ -1156,6 +1156,9 @@ func runWorkerRemote(ctx context.Context, remote *runner.RemoteRecorder, repoPat
 			}); updateErr != nil {
 				fmt.Fprintf(os.Stderr, "failed to update job status: %v\n", updateErr)
 			}
+			if once {
+				return err
+			}
 		}
 
 		if once {

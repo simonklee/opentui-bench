@@ -44,20 +44,25 @@ readonly REPOS_DIR="$HOME/repos"
 readonly BENCH_REPO="$REPOS_DIR/opentui-bench"
 readonly OPENTUI_REPO="$REPOS_DIR/opentui"
 readonly LOG_FILE="$HOME/benchmark.log"
+readonly ALERT_STATE_FILE="$HOME/.cache/opentui-bench/last-alert"
 
 # API configuration - set these as environment variables
 : "${API_URL:=https://opentui-bench.fly.dev}"
 : "${API_KEY:?BENCH_API_KEY or API_KEY must be set}"
+: "${POLL_INTERVAL:=60}"
+: "${ALERT_COOLDOWN:=3600}"
 
 # Export PATH to include necessary binaries
-export PATH="$HOME/.cargo/bin:$HOME/anyzig:$HOME/.fly/bin:/usr/local/go/bin:$PATH"
+export PATH="$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/anyzig:$HOME/.fly/bin:/usr/local/go/bin:$PATH"
 
 # Global variables
 USE_COLOR=true
 verbose=false
 dry_run=false
 cron_mode=false
+daemon_mode=false
 COMMAND=""
+did_work=false
 
 init_colors() {
 	if [[ -t 1 ]] && [[ -n "${TERM:-}" ]] && [[ "${TERM:-}" != "dumb" ]] && [[ -z "${NO_COLOR:-}" ]] && $USE_COLOR; then
@@ -76,15 +81,46 @@ init_colors
 
 # log writes to stdout and append to log file
 log() {
-	local msg="[$(date -Iseconds)] $*"
+	local msg
+	msg="[$(date -Iseconds)] $*"
 	echo -e "$msg" | tee -a "$LOG_FILE"
 }
 
 # err writes to stderr and append to log file
 err() {
-	local msg="[$(date -Iseconds)] ERROR: $*"
+	local msg
+	msg="[$(date -Iseconds)] ERROR: $*"
 	echo -e "${RED}$msg${NC}" >&2
 	echo "$msg" >>"$LOG_FILE"
+}
+
+alert() {
+	local message="$*"
+	local now last_alert=0
+	now=$(date +%s)
+	mkdir -p "${ALERT_STATE_FILE%/*}"
+	if [[ -f "$ALERT_STATE_FILE" ]]; then
+		read -r last_alert <"$ALERT_STATE_FILE" || last_alert=0
+	fi
+
+	# A restarting service should not page repeatedly for the same outage.
+	if ((now - last_alert < ALERT_COOLDOWN)); then
+		err "Alert suppressed by ${ALERT_COOLDOWN}s cooldown: $message"
+		return 0
+	fi
+
+	printf '%s\n' "$now" >"$ALERT_STATE_FILE"
+	err "ALERT: $message"
+	if command -v systemd-cat &>/dev/null; then
+		printf '%s\n' "$message" | systemd-cat --identifier=opentui-bench-worker --priority=crit || true
+	fi
+	if [[ -n "${ALERT_WEBHOOK_URL:-}" ]]; then
+		local payload
+		payload=$(jq -cn --arg text "$message" '{text: $text}')
+		curl --fail --silent --show-error --max-time 15 \
+			-H 'Content-Type: application/json' --data "$payload" "$ALERT_WEBHOOK_URL" >/dev/null || \
+			err "Failed to deliver alert webhook"
+	fi
 }
 
 info() {
@@ -108,6 +144,7 @@ trap_exit() {
 
 	if ((exit_code != 0)); then
 		err "Script failed with exit code $exit_code"
+		alert "OpenTUI benchmark worker exited with status $exit_code on $(hostname)"
 	fi
 	exit "$exit_code"
 }
@@ -132,6 +169,7 @@ trap_err() {
 if ! (return 0 2>/dev/null); then
 	trap trap_exit EXIT
 	trap trap_err ERR
+	trap 'exit 0' INT TERM
 fi
 
 SCRIPT_LOCK=""
@@ -209,6 +247,7 @@ reset_opentui() {
 
 run_benchmarks() {
 	cd "$OPENTUI_REPO"
+	git fetch origin
 
 	# Ask the API for the latest recorded commit
 	local latest_recorded
@@ -228,6 +267,7 @@ run_benchmarks() {
 		log "All commits already recorded, nothing to do"
 		return 0
 	fi
+	did_work=true
 
 	log "Processing commit: ${next_commit:0:7}"
 
@@ -242,10 +282,23 @@ run_benchmarks() {
 	if $dry_run; then
 		log "Dry run: would exec ./bench record --api-url ..."
 	else
-		./bench record --repo "$OPENTUI_REPO" \
+		local record_output record_status
+		set +o errexit
+		record_output=$(./bench record --repo "$OPENTUI_REPO" \
 			--api-url "$API_URL" --api-key "$API_KEY" \
 			--samples 3 --profile cpu --notes "Hetzner CCX13" \
-			--branch main
+			--branch main 2>&1)
+		record_status=$?
+		set -o errexit
+		printf '%s\n' "$record_output" | tee -a "$LOG_FILE"
+		if ((record_status != 0)); then
+			if [[ "$record_output" == *"database or disk is full"* ]]; then
+				alert "OpenTUI benchmark storage is full; commit ${next_commit:0:7} could not be recorded"
+			elif [[ "$record_output" == *"post results to API"* || "$record_output" == *"artifact upload errors"* ]]; then
+				alert "OpenTUI benchmark API rejected results for commit ${next_commit:0:7}"
+			fi
+			return "$record_status"
+		fi
 	fi
 
 	# Reset opentui repo
@@ -258,14 +311,41 @@ run_queued_jobs() {
 	log "Checking for queued jobs..."
 	cd "$BENCH_REPO"
 
-	# Process one queued job per cron invocation (keeps things simple and predictable)
+	local pending_jobs
+	pending_jobs=$(curl --fail --silent --show-error \
+		"$API_URL/api/jobs?status=pending&limit=1" | jq 'length')
+	if ((pending_jobs == 0)); then
+		log "No pending jobs"
+		return 0
+	fi
+	did_work=true
+
+	# Process one queued job between main commits.
 	if $dry_run; then
 		log "Dry run: would exec ./bench worker --once ..."
 		return 0
 	fi
 
-	./bench worker --repo "$OPENTUI_REPO" \
-		--api-url "$API_URL" --api-key "$API_KEY" --once
+	local worker_output worker_status
+	set +o errexit
+	worker_output=$(./bench worker --repo "$OPENTUI_REPO" \
+		--api-url "$API_URL" --api-key "$API_KEY" --once 2>&1)
+	worker_status=$?
+	set -o errexit
+	printf '%s\n' "$worker_output" | tee -a "$LOG_FILE"
+	if [[ "$worker_output" == *" failed: "* ]] && ((worker_status == 0)); then
+		worker_status=1
+	fi
+	if ((worker_status != 0)); then
+		if [[ "$worker_output" == *"database or disk is full"* ]]; then
+			alert "OpenTUI benchmark storage is full; queued job results could not be recorded"
+		elif [[ "$worker_output" == *"post results to API"* || "$worker_output" == *"artifact upload errors"* ]]; then
+			alert "OpenTUI benchmark API rejected queued job results"
+		else
+			alert "OpenTUI queued benchmark job failed on $(hostname)"
+		fi
+		return "$worker_status"
+	fi
 
 	return 0
 }
@@ -279,11 +359,14 @@ Usage: ${SCRIPT_NAME} [options]
 Options:
     -v, --verbose    Enable verbose output
     -n, --dry-run    Show what would be done without doing it
+    -d, --daemon     Keep processing work; sleep only when caught up
     -h, --help       Show this help message
 
 Environment variables:
     API_URL          API endpoint (default: https://opentui-bench.fly.dev)
     API_KEY          API key for authentication (required)
+    POLL_INTERVAL    Seconds to sleep when caught up (default: 60)
+    ALERT_WEBHOOK_URL  Optional JSON webhook receiving {"text":"..."}
 EOF
 }
 
@@ -296,6 +379,10 @@ parse_args() {
 			;;
 		-n | --dry-run)
 			dry_run=true
+			shift
+			;;
+		-d | --daemon)
+			daemon_mode=true
 			shift
 			;;
 		-h | --help)
@@ -320,8 +407,19 @@ main() {
 	check_dependencies
 
 	setup_repos
-	run_benchmarks
-	run_queued_jobs
+	while true; do
+		did_work=false
+		run_benchmarks
+		run_queued_jobs
+
+		if ! $daemon_mode; then
+			break
+		fi
+		if ! $did_work; then
+			log "Caught up; sleeping ${POLL_INTERVAL}s"
+			sleep "$POLL_INTERVAL"
+		fi
+	done
 }
 
 main "$@"

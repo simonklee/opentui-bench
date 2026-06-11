@@ -33,8 +33,9 @@ make serve
 
 ## Continuous benchmarking
 
-GitHub Actions triggers benchmarks every 30 minutes, processing one commit at a
-time in chronological order from the opentui `main` branch.
+The Hetzner benchmark worker runs continuously, processing main commits and
+queued feature jobs until caught up, then polling for new work.
+Commits are recorded in chronological order from the opentui `main` branch.
 
 It runs on a Hetzner machine with minimal background processes to minimize
 noise. Each run records multiple iterations to average out variability.
