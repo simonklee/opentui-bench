@@ -72,6 +72,8 @@ export interface CompareResult {
     baseline_ns: number;
     current_ns: number;
     change_percent: number;
+    baseline_result_id: number;
+    current_result_id: number;
   }[];
 }
 
@@ -180,12 +182,8 @@ export const api = {
   getCompare: async (baseId: number, currId: number) => {
     return fetchJson<CompareResult>(`/api/compare?id_a=${baseId}&id_b=${currId}`);
   },
-  getTrend: async (name: string, limit = 100, branch?: string) => {
-    let url = `/api/trend?name=${encodeURIComponent(name)}&limit=${limit}`;
-    if (branch) {
-      url += `&branch=${encodeURIComponent(branch)}`;
-    }
-    return fetchJson<TrendResponse>(url);
+  getTrend: async (resultId: number, limit = 100) => {
+    return fetchJson<TrendResponse>(`/api/trend?result_id=${resultId}&limit=${limit}`);
   },
   getFlamegraphs: async (runId: number) => {
     return fetchJson<{ result_id: number; type: string }[]>(`/api/runs/${runId}/flamegraphs`);

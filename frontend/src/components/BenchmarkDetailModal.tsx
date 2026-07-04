@@ -222,10 +222,10 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
             <div class="h-[21px] md:h-[24px] flex items-center">
               <TrendIndicator
                 trendData={props.trendData?.points}
-                benchmarkName={props.benchmark.name}
                 currentRunId={props.runId}
                 fromCompare={searchParams.from === "compare"}
                 compareBaseRunId={searchParams.compare_base as string | undefined}
+                compareBaseResultId={searchParams.compare_base_result as string | undefined}
               />
             </div>
           </div>

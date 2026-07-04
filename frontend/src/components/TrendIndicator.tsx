@@ -5,10 +5,10 @@ import type { TrendPoint } from "../services/api";
 
 interface TrendIndicatorProps {
   trendData: TrendPoint[] | undefined;
-  benchmarkName: string;
   currentRunId: number;
   fromCompare: boolean;
   compareBaseRunId?: string;
+  compareBaseResultId?: string;
 }
 
 const TrendIndicator: Component<TrendIndicatorProps> = (props) => {
@@ -40,10 +40,13 @@ const TrendIndicator: Component<TrendIndicatorProps> = (props) => {
         const prevRunId =
           props.fromCompare && props.compareBaseRunId ? props.compareBaseRunId : prev.run_id;
 
-        const prevUrl =
+        const prevResultId =
           props.fromCompare && props.compareBaseRunId
-            ? `/benchmarks/${prevRunId}?name=${encodeURIComponent(props.benchmarkName)}`
-            : `/benchmarks/${prevRunId}?bench_id=${prev.result_id}`;
+            ? props.compareBaseResultId
+            : String(prev.result_id);
+        const prevUrl = prevResultId
+          ? `/benchmarks/${prevRunId}?bench_id=${prevResultId}`
+          : `/benchmarks/${prevRunId}`;
 
         return (
           <div class="flex items-baseline font-mono text-[14px]">

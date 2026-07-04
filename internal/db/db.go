@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS results (
 CREATE INDEX IF NOT EXISTS idx_results_run ON results(run_id);
 CREATE INDEX IF NOT EXISTS idx_results_name ON results(name);
 CREATE INDEX IF NOT EXISTS idx_results_category ON results(category);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_results_run_benchmark ON results(run_id, category, name);
+CREATE INDEX IF NOT EXISTS idx_results_benchmark_run ON results(category, name, run_id);
 
 CREATE TABLE IF NOT EXISTS mem_stats (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,7 +197,7 @@ func (db *DB) migrate() error {
 	var tableName string
 	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='flamegraphs'`).Scan(&tableName)
 	if err == sql.ErrNoRows {
-		return nil
+		return db.enforceResultIdentity()
 	}
 	if err != nil {
 		return err
@@ -206,7 +208,7 @@ func (db *DB) migrate() error {
 		return err
 	}
 	if !hasOldSchema {
-		return nil
+		return db.enforceResultIdentity()
 	}
 
 	fmt.Println("Migrating flamegraphs table to compressed format...")
@@ -225,6 +227,41 @@ func (db *DB) migrate() error {
 	}
 
 	fmt.Printf("Migrated %d flamegraphs to compressed format\n", len(oldData))
+	return db.enforceResultIdentity()
+}
+
+func (db *DB) enforceResultIdentity() error {
+	var tableName string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='results'`).Scan(&tableName)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	var duplicateGroups, duplicateRows int
+	err = db.QueryRow(`
+		SELECT COUNT(*), COALESCE(SUM(row_count - 1), 0)
+		FROM (
+			SELECT COUNT(*) AS row_count
+			FROM results
+			GROUP BY run_id, category, name
+			HAVING COUNT(*) > 1
+		)`).Scan(&duplicateGroups, &duplicateRows)
+	if err != nil {
+		return fmt.Errorf("audit duplicate benchmark results: %w", err)
+	}
+	if duplicateGroups > 0 {
+		return fmt.Errorf("cannot enforce benchmark identity: found %d duplicate (run_id, category, name) groups containing %d extra rows; resolve them explicitly before reopening the database", duplicateGroups, duplicateRows)
+	}
+
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_results_run_benchmark ON results(run_id, category, name)`); err != nil {
+		return fmt.Errorf("enforce unique benchmark results: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_results_benchmark_run ON results(category, name, run_id)`); err != nil {
+		return fmt.Errorf("index benchmark history: %w", err)
+	}
 	return nil
 }
 
@@ -339,6 +376,11 @@ type Run struct {
 	MachineID      string
 	Notes          string
 	ZigOptimize    string
+}
+
+type BenchmarkKey struct {
+	Category string `json:"category"`
+	Name     string `json:"name"`
 }
 
 type RegressionCacheKey struct {
@@ -788,6 +830,7 @@ func (db *DB) ListFlamegraphResults(runID int64) ([]ProfiledResult, error) {
 		FROM results r
 		LEFT JOIN artifacts a ON a.result_id = r.id AND a.kind IN ('cpu.pprof', 'cpu.flamegraph.svg')
 		LEFT JOIN flamegraphs f ON f.run_id = r.run_id AND f.benchmark_name = r.name
+			AND (SELECT COUNT(*) FROM results same_name WHERE same_name.run_id = r.run_id AND same_name.name = r.name) = 1
 		WHERE r.run_id = ? AND (a.id IS NOT NULL OR f.id IS NOT NULL)
 		ORDER BY r.category, r.name`, runID)
 	if err != nil {
@@ -843,11 +886,20 @@ func (db *DB) CountResultsForRun(runID int64) (int, error) {
 	return count, err
 }
 
-func (db *DB) GetTrend(namePattern string, limit int, branch string) ([]struct {
+func (db *DB) GetTrend(resultID int64, limit int) ([]struct {
 	Run    Run
 	Result Result
 }, error,
 ) {
+	refResult, err := db.GetResult(resultID)
+	if err != nil {
+		return nil, err
+	}
+	refRun, err := db.GetRun(refResult.RunID)
+	if err != nil {
+		return nil, err
+	}
+
 	query := `
 		SELECT 
 			ru.id, ru.commit_hash, ru.commit_hash_full, ru.commit_message, ru.commit_date, ru.branch, ru.run_date, ru.machine_id, ru.notes, ru.zig_optimize,
@@ -856,19 +908,25 @@ func (db *DB) GetTrend(namePattern string, limit int, branch string) ([]struct {
 			r.total_ns, r.iterations, COALESCE(r.sample_count, 1)
 		FROM results r
 		JOIN runs ru ON r.run_id = ru.id
-		WHERE r.name LIKE ?`
+		WHERE r.category = ? AND r.name = ?`
 
-	args := []interface{}{"%" + namePattern + "%"}
-	if branch != "" {
-		// "main" matches branch='main', branch=NULL, or branch='' (legacy runs)
-		if branch == "main" {
+	args := []interface{}{refResult.Category, refResult.Name}
+	if refRun.MachineID == "" || refRun.ZigOptimize == "" {
+		query += " AND ru.id = ?"
+		args = append(args, refRun.ID)
+	} else {
+		query += " AND ru.machine_id = ? AND ru.zig_optimize = ?"
+		args = append(args, refRun.MachineID, refRun.ZigOptimize)
+		if refRun.Branch == "" || refRun.Branch == "main" {
 			query += " AND (ru.branch = 'main' OR ru.branch IS NULL OR ru.branch = '')"
 		} else {
-			query += " AND ru.branch = ?"
-			args = append(args, branch)
+			query += " AND (ru.id = ? OR ((ru.branch = 'main' OR ru.branch IS NULL OR ru.branch = '') AND (julianday(ru.run_date) < julianday(?) OR (julianday(ru.run_date) = julianday(?) AND ru.id <= ?))))"
+			args = append(args, refRun.ID, refRun.RunDate, refRun.RunDate, refRun.ID)
 		}
+		query += " AND (julianday(ru.run_date) < julianday(?) OR (julianday(ru.run_date) = julianday(?) AND ru.id <= ?))"
+		args = append(args, refRun.RunDate, refRun.RunDate, refRun.ID)
 	}
-	query += " ORDER BY ru.run_date DESC"
+	query += " ORDER BY julianday(ru.run_date) DESC, ru.id DESC"
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)
@@ -1083,7 +1141,7 @@ func (db *DB) ListArtifactsForResult(resultID int64) ([]Artifact, error) {
 }
 
 // ComparableRunsWindow fetches a window of runs comparable to the given run.
-// Comparable means same branch, machine_id, and zig_optimize.
+// Unknown machine or optimization metadata is isolated to the reference run.
 // Returns runs in reverse chronological order (most recent first).
 // The window parameter controls how many runs to return (including the reference run if found).
 func (db *DB) GetComparableRunsWindow(runID int64, window int) ([]Run, error) {
@@ -1107,19 +1165,18 @@ func (db *DB) GetComparableRunsWindow(runID int64, window int) ([]Run, error) {
 		args = append(args, refRun.Branch)
 	}
 
+	if refRun.MachineID == "" || refRun.ZigOptimize == "" {
+		query += ` AND id = ?`
+		args = append(args, refRun.ID)
+	} else {
+		query += ` AND machine_id = ? AND zig_optimize = ?`
+		args = append(args, refRun.MachineID, refRun.ZigOptimize)
+	}
 	query += `
-		  AND (machine_id = ? OR (machine_id IS NULL AND ? = ''))
-		  AND (zig_optimize = ? OR (zig_optimize IS NULL AND ? = ''))
-		  AND run_date <= ?
-		ORDER BY run_date DESC
+		  AND (julianday(run_date) < julianday(?) OR (julianday(run_date) = julianday(?) AND id <= ?))
+		ORDER BY julianday(run_date) DESC, id DESC
 		LIMIT ?`
-
-	args = append(args,
-		refRun.MachineID, refRun.MachineID,
-		refRun.ZigOptimize, refRun.ZigOptimize,
-		refRun.RunDate,
-		window,
-	)
+	args = append(args, refRun.RunDate, refRun.RunDate, refRun.ID, window)
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -1150,20 +1207,64 @@ func (db *DB) GetComparableRunsWindow(runID int64, window int) ([]Run, error) {
 	return runs, rows.Err()
 }
 
-// GetResultsForBenchmarkInRuns fetches all results for a specific benchmark name across multiple runs.
+// GetComparableMainRunsWindow returns compatible main history available as of
+// the reference run. Feature runs are never compared with future main runs.
+func (db *DB) GetComparableMainRunsWindow(runID int64, window int) ([]Run, error) {
+	refRun, err := db.GetRun(runID)
+	if err != nil {
+		return nil, err
+	}
+	if refRun.MachineID == "" || refRun.ZigOptimize == "" {
+		return []Run{}, nil
+	}
+
+	rows, err := db.Query(`
+		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
+		FROM runs
+		WHERE (branch = 'main' OR branch IS NULL OR branch = '')
+		  AND machine_id = ? AND zig_optimize = ?
+		  AND (julianday(run_date) < julianday(?) OR (julianday(run_date) = julianday(?) AND id <= ?))
+		ORDER BY julianday(run_date) DESC, id DESC
+		LIMIT ?`, refRun.MachineID, refRun.ZigOptimize, refRun.RunDate, refRun.RunDate, refRun.ID, window)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var runs []Run
+	for rows.Next() {
+		var r Run
+		var commitHashFull, commitMessage, commitDate, branch, machineID, notes, zigOptimize sql.NullString
+		if err := rows.Scan(&r.ID, &r.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branch, &r.RunDate, &machineID, &notes, &zigOptimize); err != nil {
+			return nil, err
+		}
+		r.CommitHashFull = commitHashFull.String
+		r.CommitMessage = commitMessage.String
+		r.CommitDate = commitDate.String
+		r.Branch = branch.String
+		r.MachineID = machineID.String
+		r.Notes = notes.String
+		r.ZigOptimize = zigOptimize.String
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
+}
+
+// GetResultsForBenchmarkInRuns fetches exact benchmark results across multiple runs.
 // Returns a map of runID -> Result.
-func (db *DB) GetResultsForBenchmarkInRuns(benchmarkName string, runIDs []int64) (map[int64]Result, error) {
+func (db *DB) GetResultsForBenchmarkInRuns(key BenchmarkKey, runIDs []int64) (map[int64]Result, error) {
 	if len(runIDs) == 0 {
 		return make(map[int64]Result), nil
 	}
 
 	// Build placeholders for IN clause
 	placeholders := make([]string, len(runIDs))
-	args := make([]interface{}, len(runIDs)+1)
-	args[0] = benchmarkName
+	args := make([]interface{}, len(runIDs)+2)
+	args[0] = key.Category
+	args[1] = key.Name
 	for i, id := range runIDs {
 		placeholders[i] = "?"
-		args[i+1] = id
+		args[i+2] = id
 	}
 
 	query := fmt.Sprintf(`
@@ -1171,7 +1272,7 @@ func (db *DB) GetResultsForBenchmarkInRuns(benchmarkName string, runIDs []int64)
 		       COALESCE(std_dev_ns, 0), COALESCE(p50_ns, 0), COALESCE(p95_ns, 0), COALESCE(p99_ns, 0),
 		       total_ns, iterations, COALESCE(sample_count, 1)
 		FROM results
-		WHERE name = ? AND run_id IN (%s)`, strings.Join(placeholders, ","))
+		WHERE category = ? AND name = ? AND run_id IN (%s)`, strings.Join(placeholders, ","))
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -1458,10 +1559,10 @@ func (db *DB) UpsertRegressionCache(entry *RegressionCacheEntry) error {
 	return err
 }
 
-// GetDistinctBenchmarkNames returns all unique benchmark names from a set of runs.
-func (db *DB) GetDistinctBenchmarkNames(runIDs []int64) ([]string, error) {
+// GetDistinctBenchmarkKeys returns all unique benchmark identities from a set of runs.
+func (db *DB) GetDistinctBenchmarkKeys(runIDs []int64) ([]BenchmarkKey, error) {
 	if len(runIDs) == 0 {
-		return []string{}, nil
+		return []BenchmarkKey{}, nil
 	}
 
 	placeholders := make([]string, len(runIDs))
@@ -1472,9 +1573,9 @@ func (db *DB) GetDistinctBenchmarkNames(runIDs []int64) ([]string, error) {
 	}
 
 	query := fmt.Sprintf(`
-		SELECT DISTINCT name FROM results
+		SELECT DISTINCT category, name FROM results
 		WHERE run_id IN (%s)
-		ORDER BY name`, strings.Join(placeholders, ","))
+		ORDER BY category, name`, strings.Join(placeholders, ","))
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -1486,13 +1587,13 @@ func (db *DB) GetDistinctBenchmarkNames(runIDs []int64) ([]string, error) {
 		}
 	}()
 
-	var names []string
+	var keys []BenchmarkKey
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var key BenchmarkKey
+		if err := rows.Scan(&key.Category, &key.Name); err != nil {
 			return nil, err
 		}
-		names = append(names, name)
+		keys = append(keys, key)
 	}
-	return names, rows.Err()
+	return keys, rows.Err()
 }

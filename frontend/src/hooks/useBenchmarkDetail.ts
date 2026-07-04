@@ -93,23 +93,6 @@ export function useBenchmarkDetail() {
     }
   });
 
-  // Handle name-based navigation (e.g. from Compare view)
-  createEffect(() => {
-    const nameParam = searchParams.name;
-    const r = run();
-    if (typeof nameParam === "string" && r) {
-      const found = r.results.find((b) => b.name === nameParam);
-      if (found) {
-        setSelectedBenchmarkId(found.id);
-        setSearchParams({
-          ...searchParams,
-          bench_id: found.id,
-          name: undefined,
-        });
-      }
-    }
-  });
-
   const { filteredResults: filteredData, categories } = useFilteredBenchmarks(() => run()?.results);
 
   const filteredResults = createMemo(() => {
@@ -217,34 +200,18 @@ export function useBenchmarkDetail() {
   const runBranch = createMemo(() => run()?.branch ?? "");
   const isOnBranch = createMemo(() => isBranchRun(runBranch()));
 
-  // Primary trend data: always fetch main's history for baseline context
-  // When on a branch, explicitly filter to main; otherwise fetch unfiltered (same as before)
+  // The server derives exact identity and the compatible cohort from this result.
   const [trendData] = createResource(
     () => {
-      const name = selectedBenchmark()?.name;
-      if (!name) return null;
-      const branch = isOnBranch() ? "main" : undefined;
-      return { name, limit: 100, branch };
+      const resultId = selectedBenchmark()?.id;
+      if (!resultId) return null;
+      return { resultId, limit: 100 };
     },
-    async ({ name, limit, branch }) => {
-      return api.getTrend(name, limit, branch);
-    },
-  );
-
-  // Overlay trend data: only fetched when viewing a non-main branch
-  const [branchTrendData] = createResource(
-    () => {
-      const name = selectedBenchmark()?.name;
-      const branch = runBranch();
-      if (!name || !isBranchRun(branch)) return null;
-      return { name, limit: 100, branch };
-    },
-    async ({ name, limit, branch }) => {
-      return api.getTrend(name, limit, branch);
+    async ({ resultId, limit }) => {
+      return api.getTrend(resultId, limit);
     },
   );
 
-  // Combined trend response: main data with branch overlay info
   const combinedTrendData = createMemo((): TrendResponse | undefined => {
     const main = trendData();
     if (!main) return undefined;
@@ -290,7 +257,7 @@ export function useBenchmarkDetail() {
     selectBenchmark,
     selectedBenchmark,
     trendData: combinedTrendData,
-    branchTrendData,
+    branchTrendData: () => undefined,
     isOnBranch,
     runBranch,
     hasCpuProfile,

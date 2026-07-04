@@ -78,11 +78,6 @@ type sample struct {
 	memStats   []MemStatJSON
 }
 
-type benchmarkKey struct {
-	category string
-	name     string
-}
-
 // Parse reads benchmark JSON output and aggregates samples into a ParsedRun.
 // It does everything Record() does up to the DB write: parses JSON, aggregates
 // samples, builds the result structs. No DB dependency. No side effects.
@@ -91,8 +86,8 @@ func Parse(reader io.Reader, meta RunMetadata) (*ParsedRun, error) {
 		meta.ZigOptimize = "ReleaseFast"
 	}
 
-	samples := make(map[benchmarkKey][]sample)
-	keyOrder := []benchmarkKey{}
+	samples := make(map[db.BenchmarkKey][]sample)
+	keyOrder := []db.BenchmarkKey{}
 
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
@@ -115,7 +110,7 @@ func Parse(reader io.Reader, meta RunMetadata) (*ParsedRun, error) {
 		}
 
 		for _, r := range bench.Results {
-			key := benchmarkKey{category: bench.Benchmark, name: r.Name}
+			key := db.BenchmarkKey{Category: bench.Benchmark, Name: r.Name}
 			if _, exists := samples[key]; !exists {
 				keyOrder = append(keyOrder, key)
 			}
@@ -138,7 +133,7 @@ func Parse(reader io.Reader, meta RunMetadata) (*ParsedRun, error) {
 
 	for _, key := range keyOrder {
 		sampleList := samples[key]
-		agg := aggregateSamples(key.category, key.name, sampleList)
+		agg := aggregateSamples(key.Category, key.Name, sampleList)
 
 		var memStats []MemStatJSON
 		if len(sampleList) > 0 && len(sampleList[0].memStats) > 0 {
@@ -173,7 +168,7 @@ func Store(database *db.DB, parsed *ParsedRun) (int64, int, error) {
 		CommitMessage:  parsed.Meta.CommitMessage,
 		CommitDate:     parsed.Meta.CommitDate,
 		Branch:         parsed.Meta.Branch,
-		RunDate:        time.Now().Format(time.RFC3339),
+		RunDate:        time.Now().UTC().Format(time.RFC3339),
 		MachineID:      parsed.Meta.MachineID,
 		Notes:          parsed.Meta.Notes,
 		ZigOptimize:    parsed.Meta.ZigOptimize,

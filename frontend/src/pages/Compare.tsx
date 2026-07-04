@@ -169,14 +169,15 @@ const Compare: Component = () => {
     }
   };
 
-  const handleBenchmarkClick = (benchmarkName: string) => {
+  const handleBenchmarkClick = (resultId: number, baselineResultId: number) => {
     const curr = currId();
     const base = baseId();
     if (curr) {
       const params = new URLSearchParams();
-      params.set("name", benchmarkName);
+      params.set("bench_id", String(resultId));
       params.set("from", "compare");
       if (base) params.set("compare_base", String(base));
+      params.set("compare_base_result", String(baselineResultId));
       if (curr) params.set("compare_curr", String(curr));
       navigate(`/benchmarks/${curr}?${params.toString()}`);
     }
@@ -380,7 +381,7 @@ const Compare: Component = () => {
 
       <div class="flex-1 overflow-auto bg-bg-dark">
         <Show
-          when={compareData()}
+          when={!compareData.loading && compareData()}
           fallback={
             <div class="p-8 text-center text-text-muted text-[13px]">
               {baseId() && currId() ? "Loading comparison..." : "Select two runs to compare"}
@@ -430,7 +431,9 @@ const Compare: Component = () => {
                   return (
                     <tr
                       class="hover:bg-bg-hover cursor-pointer"
-                      onClick={() => handleBenchmarkClick(c.name)}
+                      onClick={() =>
+                        handleBenchmarkClick(c.current_result_id, c.baseline_result_id)
+                      }
                     >
                       <td class="px-4 py-2.5 font-medium text-text-main font-ui">{c.name}</td>
                       <td class="px-4 py-2.5 text-right text-text-muted">

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	"opentui-bench/internal/db"
@@ -36,10 +37,10 @@ type RunConfig struct {
 // CollectedArtifact holds a binary artifact (e.g., pprof profile) captured
 // during a benchmark run, before it has been stored anywhere.
 type CollectedArtifact struct {
-	BenchmarkName string // benchmark name this artifact belongs to
-	Kind          string // e.g. "cpu.pprof"
-	Data          []byte // raw artifact data
-	Metadata      string // JSON string, e.g. {"perf_freq":997}
+	Benchmark db.BenchmarkKey
+	Kind      string // e.g. "cpu.pprof"
+	Data      []byte // raw artifact data
+	Metadata  string // JSON string, e.g. {"perf_freq":997}
 }
 
 // RunAndCollect does everything Run() does except the DB writes:
@@ -130,16 +131,28 @@ func RunAndCollect(ctx context.Context, cfg RunConfig) (*record.ParsedRun, []Col
 		}
 
 		for _, res := range parsed.Results {
-			pbGz, kind, err := CaptureCPUProfile(ctx, runner, benchBin, res.Name, cfg.PerfFreq)
+			benchmark := db.BenchmarkKey{Category: res.Category, Name: res.Name}
+			matches := 0
+			for _, candidate := range parsed.Results {
+				if strings.Contains(strings.ToLower(candidate.Category), strings.ToLower(benchmark.Category)) &&
+					strings.Contains(strings.ToLower(candidate.Name), strings.ToLower(benchmark.Name)) {
+					matches++
+				}
+			}
+			if matches != 1 {
+				return parsed, artifacts, fmt.Errorf("profile selector for %s/%s matches %d benchmarks", benchmark.Category, benchmark.Name, matches)
+			}
+
+			pbGz, kind, err := CaptureCPUProfile(ctx, runner, benchBin, benchmark, cfg.PerfFreq)
 			if err != nil {
-				return parsed, artifacts, fmt.Errorf("profile %s: %w", res.Name, err)
+				return parsed, artifacts, fmt.Errorf("profile %s/%s: %w", res.Category, res.Name, err)
 			}
 
 			artifacts = append(artifacts, CollectedArtifact{
-				BenchmarkName: res.Name,
-				Kind:          kind,
-				Data:          pbGz,
-				Metadata:      fmt.Sprintf(`{"perf_freq":%d}`, cfg.PerfFreq),
+				Benchmark: benchmark,
+				Kind:      kind,
+				Data:      pbGz,
+				Metadata:  fmt.Sprintf(`{"perf_freq":%d}`, cfg.PerfFreq),
 			})
 		}
 	}
@@ -166,16 +179,15 @@ func Run(ctx context.Context, database *db.DB, cfg RunConfig) (int64, error) {
 			return runID, fmt.Errorf("get results for artifacts: %w", err)
 		}
 
-		// Build a map from benchmark name to result ID
-		nameToResultID := make(map[string]int64, len(results))
+		resultIDs := make(map[db.BenchmarkKey]int64, len(results))
 		for _, res := range results {
-			nameToResultID[res.Name] = res.ID
+			resultIDs[db.BenchmarkKey{Category: res.Category, Name: res.Name}] = res.ID
 		}
 
 		for _, art := range artifacts {
-			resultID, ok := nameToResultID[art.BenchmarkName]
+			resultID, ok := resultIDs[art.Benchmark]
 			if !ok {
-				return runID, fmt.Errorf("no result found for artifact benchmark %s", art.BenchmarkName)
+				return runID, fmt.Errorf("no result found for artifact benchmark %s/%s", art.Benchmark.Category, art.Benchmark.Name)
 			}
 			_, err = database.InsertArtifact(&db.Artifact{
 				ResultID:  resultID,
@@ -185,7 +197,7 @@ func Run(ctx context.Context, database *db.DB, cfg RunConfig) (int64, error) {
 				CreatedAt: time.Now().Format(time.RFC3339),
 			})
 			if err != nil {
-				return runID, fmt.Errorf("store artifact for %s: %w", art.BenchmarkName, err)
+				return runID, fmt.Errorf("store artifact for %s/%s: %w", art.Benchmark.Category, art.Benchmark.Name, err)
 			}
 		}
 	}

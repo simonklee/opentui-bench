@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"time"
 
+	"opentui-bench/internal/db"
 	"opentui-bench/internal/record"
 )
 
@@ -69,11 +70,18 @@ type createRunResponse struct {
 	RunDate        string           `json:"run_date"`
 	ResultCount    int              `json:"result_count"`
 	ResultIDs      map[string]int64 `json:"result_ids"`
+	Results        []createdResult  `json:"results"`
+}
+
+type createdResult struct {
+	ID       int64  `json:"id"`
+	Category string `json:"category"`
+	Name     string `json:"name"`
 }
 
 // RecordRun marshals the ParsedRun and POSTs it to /api/runs.
 // Returns the run ID and a map of "category/name" -> result ID.
-func (r *RemoteRecorder) RecordRun(parsed *record.ParsedRun) (int64, map[string]int64, error) {
+func (r *RemoteRecorder) RecordRun(parsed *record.ParsedRun) (int64, map[db.BenchmarkKey]int64, error) {
 	reqBody := createRunRequest{
 		CommitHash:     parsed.Meta.CommitHash,
 		CommitHashFull: parsed.Meta.CommitHashFull,
@@ -130,7 +138,26 @@ func (r *RemoteRecorder) RecordRun(parsed *record.ParsedRun) (int64, map[string]
 		return 0, nil, fmt.Errorf("decode response: %w", err)
 	}
 
-	return result.ID, result.ResultIDs, nil
+	resultIDs := make(map[db.BenchmarkKey]int64, len(parsed.Results))
+	for _, created := range result.Results {
+		resultIDs[db.BenchmarkKey{Category: created.Category, Name: created.Name}] = created.ID
+	}
+	// Older deployed servers only return the legacy encoded map.
+	if len(resultIDs) == 0 {
+		legacyKeys := make(map[string]db.BenchmarkKey, len(parsed.Results))
+		for _, parsedResult := range parsed.Results {
+			key := db.BenchmarkKey{Category: parsedResult.Category, Name: parsedResult.Name}
+			encoded := parsedResult.Category + "/" + parsedResult.Name
+			if previous, exists := legacyKeys[encoded]; exists && previous != key {
+				return 0, nil, fmt.Errorf("legacy server result key %q is ambiguous for %s/%s and %s/%s", encoded, previous.Category, previous.Name, key.Category, key.Name)
+			}
+			legacyKeys[encoded] = key
+			if id, ok := result.ResultIDs[encoded]; ok {
+				resultIDs[key] = id
+			}
+		}
+	}
+	return result.ID, resultIDs, nil
 }
 
 // UploadArtifact sends a POST /api/runs/{runID}/results/{resultID}/artifacts

@@ -262,41 +262,41 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type resultKey struct {
-		Category string
-		Name     string
-	}
 	// Use P50Ns (median) for comparison - more robust to outliers
-	resultsBMap := make(map[resultKey]int64)
+	resultsBMap := make(map[db.BenchmarkKey]db.Result)
 	for _, r := range resultsB {
-		resultsBMap[resultKey{Category: r.Category, Name: r.Name}] = r.P50Ns
+		resultsBMap[db.BenchmarkKey{Category: r.Category, Name: r.Name}] = r
 	}
 
 	type comparison struct {
-		Name          string  `json:"name"`
-		Category      string  `json:"category"`
-		BaselineNs    int64   `json:"baseline_ns"` // Median of baseline
-		CurrentNs     int64   `json:"current_ns"`  // Median of current
-		ChangePercent float64 `json:"change_percent"`
-		IsRegression  bool    `json:"is_regression"`
+		Name             string  `json:"name"`
+		Category         string  `json:"category"`
+		BaselineNs       int64   `json:"baseline_ns"` // Median of baseline
+		CurrentNs        int64   `json:"current_ns"`  // Median of current
+		ChangePercent    float64 `json:"change_percent"`
+		IsRegression     bool    `json:"is_regression"`
+		BaselineResultID int64   `json:"baseline_result_id"`
+		CurrentResultID  int64   `json:"current_result_id"`
 	}
 
 	var comparisons []comparison
 	threshold := 10.0
 
 	for _, rA := range resultsA {
-		if medianB, ok := resultsBMap[resultKey{Category: rA.Category, Name: rA.Name}]; ok {
+		if resultB, ok := resultsBMap[db.BenchmarkKey{Category: rA.Category, Name: rA.Name}]; ok {
 			var change float64
 			if rA.P50Ns != 0 {
-				change = float64(medianB-rA.P50Ns) / float64(rA.P50Ns) * 100
+				change = float64(resultB.P50Ns-rA.P50Ns) / float64(rA.P50Ns) * 100
 			}
 			comparisons = append(comparisons, comparison{
-				Name:          rA.Name,
-				Category:      rA.Category,
-				BaselineNs:    rA.P50Ns,
-				CurrentNs:     medianB,
-				ChangePercent: change,
-				IsRegression:  change > threshold,
+				Name:             rA.Name,
+				Category:         rA.Category,
+				BaselineNs:       rA.P50Ns,
+				CurrentNs:        resultB.P50Ns,
+				ChangePercent:    change,
+				IsRegression:     change > threshold,
+				BaselineResultID: rA.ID,
+				CurrentResultID:  resultB.ID,
 			})
 		}
 	}
@@ -318,9 +318,9 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("name")
-	if name == "" {
-		http.Error(w, "name parameter required", http.StatusBadRequest)
+	resultID, err := strconv.ParseInt(r.URL.Query().Get("result_id"), 10, 64)
+	if err != nil || resultID <= 0 {
+		http.Error(w, "valid result_id parameter required", http.StatusBadRequest)
 		return
 	}
 
@@ -331,10 +331,12 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	branch := r.URL.Query().Get("branch")
-
-	trends, err := s.db.GetTrend(name, limit, branch)
+	trends, err := s.db.GetTrend(resultID, limit)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "result not found", http.StatusNotFound)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -436,20 +438,16 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		type resultKey struct {
-			Category string
-			Name     string
-		}
-		olderMap := make(map[resultKey]int64, len(olderResults))
+		olderMap := make(map[db.BenchmarkKey]int64, len(olderResults))
 		for _, r := range olderResults {
-			olderMap[resultKey{Category: r.Category, Name: r.Name}] = r.P50Ns
+			olderMap[db.BenchmarkKey{Category: r.Category, Name: r.Name}] = r.P50Ns
 		}
 
 		positiveCount := 0
 		compared := 0
 		logSum := 0.0
 		for _, newer := range newerResults {
-			older, ok := olderMap[resultKey{Category: newer.Category, Name: newer.Name}]
+			older, ok := olderMap[db.BenchmarkKey{Category: newer.Category, Name: newer.Name}]
 			if !ok || older <= 0 || newer.P50Ns <= 0 {
 				continue
 			}
@@ -588,21 +586,21 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(`SELECT DISTINCT name FROM results ORDER BY name`)
+	rows, err := s.db.Query(`SELECT DISTINCT category, name FROM results ORDER BY category, name`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer func() { _ = rows.Close() }()
 
-	var names []string
+	var keys []db.BenchmarkKey
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var key db.BenchmarkKey
+		if err := rows.Scan(&key.Category, &key.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		names = append(names, name)
+		keys = append(keys, key)
 	}
 	if err := rows.Err(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -610,7 +608,7 @@ func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(names); err != nil {
+	if err := json.NewEncoder(w).Encode(keys); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -912,7 +910,7 @@ func (s *Server) handleFlamegraphSVG(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cacheKey := result.Name
+	cacheKey := fmt.Sprintf("result:%d", result.ID)
 	legacyCacheKey := fmt.Sprintf("%d", result.ID)
 	if s.svgCache != nil {
 		if svg, ok := s.svgCache.Get(runID, cacheKey); ok {
@@ -954,36 +952,45 @@ func (s *Server) handleFlamegraphSVG(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.releaseFlamegraphSlot()
 
-	if fg, err := s.db.GetFlamegraph(runID, result.Name); err == nil {
-		svg, err := generateFlamegraphSVG(ctx, fg.FoldedStacks, result.Name)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if len(svg) > maxFlamegraphSize {
-			http.Error(w, "flamegraph too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		if err := s.db.InsertArtifactIfMissing(&db.Artifact{
-			ResultID:  result.ID,
-			Kind:      flamegraphSVGKind,
-			DataBlob:  svg,
-			Metadata:  "{}",
-			CreatedAt: time.Now().UTC().Format(time.RFC3339),
-		}); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		if s.svgCache != nil {
-			_ = s.svgCache.Put(runID, cacheKey, svg)
-		}
-		w.Header().Set("Content-Type", "image/svg+xml")
-		_, _ = w.Write(svg)
-		return
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	var sameNameCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM results WHERE run_id = ? AND name = ?`, runID, result.Name).Scan(&sameNameCount); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if sameNameCount == 1 {
+		fg, err := s.db.GetFlamegraph(runID, result.Name)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err == nil {
+			svg, err := generateFlamegraphSVG(ctx, fg.FoldedStacks, result.Name)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if len(svg) > maxFlamegraphSize {
+				http.Error(w, "flamegraph too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			if err := s.db.InsertArtifactIfMissing(&db.Artifact{
+				ResultID:  result.ID,
+				Kind:      flamegraphSVGKind,
+				DataBlob:  svg,
+				Metadata:  "{}",
+				CreatedAt: time.Now().UTC().Format(time.RFC3339),
+			}); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			if s.svgCache != nil {
+				_ = s.svgCache.Put(runID, cacheKey, svg)
+			}
+			w.Header().Set("Content-Type", "image/svg+xml")
+			_, _ = w.Write(svg)
+			return
+		}
 	}
 
 	profileArtifact, err := s.db.GetArtifact(result.ID, cpuProfileKind)
@@ -1077,7 +1084,7 @@ func (s *Server) handleCallgraphSVG(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cacheKey := "callgraph:" + result.Name
+	cacheKey := fmt.Sprintf("callgraph:result:%d", result.ID)
 	legacyCacheKey := fmt.Sprintf("callgraph:%d", result.ID)
 	if s.svgCache != nil {
 		if svg, ok := s.svgCache.Get(runID, cacheKey); ok {
@@ -1456,37 +1463,31 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	// Get comparable runs window.
 	// For feature branches, use main history as the baseline so we can detect
 	// regressions even if the branch only has one run.
+	targetRun, err := s.db.GetRun(runID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "run not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	branch = targetRun.Branch
+	if branch == "" {
+		branch = "main"
+	}
+
 	var runs []db.Run
 	isFeatureBranch := branch != "main"
 
 	if isFeatureBranch {
 		// Get the branch run itself.
-		branchRun, err := s.db.GetRun(runID)
+		mainRuns, err := s.db.GetComparableMainRunsWindow(runID, window-1)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-
-		// Get the latest main run to anchor the history window.
-		mainRun, err := s.db.GetLatestRunForBranch("main")
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				// No main runs at all — can't build a baseline.
-				runs = []db.Run{*branchRun}
-			} else {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		} else {
-			// Fetch main-branch history.
-			mainRuns, err := s.db.GetComparableRunsWindow(mainRun.ID, window)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			// Branch run first (newest), then main history (newest-first).
-			runs = append([]db.Run{*branchRun}, mainRuns...)
-		}
+		runs = append([]db.Run{*targetRun}, mainRuns...)
 	} else {
 		var err error
 		runs, err = s.db.GetComparableRunsWindow(runID, window)
@@ -1521,7 +1522,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get all benchmark names across these runs
-	benchmarkNames, err := s.db.GetDistinctBenchmarkNames(runIDs)
+	benchmarkKeys, err := s.db.GetDistinctBenchmarkKeys(runIDs)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1562,20 +1563,16 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			return shiftMetrics{}, err
 		}
 
-		type resultKey struct {
-			Category string
-			Name     string
-		}
-		olderMap := make(map[resultKey]int64, len(olderResults))
+		olderMap := make(map[db.BenchmarkKey]int64, len(olderResults))
 		for _, r := range olderResults {
-			olderMap[resultKey{Category: r.Category, Name: r.Name}] = r.P50Ns
+			olderMap[db.BenchmarkKey{Category: r.Category, Name: r.Name}] = r.P50Ns
 		}
 
 		positiveCount := 0
 		compared := 0
 		logSum := 0.0
 		for _, newer := range newerResults {
-			older, ok := olderMap[resultKey{Category: newer.Category, Name: newer.Name}]
+			older, ok := olderMap[db.BenchmarkKey{Category: newer.Category, Name: newer.Name}]
 			if !ok || older <= 0 || newer.P50Ns <= 0 {
 				continue
 			}
@@ -1715,9 +1712,9 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Analyze each benchmark
-	for _, benchName := range benchmarkNames {
+	for _, benchmarkKey := range benchmarkKeys {
 		// Get results for this benchmark across all runs
-		resultsMap, err := s.db.GetResultsForBenchmarkInRuns(benchName, runIDs)
+		resultsMap, err := s.db.GetResultsForBenchmarkInRuns(benchmarkKey, runIDs)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1990,7 +1987,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		EffectiveMinPoints:            effectiveMinPoints,
 		BaselineOffset:                baselineOffset,
 		DFMode:                        dfMode,
-		TotalBenchmarks:               len(benchmarkNames),
+		TotalBenchmarks:               len(benchmarkKeys),
 		AnalyzedBenchmarks:            analyzableBenchmarks,
 		InsufficientHistory:           analyzableBenchmarks == 0,
 		ExclusionCounts:               exclusionCounts,
@@ -2346,7 +2343,8 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 				"commit_hash_full": existingRun.CommitHashFull,
 				"run_date":         existingRun.RunDate,
 				"result_count":     count,
-				"result_ids":       resultIDs,
+				"result_ids":       legacyResultIDMap(resultIDs),
+				"results":          resultIDList(resultIDs),
 			})
 			return
 		}
@@ -2359,7 +2357,7 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		CommitMessage:  req.CommitMessage,
 		CommitDate:     req.CommitDate,
 		Branch:         req.Branch,
-		RunDate:        time.Now().Format(time.RFC3339),
+		RunDate:        time.Now().UTC().Format(time.RFC3339),
 		MachineID:      req.MachineID,
 		Notes:          req.Notes,
 		ZigOptimize:    req.ZigOptimize,
@@ -2374,7 +2372,7 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		_ = s.db.DeleteRun(runID)
 	}
 
-	resultIDs := make(map[string]int64, len(req.Results))
+	resultIDs := make(map[db.BenchmarkKey]int64, len(req.Results))
 
 	for _, rr := range req.Results {
 		result := &db.Result{
@@ -2400,8 +2398,7 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Use "category/name" as key since benchmark names may not be unique across categories
-		resultIDs[rr.Category+"/"+rr.Name] = resultID
+		resultIDs[db.BenchmarkKey{Category: rr.Category, Name: rr.Name}] = resultID
 
 		for _, ms := range rr.MemStats {
 			stat := &db.MemStat{
@@ -2425,7 +2422,8 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		"commit_hash_full": req.CommitHashFull,
 		"run_date":         run.RunDate,
 		"result_count":     len(req.Results),
-		"result_ids":       resultIDs,
+		"result_ids":       legacyResultIDMap(resultIDs),
+		"results":          resultIDList(resultIDs),
 	})
 }
 
@@ -2451,17 +2449,70 @@ func (s *Server) findExistingRun(commitHashFull, machineID, zigOptimize string) 
 	return &r, nil
 }
 
-// buildResultIDMap builds a "category/name" -> resultID map for a run.
-func (s *Server) buildResultIDMap(runID int64) (map[string]int64, error) {
+func (s *Server) buildResultIDMap(runID int64) (map[db.BenchmarkKey]int64, error) {
 	results, err := s.db.GetResultsForRun(runID)
 	if err != nil {
 		return nil, err
 	}
-	m := make(map[string]int64, len(results))
+	m := make(map[db.BenchmarkKey]int64, len(results))
 	for _, r := range results {
-		m[r.Category+"/"+r.Name] = r.ID
+		m[db.BenchmarkKey{Category: r.Category, Name: r.Name}] = r.ID
 	}
 	return m, nil
+}
+
+// legacyResultIDMap is retained for already deployed record clients. New
+// clients use the structured results list and never parse this encoding.
+func legacyResultIDMap(resultIDs map[db.BenchmarkKey]int64) map[string]int64 {
+	legacy := make(map[string]int64, len(resultIDs))
+	ambiguous := make(map[string]bool)
+	nameCounts := make(map[string]int, len(resultIDs))
+	for key := range resultIDs {
+		nameCounts[key.Name]++
+	}
+	for key, id := range resultIDs {
+		// Deployed clients selected profile artifacts by name alone. Omitting
+		// duplicate names makes those clients fail safely instead of misrouting.
+		if nameCounts[key.Name] > 1 {
+			continue
+		}
+		encoded := key.Category + "/" + key.Name
+		if _, exists := legacy[encoded]; exists {
+			delete(legacy, encoded)
+			ambiguous[encoded] = true
+			continue
+		}
+		if !ambiguous[encoded] {
+			legacy[encoded] = id
+		}
+	}
+	return legacy
+}
+
+func resultIDList(resultIDs map[db.BenchmarkKey]int64) []struct {
+	ID       int64  `json:"id"`
+	Category string `json:"category"`
+	Name     string `json:"name"`
+} {
+	results := make([]struct {
+		ID       int64  `json:"id"`
+		Category string `json:"category"`
+		Name     string `json:"name"`
+	}, 0, len(resultIDs))
+	for key, id := range resultIDs {
+		results = append(results, struct {
+			ID       int64  `json:"id"`
+			Category string `json:"category"`
+			Name     string `json:"name"`
+		}{ID: id, Category: key.Category, Name: key.Name})
+	}
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Category == results[j].Category {
+			return results[i].Name < results[j].Name
+		}
+		return results[i].Category < results[j].Category
+	})
+	return results
 }
 
 // handleUploadArtifact handles POST /api/runs/{id}/results/{rid}/artifacts

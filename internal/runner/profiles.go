@@ -12,9 +12,11 @@ import (
 	"strings"
 
 	"github.com/google/pprof/profile"
+
+	"opentui-bench/internal/db"
 )
 
-func CaptureCPUProfile(ctx context.Context, r CmdRunner, benchBin string, benchName string, freq int) ([]byte, string, error) {
+func CaptureCPUProfile(ctx context.Context, r CmdRunner, benchBin string, benchmark db.BenchmarkKey, freq int) ([]byte, string, error) {
 	tmp, err := os.MkdirTemp("", "opentui-prof-")
 	if err != nil {
 		return nil, "", err
@@ -25,7 +27,7 @@ func CaptureCPUProfile(ctx context.Context, r CmdRunner, benchBin string, benchN
 	pbGz := filepath.Join(tmp, "profile.pb.gz")
 
 	cmd1 := exec.CommandContext(ctx, "perf", "record", "-F", strconv.Itoa(freq), "-g", "-o", perfData, "--",
-		benchBin, "--bench", benchName, "--json")
+		benchBin, "--filter", benchmark.Category, "--bench", benchmark.Name, "--json")
 
 	out1, err := r.CombinedOutput(ctx, cmd1)
 	if err != nil {

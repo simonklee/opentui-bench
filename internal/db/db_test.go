@@ -1,12 +1,26 @@
 package db
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func insertTestResult(t *testing.T, database *DB, runID int64, category, name string) int64 {
+	t.Helper()
+	id, err := database.InsertResult(&Result{
+		RunID: runID, Category: category, Name: name,
+		MinNs: 1, AvgNs: 2, MaxNs: 3, P50Ns: 2, P95Ns: 3, P99Ns: 3,
+		TotalNs: 10, Iterations: 5, SampleCount: 1,
+	})
+	if err != nil {
+		t.Fatalf("insert result %s/%s: %v", category, name, err)
+	}
+	return id
+}
 
 func openTestDB(t *testing.T) *DB {
 	t.Helper()
@@ -379,6 +393,135 @@ func TestUpdateJobCommitHash(t *testing.T) {
 	}
 }
 
+func TestBenchmarkKeyQueriesKeepSameNameCategoriesSeparate(t *testing.T) {
+	database := openTestDB(t)
+	runID, err := database.InsertRun(&Run{CommitHash: "keys001", Branch: "main", RunDate: "2026-01-01T00:00:00Z", MachineID: "runner", ZigOptimize: "ReleaseFast"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID := insertTestResult(t, database, runID, "render", "same-name")
+	insertTestResult(t, database, runID, "layout", "same-name")
+
+	keys, err := database.GetDistinctBenchmarkKeys([]int64{runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantKeys := []BenchmarkKey{{Category: "layout", Name: "same-name"}, {Category: "render", Name: "same-name"}}
+	if len(keys) != len(wantKeys) {
+		t.Fatalf("got keys %v, want %v", keys, wantKeys)
+	}
+	for i := range wantKeys {
+		if keys[i] != wantKeys[i] {
+			t.Fatalf("keys[%d] = %#v, want %#v", i, keys[i], wantKeys[i])
+		}
+	}
+
+	results, err := database.GetResultsForBenchmarkInRuns(BenchmarkKey{Category: "render", Name: "same-name"}, []int64{runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[runID].ID != firstID {
+		t.Fatalf("exact results = %#v, want render result %d", results, firstID)
+	}
+}
+
+func TestResultIdentityIsUniqueWithinRun(t *testing.T) {
+	database := openTestDB(t)
+	runID, err := database.InsertRun(&Run{CommitHash: "unique1", RunDate: "2026-01-01T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertTestResult(t, database, runID, "render", "frame")
+	if _, err := database.InsertResult(&Result{
+		RunID: runID, Category: "render", Name: "frame",
+		MinNs: 1, AvgNs: 2, MaxNs: 3, TotalNs: 10, Iterations: 5,
+	}); err == nil {
+		t.Fatal("expected duplicate benchmark result to be rejected")
+	}
+}
+
+func TestOpenRejectsAmbiguousExistingResultDuplicates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "duplicates.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`
+		CREATE TABLE results (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, category TEXT NOT NULL, name TEXT NOT NULL);
+		INSERT INTO results(run_id, category, name) VALUES (1, 'render', 'frame'), (1, 'render', 'frame');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if database, err := Open(path); err == nil {
+		_ = database.Close()
+		t.Fatal("expected duplicate audit to reject database")
+	}
+}
+
+func TestUnknownMachineCohortIsIsolated(t *testing.T) {
+	database := openTestDB(t)
+	oldID, err := database.InsertRun(&Run{CommitHash: "legacy1", Branch: "main", RunDate: "2026-01-01T00:00:00Z", ZigOptimize: "ReleaseFast"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refID, err := database.InsertRun(&Run{CommitHash: "legacy2", Branch: "main", RunDate: "2026-01-02T00:00:00Z", ZigOptimize: "ReleaseFast"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs, err := database.GetComparableRunsWindow(refID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].ID != refID {
+		t.Fatalf("unknown-machine cohort = %v, want only reference %d (not %d)", runs, refID, oldID)
+	}
+}
+
+func TestFeatureTrendUsesExactCompatibleMainHistoryAsOfCutoff(t *testing.T) {
+	database := openTestDB(t)
+	insertRun := func(hash, branch, date, machine string) int64 {
+		t.Helper()
+		id, err := database.InsertRun(&Run{CommitHash: hash, Branch: branch, RunDate: date, MachineID: machine, ZigOptimize: "ReleaseFast"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	pastMain := insertRun("mainpast", "main", "2026-01-01T00:00:00Z", "runner-a")
+	otherMachine := insertRun("mainother", "main", "2026-01-02T00:00:00Z", "runner-b")
+	feature := insertRun("feature1", "feature/x", "2026-01-03T00:00:00Z", "runner-a")
+	futureMain := insertRun("mainfuture", "main", "2026-01-04T00:00:00Z", "runner-a")
+	pastResult := insertTestResult(t, database, pastMain, "render", "frame")
+	insertTestResult(t, database, pastMain, "layout", "frame")
+	insertTestResult(t, database, otherMachine, "render", "frame")
+	featureResult := insertTestResult(t, database, feature, "render", "frame")
+	insertTestResult(t, database, futureMain, "render", "frame")
+
+	mainRuns, err := database.GetComparableMainRunsWindow(feature, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mainRuns) != 1 || mainRuns[0].ID != pastMain {
+		t.Fatalf("feature main history = %v, want only run %d", mainRuns, pastMain)
+	}
+
+	trend, err := database.GetTrend(featureResult, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trend) != 2 {
+		t.Fatalf("trend has %d points, want 2: %#v", len(trend), trend)
+	}
+	if trend[0].Result.ID != featureResult || trend[1].Result.ID != pastResult {
+		t.Fatalf("trend result IDs = [%d, %d], want [%d, %d]", trend[0].Result.ID, trend[1].Result.ID, featureResult, pastResult)
+	}
+}
+
 func TestGetComparableRunsWindowMainIncludesLegacyBranchRuns(t *testing.T) {
 	db := openTestDB(t)
 
@@ -480,6 +623,34 @@ func TestGetComparableRunsWindowLegacyReferenceIncludesMain(t *testing.T) {
 		if runs[i].ID != want[i] {
 			t.Fatalf("runs[%d].id = %d, want %d", i, runs[i].ID, want[i])
 		}
+	}
+}
+
+func TestGetComparableMainRunsWindowOrdersRFC3339ByInstant(t *testing.T) {
+	database := openTestDB(t)
+
+	insertRun := func(hash, branch, runDate string) int64 {
+		t.Helper()
+		id, err := database.InsertRun(&Run{
+			CommitHash: hash, Branch: branch, RunDate: runDate,
+			MachineID: "runner", ZigOptimize: "ReleaseFast",
+		})
+		if err != nil {
+			t.Fatalf("insert run %s: %v", hash, err)
+		}
+		return id
+	}
+
+	priorID := insertRun("prior", "main", "2026-10-25T02:50:00+02:00")            // 00:50 UTC
+	featureID := insertRun("feature", "feature/dst", "2026-10-25T02:10:00+01:00") // 01:10 UTC
+	_ = insertRun("future", "main", "2026-10-25T01:20:00Z")
+
+	runs, err := database.GetComparableMainRunsWindow(featureID, 10)
+	if err != nil {
+		t.Fatalf("get comparable main runs: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != priorID {
+		t.Fatalf("comparable run IDs = %+v, want [%d]", runs, priorID)
 	}
 }
 

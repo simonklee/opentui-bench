@@ -25,7 +25,7 @@ const (
 	// Bump this when cached regression history payloads become incompatible.
 	// Do not include the executable hash in cache keys: unrelated rebuilds and
 	// embedded asset changes would force the landing page down the cold path.
-	regressionCacheAlgorithmVersion = "v2"
+	regressionCacheAlgorithmVersion = "v3"
 )
 
 type regressionSnapshotItem struct {

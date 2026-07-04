@@ -335,10 +335,10 @@ func normalizeOptions(opts Options) Options {
 }
 
 func listReplayRunIDs(database *db.DB, branch string) ([]int64, error) {
-	query := "SELECT id FROM runs WHERE branch = ? ORDER BY run_date ASC"
+	query := "SELECT id FROM runs WHERE branch = ? ORDER BY julianday(run_date) ASC, id ASC"
 	args := []interface{}{branch}
 	if branch == "main" {
-		query = "SELECT id FROM runs WHERE branch = 'main' OR branch IS NULL OR branch = '' ORDER BY run_date ASC"
+		query = "SELECT id FROM runs WHERE branch = 'main' OR branch IS NULL OR branch = '' ORDER BY julianday(run_date) ASC, id ASC"
 		args = nil
 	}
 
@@ -378,7 +378,7 @@ func detectKnownShiftRuns(database *db.DB, replayRunIDs []int64, opts Options) (
 
 	var shiftRuns []int64
 	for _, runID := range replayRunIDs {
-		runs, err := database.GetComparableRunsWindow(runID, 2)
+		runs, err := comparableRunsForTarget(database, runID, 2)
 		if err != nil {
 			return nil, err
 		}
@@ -400,7 +400,7 @@ func detectKnownShiftRuns(database *db.DB, replayRunIDs []int64, opts Options) (
 func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, error) {
 	ctx := runContext{RunID: runID}
 
-	runs, err := database.GetComparableRunsWindow(runID, opts.Window)
+	runs, err := comparableRunsForTarget(database, runID, opts.Window)
 	if err != nil {
 		return ctx, err
 	}
@@ -415,7 +415,7 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 		runAgeByID[run.ID] = i
 	}
 
-	benchmarkNames, err := database.GetDistinctBenchmarkNames(runIDs)
+	benchmarkKeys, err := database.GetDistinctBenchmarkKeys(runIDs)
 	if err != nil {
 		return ctx, err
 	}
@@ -462,8 +462,8 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 		}
 	}
 
-	for _, benchName := range benchmarkNames {
-		resultsMap, err := database.GetResultsForBenchmarkInRuns(benchName, runIDs)
+	for _, benchmarkKey := range benchmarkKeys {
+		resultsMap, err := database.GetResultsForBenchmarkInRuns(benchmarkKey, runIDs)
 		if err != nil {
 			return ctx, err
 		}
@@ -555,6 +555,26 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 
 	ctx.AnalyzableBenchmarks = len(ctx.Benchmarks)
 	return ctx, nil
+}
+
+func comparableRunsForTarget(database *db.DB, runID int64, window int) ([]db.Run, error) {
+	target, err := database.GetRun(runID)
+	if err != nil {
+		return nil, err
+	}
+	if target.Branch == "" || target.Branch == "main" {
+		return database.GetComparableRunsWindow(runID, window)
+	}
+
+	historyWindow := window - 1
+	if historyWindow < 0 {
+		historyWindow = 0
+	}
+	mainRuns, err := database.GetComparableMainRunsWindow(runID, historyWindow)
+	if err != nil {
+		return nil, err
+	}
+	return append([]db.Run{*target}, mainRuns...), nil
 }
 
 func evaluateConfigForRun(ctx runContext, cfg Config, opts Options) runOutcome {
@@ -878,20 +898,16 @@ func computeShiftMetrics(getResults func(int64) ([]db.Result, error), newerRunID
 		return shiftMetrics{}, err
 	}
 
-	type resultKey struct {
-		Category string
-		Name     string
-	}
-	olderMap := make(map[resultKey]int64, len(olderResults))
+	olderMap := make(map[db.BenchmarkKey]int64, len(olderResults))
 	for _, result := range olderResults {
-		olderMap[resultKey{Category: result.Category, Name: result.Name}] = result.P50Ns
+		olderMap[db.BenchmarkKey{Category: result.Category, Name: result.Name}] = result.P50Ns
 	}
 
 	compared := 0
 	positive := 0
 	logSum := 0.0
 	for _, newer := range newerResults {
-		older, ok := olderMap[resultKey{Category: newer.Category, Name: newer.Name}]
+		older, ok := olderMap[db.BenchmarkKey{Category: newer.Category, Name: newer.Name}]
 		if !ok || older <= 0 || newer.P50Ns <= 0 {
 			continue
 		}

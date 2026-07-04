@@ -94,7 +94,7 @@ func TestRegressionCacheGenerationKeyIsStable(t *testing.T) {
 	server := &Server{}
 
 	got := server.regressionCacheGenerationKey("main", 30, 5, 3, regressionDFModeBaseline, "self")
-	const want = "4d04bf945ae93ab72caf03d2112da50e5324e76eb5317cb7f2f882aeab19d5ec"
+	const want = "05d4fb0033d45b86164c59b1d18290b33e2e959f51b73b17efaca5d3aa9f3c15"
 	if got != want {
 		t.Fatalf("generation key = %q, want %q", got, want)
 	}
@@ -123,5 +123,41 @@ func TestRegressionHistoryReturnsWhenCacheWriteFails(t *testing.T) {
 	}
 	if response.ComputedRuns != 1 {
 		t.Fatalf("computed_runs = %d, want 1", response.ComputedRuns)
+	}
+}
+
+func TestTrendRejectsFuzzyNameRequests(t *testing.T) {
+	server := &Server{db: openRegressionHistoryTestDB(t)}
+	req := httptest.NewRequest(http.MethodGet, "/api/trend?name=frame", nil)
+	rec := httptest.NewRecorder()
+
+	server.handleTrend(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%q", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestLegacyResultIDMapOmitsAmbiguousCompositeKeys(t *testing.T) {
+	resultIDs := map[db.BenchmarkKey]int64{
+		{Category: "a", Name: "b/c"}:            1,
+		{Category: "a/b", Name: "c"}:            2,
+		{Category: "safe", Name: "key"}:         3,
+		{Category: "first", Name: "duplicate"}:  4,
+		{Category: "second", Name: "duplicate"}: 5,
+	}
+
+	legacy := legacyResultIDMap(resultIDs)
+	if _, ok := legacy["a/b/c"]; ok {
+		t.Fatal("ambiguous legacy key must be omitted")
+	}
+	if legacy["safe/key"] != 3 {
+		t.Fatalf("safe legacy key = %d, want 3", legacy["safe/key"])
+	}
+	if _, ok := legacy["first/duplicate"]; ok {
+		t.Fatal("duplicate benchmark names must be omitted for name-only clients")
+	}
+	if _, ok := legacy["second/duplicate"]; ok {
+		t.Fatal("duplicate benchmark names must be omitted for name-only clients")
 	}
 }

@@ -173,21 +173,13 @@ func recordRemote(ctx context.Context, cfg runner.RunConfig, apiURL, apiKey stri
 	var uploadErrors []string
 	uploaded := 0
 	for _, art := range artifacts {
-		// Look up the result ID for this artifact's benchmark
-		key := ""
-		for _, pr := range parsed.Results {
-			if pr.Name == art.BenchmarkName {
-				key = pr.Category + "/" + pr.Name
-				break
-			}
-		}
-		resultID, ok := resultIDs[key]
+		resultID, ok := resultIDs[art.Benchmark]
 		if !ok {
-			uploadErrors = append(uploadErrors, fmt.Sprintf("no result ID for artifact %s (key=%s)", art.BenchmarkName, key))
+			uploadErrors = append(uploadErrors, fmt.Sprintf("no result ID for artifact %s/%s", art.Benchmark.Category, art.Benchmark.Name))
 			continue
 		}
 		if err := remote.UploadArtifact(runID, resultID, art); err != nil {
-			uploadErrors = append(uploadErrors, fmt.Sprintf("upload %s: %v", art.BenchmarkName, err))
+			uploadErrors = append(uploadErrors, fmt.Sprintf("upload %s/%s: %v", art.Benchmark.Category, art.Benchmark.Name, err))
 			continue
 		}
 		uploaded++
@@ -357,13 +349,9 @@ func compareCmd() *cobra.Command {
 			fmt.Printf("Current:  %s (%s)\n", run2.CommitHash, shortDate(run2.RunDate))
 			fmt.Printf("Threshold: %.1f%%\n\n", threshold)
 
-			type resultKey struct {
-				Category string
-				Name     string
-			}
-			results2Map := make(map[resultKey]db.Result)
+			results2Map := make(map[db.BenchmarkKey]db.Result)
 			for _, r := range results2 {
-				results2Map[resultKey{Category: r.Category, Name: r.Name}] = r
+				results2Map[db.BenchmarkKey{Category: r.Category, Name: r.Name}] = r
 			}
 
 			fmt.Printf("%-50s %12s %12s %10s\n", "Benchmark", "Baseline", "Current", "Change")
@@ -376,7 +364,7 @@ func compareCmd() *cobra.Command {
 					continue
 				}
 
-				r2, ok := results2Map[resultKey{Category: r1.Category, Name: r1.Name}]
+				r2, ok := results2Map[db.BenchmarkKey{Category: r1.Category, Name: r1.Name}]
 				if !ok {
 					continue
 				}
@@ -436,7 +424,7 @@ func trendCmd() *cobra.Command {
 	var limit int
 
 	cmd := &cobra.Command{
-		Use:   "trend [benchmark_name]",
+		Use:   "trend [result_id]",
 		Short: "Show performance trend over time",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -446,13 +434,17 @@ func trendCmd() *cobra.Command {
 			}
 			defer cleanup()
 
-			trends, err := database.GetTrend(args[0], limit, "")
+			resultID, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil || resultID <= 0 {
+				return fmt.Errorf("result_id must be a positive integer")
+			}
+			trends, err := database.GetTrend(resultID, limit)
 			if err != nil {
 				return err
 			}
 
 			if len(trends) == 0 {
-				fmt.Printf("No results found matching '%s'\n", args[0])
+				fmt.Printf("No trend found for result %d\n", resultID)
 				return nil
 			}
 
@@ -1270,20 +1262,13 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 	// Upload artifacts
 	var uploadErrors []string
 	for _, art := range artifacts {
-		key := ""
-		for _, pr := range parsed.Results {
-			if pr.Name == art.BenchmarkName {
-				key = pr.Category + "/" + pr.Name
-				break
-			}
-		}
-		resultID, ok := resultIDs[key]
+		resultID, ok := resultIDs[art.Benchmark]
 		if !ok {
-			uploadErrors = append(uploadErrors, fmt.Sprintf("no result ID for artifact %s", art.BenchmarkName))
+			uploadErrors = append(uploadErrors, fmt.Sprintf("no result ID for artifact %s/%s", art.Benchmark.Category, art.Benchmark.Name))
 			continue
 		}
 		if err := remote.UploadArtifact(runID, resultID, art); err != nil {
-			uploadErrors = append(uploadErrors, fmt.Sprintf("upload %s: %v", art.BenchmarkName, err))
+			uploadErrors = append(uploadErrors, fmt.Sprintf("upload %s/%s: %v", art.Benchmark.Category, art.Benchmark.Name, err))
 		}
 	}
 	if len(uploadErrors) > 0 {

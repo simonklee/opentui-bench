@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS results (
 CREATE INDEX IF NOT EXISTS idx_results_run ON results(run_id);
 CREATE INDEX IF NOT EXISTS idx_results_name ON results(name);
 CREATE INDEX IF NOT EXISTS idx_results_category ON results(category);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_results_run_benchmark ON results(run_id, category, name);
+CREATE INDEX IF NOT EXISTS idx_results_benchmark_run ON results(category, name, run_id);
 
 -- Memory statistics (optional, per-result)
 CREATE TABLE IF NOT EXISTS mem_stats (
