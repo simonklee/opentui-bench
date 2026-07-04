@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -25,32 +23,26 @@ const (
 	// Bump this when cached regression history payloads become incompatible.
 	// Do not include the executable hash in cache keys: unrelated rebuilds and
 	// embedded asset changes would force the landing page down the cold path.
-	regressionCacheAlgorithmVersion = "v3"
+	regressionCacheAlgorithmVersion = "v4-causal"
 )
 
 type regressionSnapshotItem struct {
-	Name                     string   `json:"name"`
-	Category                 string   `json:"category"`
-	LatestResultID           int64    `json:"latest_result_id"`
-	LatestCILowerNs          int64    `json:"latest_ci_lower_ns"`
-	LatestCIUpperNs          int64    `json:"latest_ci_upper_ns"`
-	BaselineRunID            int64    `json:"baseline_run_id"`
-	BaselineCommitHash       string   `json:"baseline_commit_hash"`
-	BaselineCommitHashFull   string   `json:"baseline_commit_hash_full"`
-	BaselineCILowerNs        int64    `json:"baseline_ci_lower_ns"`
-	BaselineCIUpperNs        int64    `json:"baseline_ci_upper_ns"`
-	ChangePercent            float64  `json:"change_percent"`
-	MinEffectPercent         float64  `json:"min_effect_percent"`
-	PValue                   *float64 `json:"p_value,omitempty"`
-	AdjustedPValue           *float64 `json:"adjusted_p_value,omitempty"`
-	DetectionMethod          string   `json:"detection_method"`
-	Alpha                    float64  `json:"alpha"`
-	IntroducedRunID          *int64   `json:"introduced_run_id,omitempty"`
-	IntroducedResultID       *int64   `json:"introduced_result_id,omitempty"`
-	IntroducedCommitHash     *string  `json:"introduced_commit_hash,omitempty"`
-	IntroducedCommitHashFull *string  `json:"introduced_commit_hash_full,omitempty"`
-	IntroducedCommitMessage  *string  `json:"introduced_commit_message,omitempty"`
-	IntroducedRunDate        *string  `json:"introduced_run_date,omitempty"`
+	Name                   string   `json:"name"`
+	Category               string   `json:"category"`
+	LatestResultID         int64    `json:"latest_result_id"`
+	LatestCILowerNs        int64    `json:"latest_ci_lower_ns"`
+	LatestCIUpperNs        int64    `json:"latest_ci_upper_ns"`
+	BaselineRunID          int64    `json:"baseline_run_id"`
+	BaselineCommitHash     string   `json:"baseline_commit_hash"`
+	BaselineCommitHashFull string   `json:"baseline_commit_hash_full"`
+	BaselineCILowerNs      int64    `json:"baseline_ci_lower_ns"`
+	BaselineCIUpperNs      int64    `json:"baseline_ci_upper_ns"`
+	ChangePercent          float64  `json:"change_percent"`
+	MinEffectPercent       float64  `json:"min_effect_percent"`
+	PValue                 *float64 `json:"p_value,omitempty"`
+	AdjustedPValue         *float64 `json:"adjusted_p_value,omitempty"`
+	DetectionMethod        string   `json:"detection_method"`
+	Alpha                  float64  `json:"alpha"`
 }
 
 type regressionSnapshot struct {
@@ -62,7 +54,6 @@ type regressionSnapshot struct {
 	EffectiveMinPoints            int                      `json:"effective_min_points"`
 	BaselineOffset                int                      `json:"baseline_offset"`
 	DFMode                        string                   `json:"df_mode"`
-	EpochRunID                    *int64                   `json:"epoch_run_id,omitempty"`
 	TotalBenchmarks               int                      `json:"total_benchmarks"`
 	AnalyzedBenchmarks            int                      `json:"analyzed_benchmarks"`
 	InsufficientHistory           bool                     `json:"insufficient_history"`
@@ -89,7 +80,6 @@ type regressionHistoryEntry struct {
 	MinPoints                     int                      `json:"min_points"`
 	EffectiveMinPoints            int                      `json:"effective_min_points"`
 	BaselineOffset                int                      `json:"baseline_offset"`
-	EpochRunID                    *int64                   `json:"epoch_run_id,omitempty"`
 	TotalBenchmarks               int                      `json:"total_benchmarks"`
 	AnalyzedBenchmarks            int                      `json:"analyzed_benchmarks"`
 	InsufficientHistory           bool                     `json:"insufficient_history"`
@@ -174,13 +164,7 @@ func (s *Server) handleRegressionsHistory(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	baselineAnchor, err := s.regressionCacheBaselineAnchor(branch)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	generationKey := s.regressionCacheGenerationKey(branch, window, minPoints, baselineOffset, dfMode, baselineAnchor)
+	generationKey := s.regressionCacheGenerationKey(branch, window, minPoints, baselineOffset, dfMode)
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	entries := make([]regressionHistoryEntry, 0, len(runs))
@@ -266,7 +250,6 @@ func (s *Server) handleRegressionsHistory(w http.ResponseWriter, r *http.Request
 			MinPoints:                     snapshot.MinPoints,
 			EffectiveMinPoints:            snapshot.EffectiveMinPoints,
 			BaselineOffset:                snapshot.BaselineOffset,
-			EpochRunID:                    snapshot.EpochRunID,
 			TotalBenchmarks:               snapshot.TotalBenchmarks,
 			AnalyzedBenchmarks:            snapshot.AnalyzedBenchmarks,
 			InsufficientHistory:           snapshot.InsufficientHistory,
@@ -327,16 +310,15 @@ func (s *Server) computeRegressionsSnapshot(ctx context.Context, runID int64, br
 	return payload, nil
 }
 
-func (s *Server) regressionCacheGenerationKey(branch string, window int, minPoints int, baselineOffset int, dfMode string, baselineAnchor string) string {
+func (s *Server) regressionCacheGenerationKey(branch string, window int, minPoints int, baselineOffset int, dfMode string) string {
 	cacheSeed := fmt.Sprintf(
-		"algorithm=%s|branch=%s|window=%d|min_points=%d|baseline_offset=%d|df_mode=%s|baseline_anchor=%s|alpha=%g|fdr=%g|min_abs_ns=%g|global_shift=%d,%g,%g|change_point=%d,%g,%d,%d|default_df_mode=%s",
+		"algorithm=%s|branch=%s|window=%d|min_points=%d|baseline_offset=%d|df_mode=%s|alpha=%g|fdr=%g|min_abs_ns=%g|global_shift=%d,%g,%g|change_point=%d,%g,%d,%d|default_df_mode=%s",
 		regressionCacheAlgorithmVersion,
 		branch,
 		window,
 		minPoints,
 		baselineOffset,
 		dfMode,
-		baselineAnchor,
 		defaultAlpha,
 		defaultFDR,
 		defaultMinAbsoluteNs,
@@ -352,22 +334,6 @@ func (s *Server) regressionCacheGenerationKey(branch string, window int, minPoin
 
 	sum := sha256.Sum256([]byte(cacheSeed))
 	return hex.EncodeToString(sum[:])
-}
-
-func (s *Server) regressionCacheBaselineAnchor(branch string) (string, error) {
-	if branch == "main" || branch == "" {
-		return "self", nil
-	}
-
-	mainRun, err := s.db.GetLatestRunForBranch("main")
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "main:none", nil
-		}
-		return "", fmt.Errorf("get latest main run for regression cache anchor: %w", err)
-	}
-
-	return fmt.Sprintf("main:%d", mainRun.ID), nil
 }
 
 type inMemoryResponseWriter struct {

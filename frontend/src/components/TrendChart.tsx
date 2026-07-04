@@ -207,7 +207,6 @@ Chart.register(
 
 // Branch overlay color
 const BRANCH_COLOR = "#7c3aed"; // purple-600
-const PRE_EPOCH_COLOR = "#9ca3af"; // gray-400
 
 interface Props {
   data: TrendPoint[];
@@ -222,7 +221,6 @@ interface Props {
   overlayBranch?: string;
   range?: number;
   valueMode?: "absolute" | "index";
-  reasonFilter?: "all" | "compared" | "pre_epoch";
   currentRunId?: number;
   onPointClick?: (runId: number, resultId: number) => void;
   baselineCILowerNs?: number;
@@ -341,23 +339,9 @@ function buildLabels(points: TrendPoint[]): string[][] {
   return points.map(buildLabel);
 }
 
-function humanizeReason(reason?: string): string {
-  if (!reason) return "unknown";
-  if (reason === "pre_epoch_not_compared") return "pre-epoch context point";
-  if (reason === "insufficient_baseline_history") return "insufficient baseline history";
-  if (reason === "baseline_reference") return "baseline reference point";
-  return reason.replaceAll("_", " ");
-}
-
 const TrendChart: Component<Props> = (props) => {
   const hasOverlay = () => !!props.overlayData && props.overlayData.length > 0;
   const isIndexMode = () => props.valueMode === "index";
-  const passesReasonFilter = (p: TrendPoint) => {
-    const filter = props.reasonFilter || "all";
-    if (filter === "all") return true;
-    if (filter === "pre_epoch") return p.regression_reason === "pre_epoch_not_compared";
-    return p.regression_reason !== "pre_epoch_not_compared";
-  };
 
   const toIndex = (value: number | null | undefined, anchorNs: number | null) => {
     if (value === null || value === undefined || anchorNs === null || anchorNs <= 0) {
@@ -386,7 +370,7 @@ const TrendChart: Component<Props> = (props) => {
 
   const showData = () => {
     const limit = props.range || 100;
-    return (props.data || []).filter(passesReasonFilter).slice(0, limit).reverse();
+    return (props.data || []).slice(0, limit).reverse();
   };
 
   // Cache the merged timeline so it's computed once per render
@@ -394,14 +378,10 @@ const TrendChart: Component<Props> = (props) => {
   let cachedMerged: ReturnType<typeof buildMergedTimeline> | null = null;
   const getMergedTimeline = () => {
     const limit = props.range || 100;
-    const key = `${props.data?.length}-${props.overlayData?.length}-${limit}-${props.reasonFilter || "all"}`;
+    const key = `${props.data?.length}-${props.overlayData?.length}-${limit}`;
     if (key !== cachedMergedKey || !cachedMerged) {
       cachedMergedKey = key;
-      cachedMerged = buildMergedTimeline(
-        (props.data || []).filter(passesReasonFilter),
-        (props.overlayData || []).filter(passesReasonFilter),
-        limit,
-      );
+      cachedMerged = buildMergedTimeline(props.data || [], props.overlayData || [], limit);
     }
     return cachedMerged;
   };
@@ -469,27 +449,15 @@ const TrendChart: Component<Props> = (props) => {
       // Main point styling
       const mainBgColors = mainData.map((d) => {
         if (!d) return "transparent";
-        if (d.regression_reason === "pre_epoch_not_compared") return "#f3f4f6";
-        if (d.regression_status === "regressed") return "#cf222e";
-        if (d.regression_status === "baseline") return "#1a7f37";
-        if (d.regression_status === "insufficient") return "#d1d5db";
         return "#ffffff";
       });
       const mainBorderColors = mainData.map((d) => {
         if (!d) return "transparent";
-        if (d.regression_reason === "pre_epoch_not_compared") return PRE_EPOCH_COLOR;
-        if (d.regression_status === "regressed") return "#cf222e";
-        if (d.regression_status === "baseline") return "#1a7f37";
-        if (d.regression_status === "insufficient") return "#9ca3af";
         return "#000000";
       });
       const mainRadii = mainData.map((d) => {
         if (!d) return 0;
-        if (d.regression_reason === "pre_epoch_not_compared") return 2;
-        if (d.regression_status === "regressed") return 6;
-        if (d.regression_status === "baseline") return 5;
-        if (d.regression_status === "insufficient") return 4;
-        return 3;
+        return d.run_id === currentRunId ? 5 : 3;
       });
 
       // Branch series values (null where no branch point)
@@ -620,26 +588,12 @@ const TrendChart: Component<Props> = (props) => {
     );
 
     const pointBgColors = data.map((d) => {
-      if (d.regression_reason === "pre_epoch_not_compared") return "#f3f4f6";
-      if (d.regression_status === "regressed") return "#cf222e";
-      if (d.regression_status === "baseline") return "#1a7f37";
       if (d.run_id === currentRunId) return "#000000";
-      if (d.regression_status === "insufficient") return "#d1d5db";
       return "#ffffff";
     });
-    const pointBorderColors = data.map((d) => {
-      if (d.regression_reason === "pre_epoch_not_compared") return PRE_EPOCH_COLOR;
-      if (d.regression_status === "regressed") return "#cf222e";
-      if (d.regression_status === "baseline") return "#1a7f37";
-      if (d.regression_status === "insufficient") return "#9ca3af";
-      return "#000000";
-    });
+    const pointBorderColors = data.map(() => "#000000");
     const pointRadii = data.map((d) => {
-      if (d.regression_reason === "pre_epoch_not_compared") return 2;
-      if (d.regression_status === "regressed") return 6;
-      if (d.regression_status === "baseline") return 5;
       if (d.run_id === currentRunId) return 5;
-      if (d.regression_status === "insufficient") return 4;
       return 3;
     });
 
@@ -846,21 +800,6 @@ const TrendChart: Component<Props> = (props) => {
                 );
               }
             }
-            if (d.regression_status === "regressed" && d.change_percent !== undefined) {
-              lines.push(`Regression: +${d.change_percent.toFixed(1)}% vs baseline`);
-            } else if (d.regression_status === "baseline") {
-              lines.push(`Status: Baseline`);
-              if (d.regression_reason) {
-                lines.push(`Reason: ${humanizeReason(d.regression_reason)}`);
-              }
-            } else if (d.regression_status === "insufficient") {
-              lines.push(`Status: Insufficient`);
-              if (d.regression_reason) {
-                lines.push(`Reason: ${humanizeReason(d.regression_reason)}`);
-              }
-            } else if (d.regression_reason === "pre_epoch_not_compared") {
-              lines.push(`Epoch: ${humanizeReason(d.regression_reason)}`);
-            }
             if (isBranch && d.branch) {
               lines.push(`Branch: ${d.branch}`);
             }
@@ -919,12 +858,6 @@ const TrendChart: Component<Props> = (props) => {
 
   const hasChangePoints = () => (props.changePoints?.length ?? 0) > 0;
   const hasGlobalShifts = () => (props.globalShifts?.length ?? 0) > 0;
-  const reasonFilterLabel = () => {
-    const filter = props.reasonFilter || "all";
-    if (filter === "compared") return "compared points";
-    if (filter === "pre_epoch") return "pre-epoch points";
-    return "all points";
-  };
 
   return (
     <div class="relative w-full h-full flex flex-col">
@@ -973,18 +906,6 @@ const TrendChart: Component<Props> = (props) => {
             <span>Index mode (100 = epoch anchor)</span>
           </Show>
         </Show>
-        <span>Filter: {reasonFilterLabel()}</span>
-        <span class="flex items-center gap-1">
-          <span class="inline-block w-2 h-2 rounded-full border border-black bg-white"></span>
-          Compared points
-        </span>
-        <span class="flex items-center gap-1">
-          <span
-            class="inline-block w-2 h-2 rounded-full border"
-            style={`border-color: ${PRE_EPOCH_COLOR}; background: #f3f4f6;`}
-          ></span>
-          Pre-epoch context
-        </span>
       </div>
     </div>
   );

@@ -99,11 +99,10 @@ type changePointCandidate struct {
 }
 
 type benchmarkContext struct {
-	Category  string
-	Latest    stats.RunStat
-	Baseline  *stats.BaselineStats
-	ChangePct float64
-	CP        *changePointCandidate
+	Category     string
+	Target       stats.OrderedRunStat
+	Observations []stats.OrderedRunStat
+	CP           *changePointCandidate
 }
 
 type runContext struct {
@@ -378,7 +377,7 @@ func detectKnownShiftRuns(database *db.DB, replayRunIDs []int64, opts Options) (
 
 	var shiftRuns []int64
 	for _, runID := range replayRunIDs {
-		runs, err := comparableRunsForTarget(database, runID, 2)
+		runs, err := comparableRunsForTarget(database, runID, 2, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -400,7 +399,7 @@ func detectKnownShiftRuns(database *db.DB, replayRunIDs []int64, opts Options) (
 func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, error) {
 	ctx := runContext{RunID: runID}
 
-	runs, err := comparableRunsForTarget(database, runID, opts.Window)
+	runs, err := comparableRunsForTarget(database, runID, opts.Window, opts.BaselineOffset)
 	if err != nil {
 		return ctx, err
 	}
@@ -409,10 +408,8 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 	}
 
 	runIDs := make([]int64, len(runs))
-	runAgeByID := make(map[int64]int)
 	for i, run := range runs {
 		runIDs[i] = run.ID
-		runAgeByID[run.ID] = i
 	}
 
 	benchmarkKeys, err := database.GetDistinctBenchmarkKeys(runIDs)
@@ -420,7 +417,7 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 		return ctx, err
 	}
 
-	latestRunID := runs[0].ID
+	latestRunID := runID
 	resultsCache := make(map[int64][]db.Result)
 	getResults := func(id int64) ([]db.Result, error) {
 		if cached, ok := resultsCache[id]; ok {
@@ -434,7 +431,6 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 		return fetched, nil
 	}
 
-	latestShiftRunID := int64(0)
 	if len(runs) >= 2 {
 		metrics, err := computeShiftMetrics(getResults, runs[0].ID, runs[1].ID, opts)
 		if err != nil {
@@ -442,26 +438,6 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 		}
 		ctx.GlobalShiftDetected = metrics.detected
 	}
-	for i := 0; i+1 < len(runs); i++ {
-		metrics, err := computeShiftMetrics(getResults, runs[i].ID, runs[i+1].ID, opts)
-		if err != nil {
-			return ctx, err
-		}
-		if metrics.detected {
-			latestShiftRunID = runs[i].ID
-			break
-		}
-	}
-
-	effectiveMinPoints := opts.MinPoints
-	if latestShiftRunID != 0 {
-		if shiftAge, ok := runAgeByID[latestShiftRunID]; ok && shiftAge <= opts.BaselineOffset+opts.MinPoints {
-			if effectiveMinPoints > 3 {
-				effectiveMinPoints = 3
-			}
-		}
-	}
-
 	for _, benchmarkKey := range benchmarkKeys {
 		resultsMap, err := database.GetResultsForBenchmarkInRuns(benchmarkKey, runIDs)
 		if err != nil {
@@ -475,55 +451,41 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 		if latestResult.SampleCount < 2 || latestResult.StdDevNs <= 0 {
 			continue
 		}
+		benchmarkTrends, err := database.GetTrend(latestResult.ID, opts.Window+opts.BaselineOffset+1)
+		if err != nil {
+			return ctx, err
+		}
 
-		var history []stats.RunStat
-		for _, run := range runs {
+		var observations []stats.OrderedRunStat
+		var targetObservation stats.OrderedRunStat
+		benchmarkRunAgeByID := make(map[int64]int, len(benchmarkTrends))
+		for age, trend := range benchmarkTrends {
+			run := trend.Run
+			result := trend.Result
+			runDate, err := time.Parse(time.RFC3339Nano, run.RunDate)
+			if err != nil {
+				return ctx, fmt.Errorf("parse run %d date: %w", run.ID, err)
+			}
+			observation := stats.OrderedRunStat{RunDate: runDate, Stat: resultToRunStat(run.ID, result)}
+			observations = append(observations, observation)
+			benchmarkRunAgeByID[run.ID] = age
 			if run.ID == latestRunID {
-				continue
+				targetObservation = observation
 			}
-			if latestShiftRunID != 0 && runAgeByID[run.ID] > runAgeByID[latestShiftRunID] {
-				continue
-			}
-			result, ok := resultsMap[run.ID]
-			if !ok {
-				continue
-			}
-			history = append(history, resultToRunStat(run.ID, result))
 		}
 
 		var series []stats.RunStat
-		for i := len(runs) - 1; i >= 0; i-- {
-			run := runs[i]
-			result, ok := resultsMap[run.ID]
-			if !ok {
-				continue
-			}
-			series = append(series, resultToRunStat(run.ID, result))
+		for i := len(benchmarkTrends) - 1; i >= 0; i-- {
+			trend := benchmarkTrends[i]
+			series = append(series, resultToRunStat(trend.Run.ID, trend.Result))
 		}
 
-		if len(history) < opts.BaselineOffset+effectiveMinPoints {
+		evaluation := stats.EvaluateSnapshot(targetObservation, observations, stats.SnapshotConfig{
+			Window: opts.Window, MinPoints: opts.MinPoints, BaselineOffset: opts.BaselineOffset,
+			Alpha: opts.Alpha, DFMode: "baseline",
+		})
+		if evaluation.Baseline == nil {
 			continue
-		}
-
-		validHistory := 0
-		for _, point := range history {
-			if point.SampleCount >= 2 && point.StdDev > 0 && point.Sem > 0 {
-				validHistory++
-			}
-		}
-		if validHistory < effectiveMinPoints {
-			continue
-		}
-
-		baseline, err := stats.ComputeBaseline(history, effectiveMinPoints, opts.BaselineOffset)
-		if err != nil {
-			continue
-		}
-
-		latestStat := resultToRunStat(latestRunID, latestResult)
-		changePct := 0.0
-		if baseline.Median > 0 {
-			changePct = (latestStat.Median - baseline.Median) / baseline.Median * 100.0
 		}
 
 		var cp *changePointCandidate
@@ -538,18 +500,17 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 					pValue:      point.PValue,
 					effectPct:   point.EffectPercent,
 					magnitudeNs: point.Magnitude,
-					isRecent:    runAgeByID[point.RunID] <= opts.ChangePointMaxAgeRuns,
+					isRecent:    benchmarkRunAgeByID[point.RunID] <= opts.ChangePointMaxAgeRuns,
 				}
 				break
 			}
 		}
 
 		ctx.Benchmarks = append(ctx.Benchmarks, benchmarkContext{
-			Category:  latestResult.Category,
-			Latest:    latestStat,
-			Baseline:  baseline,
-			ChangePct: changePct,
-			CP:        cp,
+			Category:     latestResult.Category,
+			Target:       targetObservation,
+			Observations: observations,
+			CP:           cp,
 		})
 	}
 
@@ -557,19 +518,16 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 	return ctx, nil
 }
 
-func comparableRunsForTarget(database *db.DB, runID int64, window int) ([]db.Run, error) {
+func comparableRunsForTarget(database *db.DB, runID int64, window int, baselineOffset int) ([]db.Run, error) {
 	target, err := database.GetRun(runID)
 	if err != nil {
 		return nil, err
 	}
 	if target.Branch == "" || target.Branch == "main" {
-		return database.GetComparableRunsWindow(runID, window)
+		return database.GetComparableRunsWindow(runID, window+baselineOffset+1)
 	}
 
-	historyWindow := window - 1
-	if historyWindow < 0 {
-		historyWindow = 0
-	}
+	historyWindow := window + baselineOffset
 	mainRuns, err := database.GetComparableMainRunsWindow(runID, historyWindow)
 	if err != nil {
 		return nil, err
@@ -602,8 +560,16 @@ func evaluateConfigForRun(ctx runContext, cfg Config, opts Options) runOutcome {
 	evals := make([]benchEval, len(ctx.Benchmarks))
 
 	for i, bench := range ctx.Benchmarks {
-		testResult := stats.DetectRegressionWithDFMode(bench.Latest, bench.Baseline, opts.Alpha, cfg.DFMode)
-		testOK := bench.ChangePct >= testResult.MinEffectPercent && (bench.Latest.Median-bench.Baseline.Median) >= cfg.MinAbsoluteNs
+		evaluation := stats.EvaluateSnapshot(bench.Target, bench.Observations, stats.SnapshotConfig{
+			Window: opts.Window, MinPoints: opts.MinPoints, BaselineOffset: opts.BaselineOffset,
+			Alpha: opts.Alpha, DFMode: cfg.DFMode,
+		})
+		if evaluation.Baseline == nil {
+			continue
+		}
+		testResult := evaluation.Result
+		changePct := (bench.Target.Stat.Median - evaluation.Baseline.Median) / evaluation.Baseline.Median * 100.0
+		testOK := changePct >= testResult.MinEffectPercent && (bench.Target.Stat.Median-evaluation.Baseline.Median) >= cfg.MinAbsoluteNs
 
 		cpPractical := false
 		if bench.CP != nil {
@@ -655,10 +621,6 @@ func evaluateConfigForRun(ctx runContext, cfg Config, opts Options) runOutcome {
 				selectedByBench[h.benchIndex] = selectedSignal{adjPValue: bh.AdjPValue}
 			}
 		}
-	}
-
-	if ctx.GlobalShiftDetected {
-		return outcome
 	}
 
 	for idx := range selectedByBench {

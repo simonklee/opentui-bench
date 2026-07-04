@@ -41,62 +41,98 @@ func insertRegressionHistoryTestRun(t *testing.T, database *db.DB, branch string
 	return runID
 }
 
-func TestRegressionCacheBaselineAnchorTracksLatestMainForFeatureBranch(t *testing.T) {
+func insertRegressionHistoryTestResult(t *testing.T, database *db.DB, runID int64, median int64) {
+	t.Helper()
+	_, err := database.InsertResult(&db.Result{
+		RunID: runID, Category: "render", Name: "frame", MinNs: median - 10,
+		AvgNs: median, MaxNs: median + 10, StdDevNs: 10, P50Ns: median,
+		P95Ns: median + 5, P99Ns: median + 9, TotalNs: median * 100,
+		Iterations: 100, SampleCount: 3,
+	})
+	if err != nil {
+		t.Fatalf("insert result: %v", err)
+	}
+}
+
+func TestRegressionCacheGenerationKeyIsTargetIndependent(t *testing.T) {
+	server := &Server{}
+
+	before := server.regressionCacheGenerationKey("feature/cache", 30, 5, 3, regressionDFModeBaseline)
+	insertRegressionHistoryTestRun(t, openRegressionHistoryTestDB(t), "main", time.Now(), "future")
+	after := server.regressionCacheGenerationKey("feature/cache", 30, 5, 3, regressionDFModeBaseline)
+	if before != after {
+		t.Fatalf("future data changed generation key: %q != %q", before, after)
+	}
+}
+
+func TestRegressionHistoryCacheIgnoresFutureMainRuns(t *testing.T) {
 	database := openRegressionHistoryTestDB(t)
 	server := &Server{db: database}
-
-	anchor, err := server.regressionCacheBaselineAnchor("feature/cache")
-	if err != nil {
-		t.Fatalf("baseline anchor with no main runs: %v", err)
-	}
-	if anchor != "main:none" {
-		t.Fatalf("anchor with no main runs = %q, want %q", anchor, "main:none")
-	}
-
 	at := time.Date(2026, 2, 20, 10, 0, 0, 0, time.UTC)
-	firstMainID := insertRegressionHistoryTestRun(t, database, "main", at, "a")
+	for i := 0; i < 5; i++ {
+		runID := insertRegressionHistoryTestRun(t, database, "main", at.Add(time.Duration(i)*time.Hour), fmt.Sprintf("main-%d", i))
+		insertRegressionHistoryTestResult(t, database, runID, 100_000)
+	}
+	featureID := insertRegressionHistoryTestRun(t, database, "feature/cache", at.Add(6*time.Hour), "feature")
+	insertRegressionHistoryTestResult(t, database, featureID, 200_000)
 
-	firstAnchor, err := server.regressionCacheBaselineAnchor("feature/cache")
-	if err != nil {
-		t.Fatalf("baseline anchor after first main run: %v", err)
-	}
-	wantFirst := fmt.Sprintf("main:%d", firstMainID)
-	if firstAnchor != wantFirst {
-		t.Fatalf("anchor after first main run = %q, want %q", firstAnchor, wantFirst)
+	requestHistory := func() regressionHistoryResponse {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/regressions/history?branch=feature%2Fcache&limit=1&min_points=5&baseline_offset=0", nil)
+		rec := httptest.NewRecorder()
+		server.handleRegressionsHistory(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d; body=%q", rec.Code, rec.Body.String())
+		}
+		var response regressionHistoryResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		return response
 	}
 
-	secondMainID := insertRegressionHistoryTestRun(t, database, "main", at.Add(time.Hour), "b")
+	first := requestHistory()
+	if first.ComputedRuns != 1 || first.CachedRuns != 0 {
+		t.Fatalf("first request computed=%d cached=%d, want 1/0", first.ComputedRuns, first.CachedRuns)
+	}
+	futureID := insertRegressionHistoryTestRun(t, database, "main", at.Add(7*time.Hour), "future")
+	insertRegressionHistoryTestResult(t, database, futureID, 900_000)
 
-	secondAnchor, err := server.regressionCacheBaselineAnchor("feature/cache")
-	if err != nil {
-		t.Fatalf("baseline anchor after second main run: %v", err)
-	}
-	wantSecond := fmt.Sprintf("main:%d", secondMainID)
-	if secondAnchor != wantSecond {
-		t.Fatalf("anchor after second main run = %q, want %q", secondAnchor, wantSecond)
-	}
-	if firstAnchor == secondAnchor {
-		t.Fatal("expected baseline anchor to change when latest main run changes")
+	second := requestHistory()
+	if second.ComputedRuns != 0 || second.CachedRuns != 1 {
+		t.Fatalf("after future run computed=%d cached=%d, want 0/1", second.ComputedRuns, second.CachedRuns)
 	}
 }
 
-func TestRegressionCacheGenerationKeyIncludesBaselineAnchor(t *testing.T) {
-	server := &Server{}
+func TestRegressionsBackfillsSparseBenchmarkHistory(t *testing.T) {
+	database := openRegressionHistoryTestDB(t)
+	server := &Server{db: database}
+	at := time.Date(2026, 2, 21, 10, 0, 0, 0, time.UTC)
 
-	first := server.regressionCacheGenerationKey("feature/cache", 30, 5, 3, regressionDFModeBaseline, "main:100")
-	second := server.regressionCacheGenerationKey("feature/cache", 30, 5, 3, regressionDFModeBaseline, "main:101")
-	if first == second {
-		t.Fatal("expected generation keys to differ when baseline anchor changes")
+	for i := 0; i < 6; i++ {
+		runID := insertRegressionHistoryTestRun(t, database, "main", at.Add(time.Duration(i)*time.Hour), fmt.Sprintf("prior-%d", i))
+		if i < 5 {
+			insertRegressionHistoryTestResult(t, database, runID, 100_000)
+		}
 	}
-}
+	targetID := insertRegressionHistoryTestRun(t, database, "main", at.Add(6*time.Hour), "target")
+	insertRegressionHistoryTestResult(t, database, targetID, 100_000)
 
-func TestRegressionCacheGenerationKeyIsStable(t *testing.T) {
-	server := &Server{}
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/regressions?run_id=%d&window=5&min_points=5&baseline_offset=0", targetID), nil)
+	rec := httptest.NewRecorder()
+	server.handleRegressions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%q", rec.Code, rec.Body.String())
+	}
 
-	got := server.regressionCacheGenerationKey("main", 30, 5, 3, regressionDFModeBaseline, "self")
-	const want = "05d4fb0033d45b86164c59b1d18290b33e2e959f51b73b17efaca5d3aa9f3c15"
-	if got != want {
-		t.Fatalf("generation key = %q, want %q", got, want)
+	var response struct {
+		AnalyzedBenchmarks int `json:"analyzed_benchmarks"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.AnalyzedBenchmarks != 1 {
+		t.Fatalf("analyzed_benchmarks = %d, want 1; body=%s", response.AnalyzedBenchmarks, rec.Body.String())
 	}
 }
 

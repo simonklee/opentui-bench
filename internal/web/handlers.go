@@ -331,7 +331,12 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	trends, err := s.db.GetTrend(resultID, limit)
+	fetchLimit := limit
+	minimumEvaluationDepth := defaultWindow + defaultBaselineOffset + 1
+	if fetchLimit < minimumEvaluationDepth {
+		fetchLimit = minimumEvaluationDepth
+	}
+	trends, err := s.db.GetTrend(resultID, fetchLimit)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "result not found", http.StatusNotFound)
@@ -342,158 +347,61 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type trendPoint struct {
-		RunID            int64    `json:"run_id"`
-		ResultID         int64    `json:"result_id"`
-		CommitHash       string   `json:"commit_hash"`
-		CommitMessage    string   `json:"commit_message,omitempty"`
-		Branch           string   `json:"branch"`
-		RunDate          string   `json:"run_date"`
-		AvgNs            int64    `json:"avg_ns"`    // Mean (kept for backwards compatibility)
-		MedianNs         int64    `json:"median_ns"` // Median (p50) - primary metric for regression
-		MinNs            int64    `json:"min_ns"`
-		MaxNs            int64    `json:"max_ns"`
-		StdDevNs         int64    `json:"std_dev_ns"`
-		SampleCount      int64    `json:"sample_count"`
-		CiLowerNs        int64    `json:"ci_lower_ns"`
-		CiUpperNs        int64    `json:"ci_upper_ns"`
-		SemNs            int64    `json:"sem_ns"`
-		RegressionStatus string   `json:"regression_status"`
-		RegressionReason *string  `json:"regression_reason,omitempty"`
-		BaselineRunID    *int64   `json:"baseline_run_id,omitempty"`
-		ChangePercent    *float64 `json:"change_percent,omitempty"`
-	}
-
-	type changePoint struct {
-		RunID       int64   `json:"run_id"`
-		MagnitudeNs float64 `json:"magnitude_ns"`
-		PValue      float64 `json:"p_value"`
-	}
-
-	type globalShift struct {
-		RunID              int64   `json:"run_id"`
-		PositiveShare      float64 `json:"positive_share"`
-		GeoIncreasePct     float64 `json:"geo_increase_pct"`
-		ComparedBenchmarks int     `json:"compared_benchmarks"`
+		RunID         int64  `json:"run_id"`
+		ResultID      int64  `json:"result_id"`
+		CommitHash    string `json:"commit_hash"`
+		CommitMessage string `json:"commit_message,omitempty"`
+		Branch        string `json:"branch"`
+		RunDate       string `json:"run_date"`
+		AvgNs         int64  `json:"avg_ns"`
+		MedianNs      int64  `json:"median_ns"`
+		MinNs         int64  `json:"min_ns"`
+		MaxNs         int64  `json:"max_ns"`
+		StdDevNs      int64  `json:"std_dev_ns"`
+		SampleCount   int64  `json:"sample_count"`
+		CiLowerNs     int64  `json:"ci_lower_ns"`
+		CiUpperNs     int64  `json:"ci_upper_ns"`
+		SemNs         int64  `json:"sem_ns"`
 	}
 
 	type trendResponse struct {
-		Points            []trendPoint  `json:"points"`
-		ChangePoints      []changePoint `json:"change_points,omitempty"`
-		GlobalShifts      []globalShift `json:"global_shifts,omitempty"`
-		EpochRunID        *int64        `json:"epoch_run_id,omitempty"`
-		BaselineRunID     *int64        `json:"baseline_run_id,omitempty"`
-		BaselineCILowerNs *int64        `json:"baseline_ci_lower_ns,omitempty"`
-		BaselineCIUpperNs *int64        `json:"baseline_ci_upper_ns,omitempty"`
+		Points        []trendPoint `json:"points"`
+		CurrentStatus struct {
+			RunID  int64  `json:"run_id"`
+			Status string `json:"status"`
+			Reason string `json:"reason,omitempty"`
+		} `json:"current_status"`
 	}
 
-	// Build history for baseline computation
-	// trends are ordered newest-first, so we need to process accordingly
-	var history []stats.RunStat
+	var observations []stats.OrderedRunStat
+	var target stats.OrderedRunStat
+	var targetFound bool
 	for _, t := range trends {
+		runDate, err := time.Parse(time.RFC3339Nano, t.Run.RunDate)
+		if err != nil {
+			http.Error(w, "invalid run date: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		sem := float64(0)
 		if t.Result.SampleCount >= 2 {
 			sem = float64(t.Result.StdDevNs) / math.Sqrt(float64(t.Result.SampleCount))
 		}
-		history = append(history, stats.RunStat{
-			RunID:       t.Run.ID,
-			Median:      float64(t.Result.P50Ns),
-			Sem:         sem,
-			SampleCount: t.Result.SampleCount,
-			StdDev:      float64(t.Result.StdDevNs),
-		})
-	}
-
-	// Compute baseline from all history except the latest run.
-	// If global shifts are detected, use the latest shift run as an epoch boundary.
-	var baseline *stats.BaselineStats
-	latestGlobalShiftRunID := int64(0)
-
-	// Detect global harness-level shifts between adjacent runs in this trend window.
-	resultsCache := make(map[int64][]db.Result)
-	getResults := func(runID int64) ([]db.Result, error) {
-		if cached, ok := resultsCache[runID]; ok {
-			return cached, nil
+		observation := stats.OrderedRunStat{RunDate: runDate, Stat: stats.RunStat{
+			RunID: t.Run.ID, Median: float64(t.Result.P50Ns), Sem: sem,
+			SampleCount: t.Result.SampleCount, StdDev: float64(t.Result.StdDevNs),
+		}}
+		observations = append(observations, observation)
+		if t.Result.ID == resultID {
+			target = observation
+			targetFound = true
 		}
-		fetched, err := s.db.GetResultsForRun(runID)
-		if err != nil {
-			return nil, err
-		}
-		resultsCache[runID] = fetched
-		return fetched, nil
-	}
-
-	var globalShifts []globalShift
-	for i := 0; i+1 < len(trends); i++ {
-		newerRunID := trends[i].Run.ID
-		olderRunID := trends[i+1].Run.ID
-
-		newerResults, err := getResults(newerRunID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		olderResults, err := getResults(olderRunID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		olderMap := make(map[db.BenchmarkKey]int64, len(olderResults))
-		for _, r := range olderResults {
-			olderMap[db.BenchmarkKey{Category: r.Category, Name: r.Name}] = r.P50Ns
-		}
-
-		positiveCount := 0
-		compared := 0
-		logSum := 0.0
-		for _, newer := range newerResults {
-			older, ok := olderMap[db.BenchmarkKey{Category: newer.Category, Name: newer.Name}]
-			if !ok || older <= 0 || newer.P50Ns <= 0 {
-				continue
-			}
-			compared++
-			if newer.P50Ns > older {
-				positiveCount++
-			}
-			logSum += math.Log(float64(newer.P50Ns) / float64(older))
-		}
-
-		if compared < globalShiftMinBenchmarks {
-			continue
-		}
-
-		positiveShare := float64(positiveCount) / float64(compared)
-		geoIncreasePct := (math.Exp(logSum/float64(compared)) - 1.0) * 100.0
-		if positiveShare >= globalShiftMinPositiveShare && geoIncreasePct >= globalShiftMinGeoIncreasePct {
-			globalShifts = append(globalShifts, globalShift{
-				RunID:              newerRunID,
-				PositiveShare:      positiveShare,
-				GeoIncreasePct:     geoIncreasePct,
-				ComparedBenchmarks: compared,
-			})
-		}
-	}
-	for _, shift := range globalShifts {
-		if shift.RunID > latestGlobalShiftRunID {
-			latestGlobalShiftRunID = shift.RunID
-		}
-	}
-	if len(history) > 1 {
-		baselineHistory := history[1:]
-		if latestGlobalShiftRunID != 0 {
-			filtered := make([]stats.RunStat, 0, len(baselineHistory))
-			for _, h := range baselineHistory {
-				if h.RunID >= latestGlobalShiftRunID {
-					filtered = append(filtered, h)
-				}
-			}
-			baselineHistory = filtered
-		}
-		baseline, _ = stats.ComputeBaseline(baselineHistory, defaultMinPoints, defaultBaselineOffset)
 	}
 
 	var points []trendPoint
 	for i, t := range trends {
+		if i >= limit {
+			break
+		}
 		ciLower, ciUpper, sem := stats.CI95(t.Result.P50Ns, t.Result.StdDevNs, t.Result.SampleCount)
 
 		point := trendPoint{
@@ -514,69 +422,20 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 			SemNs:         sem,
 		}
 
-		// Determine regression status.
-		if latestGlobalShiftRunID != 0 && point.RunID < latestGlobalShiftRunID {
-			point.RegressionStatus = "ok"
-			reason := "pre_epoch_not_compared"
-			point.RegressionReason = &reason
-		} else if baseline == nil {
-			point.RegressionStatus = "insufficient"
-			reason := "insufficient_baseline_history"
-			point.RegressionReason = &reason
-		} else if i < len(history) && history[i].RunID == baseline.RunID {
-			point.RegressionStatus = "baseline"
-			reason := "baseline_reference"
-			point.RegressionReason = &reason
-			point.BaselineRunID = &baseline.RunID
-			point.ChangePercent = nil
-		} else if i < len(history) {
-			result := stats.DetectRegression(history[i], baseline, defaultAlpha)
-			point.RegressionStatus = result.Status
-			point.BaselineRunID = result.BaselineRunID
-			point.ChangePercent = result.ChangePercent
-		} else {
-			point.RegressionStatus = "ok"
-		}
-		if baseline != nil && point.BaselineRunID == nil {
-			point.BaselineRunID = &baseline.RunID
-		}
-
 		points = append(points, point)
 	}
 
-	// Detect distribution shift change points on chronological history (oldest first).
-	var changePoints []changePoint
-	if len(history) >= 10 {
-		chronoHistory := make([]stats.RunStat, len(history))
-		for i, h := range history {
-			chronoHistory[len(history)-1-i] = h
+	response := trendResponse{Points: points}
+	if targetFound {
+		evaluation := stats.EvaluateSnapshot(target, observations, stats.SnapshotConfig{
+			Window: defaultWindow, MinPoints: defaultMinPoints, BaselineOffset: defaultBaselineOffset,
+			Alpha: defaultAlpha, DFMode: defaultRegressionDFMode,
+		})
+		response.CurrentStatus.RunID = target.Stat.RunID
+		response.CurrentStatus.Status = evaluation.Result.Status
+		if evaluation.Result.Status == "insufficient" {
+			response.CurrentStatus.Reason = "insufficient_baseline_history"
 		}
-		cps := stats.DetectChangePoints(chronoHistory, 5, 0.05, 199)
-		for _, cp := range cps {
-			changePoints = append(changePoints, changePoint{
-				RunID:       cp.RunID,
-				MagnitudeNs: cp.Magnitude,
-				PValue:      cp.PValue,
-			})
-		}
-	}
-
-	response := trendResponse{
-		Points:       points,
-		ChangePoints: changePoints,
-		GlobalShifts: globalShifts,
-	}
-	if latestGlobalShiftRunID != 0 {
-		id := latestGlobalShiftRunID
-		response.EpochRunID = &id
-	}
-
-	if baseline != nil {
-		response.BaselineRunID = &baseline.RunID
-		ciLower := int64(baseline.CILower)
-		ciUpper := int64(baseline.CIUpper)
-		response.BaselineCILowerNs = &ciLower
-		response.BaselineCIUpperNs = &ciUpper
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1481,8 +1340,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	isFeatureBranch := branch != "main"
 
 	if isFeatureBranch {
-		// Get the branch run itself.
-		mainRuns, err := s.db.GetComparableMainRunsWindow(runID, window-1)
+		mainRuns, err := s.db.GetComparableMainRunsWindow(runID, window+baselineOffset)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1490,7 +1348,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		runs = append([]db.Run{*targetRun}, mainRuns...)
 	} else {
 		var err error
-		runs, err = s.db.GetComparableRunsWindow(runID, window)
+		runs, err = s.db.GetComparableRunsWindow(runID, window+baselineOffset+1)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1514,11 +1372,9 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	// Collect run IDs
 	runIDs := make([]int64, len(runs))
 	runByID := make(map[int64]db.Run)
-	runAgeByID := make(map[int64]int)
 	for i, run := range runs {
 		runIDs[i] = run.ID
 		runByID[run.ID] = run
-		runAgeByID[run.ID] = i
 	}
 
 	// Get all benchmark names across these runs
@@ -1528,13 +1384,11 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find the latest run (first in the list since it's sorted DESC)
-	latestRunID := runs[0].ID
+	latestRunID := runID
 	globalShiftDetected := false
 	globalShiftPositiveShare := 0.0
 	globalShiftGeoIncreasePct := 0.0
 	globalShiftComparedBenchmarks := 0
-	latestShiftRunID := int64(0)
 	resultsCache := make(map[int64][]db.Result)
 	getResults := func(runID int64) ([]db.Result, error) {
 		if cached, ok := resultsCache[runID]; ok {
@@ -1611,41 +1465,24 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		globalShiftGeoIncreasePct = metrics.geoPct
 		globalShiftComparedBenchmarks = metrics.compared
 	}
-	for i := 0; i+1 < len(runs); i++ {
-		metrics, err := computeShift(runs[i].ID, runs[i+1].ID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if metrics.detected {
-			latestShiftRunID = runs[i].ID
-			break
-		}
-	}
 
 	type regression struct {
-		Name                     string   `json:"name"`
-		Category                 string   `json:"category"`
-		LatestResultID           int64    `json:"latest_result_id"`
-		LatestCILowerNs          int64    `json:"latest_ci_lower_ns"`
-		LatestCIUpperNs          int64    `json:"latest_ci_upper_ns"`
-		BaselineRunID            int64    `json:"baseline_run_id"`
-		BaselineCommitHash       string   `json:"baseline_commit_hash"`
-		BaselineCommitHashFull   string   `json:"baseline_commit_hash_full"`
-		BaselineCILowerNs        int64    `json:"baseline_ci_lower_ns"`
-		BaselineCIUpperNs        int64    `json:"baseline_ci_upper_ns"`
-		ChangePercent            float64  `json:"change_percent"`
-		MinEffectPercent         float64  `json:"min_effect_percent"`
-		PValue                   *float64 `json:"p_value,omitempty"`
-		AdjustedPValue           *float64 `json:"adjusted_p_value,omitempty"`
-		DetectionMethod          string   `json:"detection_method"`
-		Alpha                    float64  `json:"alpha"`
-		IntroducedRunID          *int64   `json:"introduced_run_id,omitempty"`
-		IntroducedResultID       *int64   `json:"introduced_result_id,omitempty"`
-		IntroducedCommitHash     *string  `json:"introduced_commit_hash,omitempty"`
-		IntroducedCommitHashFull *string  `json:"introduced_commit_hash_full,omitempty"`
-		IntroducedCommitMessage  *string  `json:"introduced_commit_message,omitempty"`
-		IntroducedRunDate        *string  `json:"introduced_run_date,omitempty"`
+		Name                   string   `json:"name"`
+		Category               string   `json:"category"`
+		LatestResultID         int64    `json:"latest_result_id"`
+		LatestCILowerNs        int64    `json:"latest_ci_lower_ns"`
+		LatestCIUpperNs        int64    `json:"latest_ci_upper_ns"`
+		BaselineRunID          int64    `json:"baseline_run_id"`
+		BaselineCommitHash     string   `json:"baseline_commit_hash"`
+		BaselineCommitHashFull string   `json:"baseline_commit_hash_full"`
+		BaselineCILowerNs      int64    `json:"baseline_ci_lower_ns"`
+		BaselineCIUpperNs      int64    `json:"baseline_ci_upper_ns"`
+		ChangePercent          float64  `json:"change_percent"`
+		MinEffectPercent       float64  `json:"min_effect_percent"`
+		PValue                 *float64 `json:"p_value,omitempty"`
+		AdjustedPValue         *float64 `json:"adjusted_p_value,omitempty"`
+		DetectionMethod        string   `json:"detection_method"`
+		Alpha                  float64  `json:"alpha"`
 	}
 
 	type regressionsResponse struct {
@@ -1657,7 +1494,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		EffectiveMinPoints            int            `json:"effective_min_points"`
 		BaselineOffset                int            `json:"baseline_offset"`
 		DFMode                        string         `json:"df_mode"`
-		EpochRunID                    *int64         `json:"epoch_run_id,omitempty"`
 		TotalBenchmarks               int            `json:"total_benchmarks"`
 		AnalyzedBenchmarks            int            `json:"analyzed_benchmarks"`
 		InsufficientHistory           bool           `json:"insufficient_history"`
@@ -1682,8 +1518,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		testResult stats.RegressionResult
 		latest     db.Result
 		baseline   *stats.BaselineStats
-		history    []stats.RunStat
-		resultsMap map[int64]db.Result
 		changePct  float64
 		testOK     bool
 		cp         *cpCandidate
@@ -1703,13 +1537,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		exclusionCounts[reason]++
 	}
 	effectiveMinPoints := minPoints
-	if latestShiftRunID != 0 {
-		if shiftAge, ok := runAgeByID[latestShiftRunID]; ok && shiftAge <= baselineOffset+minPoints {
-			if effectiveMinPoints > 3 {
-				effectiveMinPoints = 3
-			}
-		}
-	}
 
 	// Analyze each benchmark
 	for _, benchmarkKey := range benchmarkKeys {
@@ -1730,6 +1557,11 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			incrementExclusion("invalid_latest_stats")
 			continue
 		}
+		benchmarkTrends, err := s.db.GetTrend(latestResult.ID, window+baselineOffset+1)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		toRunStat := func(runID int64, result db.Result) stats.RunStat {
 			sem := float64(0)
@@ -1745,60 +1577,47 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Build history for baseline computation (exclude latest, newest-first).
-		var history []stats.RunStat
-		for _, run := range runs {
+		var observations []stats.OrderedRunStat
+		var targetObservation stats.OrderedRunStat
+		benchmarkRunAgeByID := make(map[int64]int, len(benchmarkTrends))
+		for age, trend := range benchmarkTrends {
+			run := trend.Run
+			result := trend.Result
+			runDate, err := time.Parse(time.RFC3339Nano, run.RunDate)
+			if err != nil {
+				http.Error(w, "invalid run date: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			observation := stats.OrderedRunStat{RunDate: runDate, Stat: toRunStat(run.ID, result)}
+			observations = append(observations, observation)
+			benchmarkRunAgeByID[run.ID] = age
+			runByID[run.ID] = run
 			if run.ID == latestRunID {
-				continue
+				targetObservation = observation
 			}
-			if latestShiftRunID != 0 && runAgeByID[run.ID] > runAgeByID[latestShiftRunID] {
-				continue
-			}
-			result, ok := resultsMap[run.ID]
-			if !ok {
-				continue
-			}
-			history = append(history, toRunStat(run.ID, result))
 		}
 
 		// Build full series (oldest-first) for change-point detection.
 		var series []stats.RunStat
-		for i := len(runs) - 1; i >= 0; i-- {
-			run := runs[i]
-			result, ok := resultsMap[run.ID]
-			if !ok {
-				continue
-			}
-			series = append(series, toRunStat(run.ID, result))
+		for i := len(benchmarkTrends) - 1; i >= 0; i-- {
+			trend := benchmarkTrends[i]
+			series = append(series, toRunStat(trend.Run.ID, trend.Result))
 		}
 
-		if len(history) < baselineOffset+effectiveMinPoints {
-			incrementExclusion("history_too_short")
+		evaluation := stats.EvaluateSnapshot(targetObservation, observations, stats.SnapshotConfig{
+			Window: window, MinPoints: minPoints, BaselineOffset: baselineOffset,
+			Alpha: defaultAlpha, DFMode: dfMode,
+		})
+		if evaluation.Baseline == nil {
+			incrementExclusion("history_too_short_or_invalid")
 			continue
 		}
-		validHistory := 0
-		for _, h := range history {
-			if h.SampleCount >= 2 && h.StdDev > 0 && h.Sem > 0 {
-				validHistory++
-			}
-		}
-		if validHistory < effectiveMinPoints {
-			incrementExclusion("invalid_history_stats")
-			continue
-		}
-
-		// Compute baseline
-		baseline, err := stats.ComputeBaseline(history, effectiveMinPoints, baselineOffset)
-		if err != nil {
-			incrementExclusion("baseline_compute_error")
-			continue
-		}
+		baseline := evaluation.Baseline
 		analyzableBenchmarks++
 
 		latestStat := toRunStat(latestRunID, latestResult)
 
-		// Detect regression
-		result := stats.DetectRegressionWithDFMode(latestStat, baseline, defaultAlpha, dfMode)
+		result := evaluation.Result
 
 		changePct := 0.0
 		if baseline.Median > 0 {
@@ -1817,7 +1636,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 					point:       point,
 					effectPct:   point.EffectPercent,
 					magnitudeNs: point.Magnitude,
-					isRecent:    runAgeByID[point.RunID] <= changePointMaxAgeRuns,
+					isRecent:    benchmarkRunAgeByID[point.RunID] <= changePointMaxAgeRuns,
 					practicalOK: point.EffectPercent >= result.MinEffectPercent && point.Magnitude >= defaultMinAbsoluteNs,
 				}
 				break
@@ -1828,8 +1647,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			testResult: result,
 			latest:     latestResult,
 			baseline:   baseline,
-			history:    history,
-			resultsMap: resultsMap,
 			changePct:  changePct,
 			testOK:     changePct >= result.MinEffectPercent && (latestStat.Median-baseline.Median) >= defaultMinAbsoluteNs,
 			cp:         cp,
@@ -1913,18 +1730,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			var introducingID *int64
-			if signal.method == "change_point" && bench.cp != nil {
-				id := bench.cp.point.RunID
-				introducingID = &id
-			} else {
-				chronoHistory := make([]stats.RunStat, len(bench.history))
-				for j, h := range bench.history {
-					chronoHistory[len(bench.history)-1-j] = h
-				}
-				introducingID = stats.FindIntroducingRunWithDFMode(chronoHistory, bench.baseline, defaultAlpha, dfMode)
-			}
-
 			ciLower, ciUpper, _ := stats.CI95(bench.latest.P50Ns, bench.latest.StdDevNs, bench.latest.SampleCount)
 			rawPValue := signal.rawPValue
 			adjustedPValue := signal.adjPValue
@@ -1951,19 +1756,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 				reg.BaselineCommitHashFull = baselineRun.CommitHashFull
 			}
 
-			if introducingID != nil {
-				reg.IntroducedRunID = introducingID
-				if introRun, ok := runByID[*introducingID]; ok {
-					reg.IntroducedCommitHash = &introRun.CommitHash
-					reg.IntroducedCommitHashFull = &introRun.CommitHashFull
-					reg.IntroducedCommitMessage = &introRun.CommitMessage
-					reg.IntroducedRunDate = &introRun.RunDate
-				}
-				if introResult, ok := bench.resultsMap[*introducingID]; ok {
-					reg.IntroducedResultID = &introResult.ID
-				}
-			}
-
 			regressions = append(regressions, reg)
 		}
 	}
@@ -1971,11 +1763,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	// Use branch from comparable runs if available (normalizes legacy empty values).
 	if len(runs) > 0 && runs[0].Branch != "" {
 		branch = runs[0].Branch
-	}
-
-	// Treat broad one-step shifts as re-baseline events rather than per-benchmark regressions.
-	if globalShiftDetected {
-		regressions = []regression{}
 	}
 
 	response := regressionsResponse{
@@ -2008,11 +1795,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		}
 		response.InsufficientReason = topReason
 	}
-	if latestShiftRunID != 0 {
-		id := latestShiftRunID
-		response.EpochRunID = &id
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

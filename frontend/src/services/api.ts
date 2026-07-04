@@ -42,25 +42,15 @@ export interface TrendPoint {
   ci_lower_ns?: number;
   ci_upper_ns?: number;
   sem_ns?: number;
-  regression_status?: "ok" | "regressed" | "baseline" | "insufficient";
-  regression_reason?: string;
-  baseline_run_id?: number;
-  change_percent?: number;
 }
 
 export interface TrendResponse {
   points: TrendPoint[];
-  change_points?: { run_id: number; magnitude_ns: number; p_value: number }[];
-  global_shifts?: {
+  current_status: {
     run_id: number;
-    positive_share: number;
-    geo_increase_pct: number;
-    compared_benchmarks: number;
-  }[];
-  epoch_run_id?: number;
-  baseline_run_id?: number;
-  baseline_ci_lower_ns?: number;
-  baseline_ci_upper_ns?: number;
+    status: "ok" | "regressed" | "insufficient";
+    reason?: string;
+  };
 }
 
 export type RegressionDFMode = "baseline" | "latest";
@@ -94,12 +84,6 @@ export interface Regression {
   adjusted_p_value?: number;
   detection_method: "t_test" | "change_point";
   alpha: number;
-  introduced_run_id?: number;
-  introduced_result_id?: number;
-  introduced_commit_hash?: string;
-  introduced_commit_hash_full?: string;
-  introduced_commit_message?: string;
-  introduced_run_date?: string;
 }
 
 export interface RegressionsResponse {
@@ -111,7 +95,6 @@ export interface RegressionsResponse {
   effective_min_points?: number;
   baseline_offset: number;
   df_mode?: RegressionDFMode;
-  epoch_run_id?: number;
   total_benchmarks?: number;
   analyzed_benchmarks?: number;
   insufficient_history?: boolean;
@@ -138,7 +121,6 @@ export interface RegressionHistoryEntry {
   min_points: number;
   effective_min_points: number;
   baseline_offset: number;
-  epoch_run_id?: number;
   total_benchmarks: number;
   analyzed_benchmarks: number;
   insufficient_history: boolean;

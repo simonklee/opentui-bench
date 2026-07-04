@@ -22,12 +22,7 @@ const GITHUB_REPO_URL = "https://github.com/anomalyco/opentui";
 const defaultRegressionHistoryLimit = 100;
 
 const regressionEpisodeKey = (regression: RegressionWithContext): string =>
-  [
-    regression.category,
-    regression.name,
-    regression.introduced_run_id ?? "none",
-    regression.detection_method,
-  ].join("::");
+  [regression.category, regression.name, regression.run_id, regression.detection_method].join("::");
 
 const uniqueRegressionEpisodes = (
   regressions: RegressionWithContext[],
@@ -107,22 +102,6 @@ const RegressionRow: Component<{ regression: RegressionWithContext; dfMode: Regr
     params.set("regression_branch", regression.branch || "main");
     params.set("regression_df_mode", props.dfMode);
 
-    if (regression.introduced_run_id !== undefined) {
-      params.set("regression_intro_run_id", String(regression.introduced_run_id));
-    }
-    if (regression.introduced_result_id !== undefined) {
-      params.set("regression_intro_result_id", String(regression.introduced_result_id));
-    }
-    if (regression.introduced_commit_hash) {
-      params.set("regression_intro_commit_hash", regression.introduced_commit_hash);
-    }
-    if (regression.introduced_commit_hash_full) {
-      params.set("regression_intro_commit_hash_full", regression.introduced_commit_hash_full);
-    }
-    if (regression.introduced_run_date) {
-      params.set("regression_intro_run_date", regression.introduced_run_date);
-    }
-
     navigate(`/benchmarks/${targetRunId}?${params.toString()}`);
   };
 
@@ -178,29 +157,6 @@ const RegressionRow: Component<{ regression: RegressionWithContext; dfMode: Regr
         <div class="text-[11px] text-text-muted">
           {formatNs(reg().baseline_ci_lower_ns)} - {formatNs(reg().baseline_ci_upper_ns)}
         </div>
-      </td>
-      <td class="py-3 px-4">
-        <Show
-          when={reg().introduced_commit_hash}
-          fallback={<span class="text-text-muted text-[12px]">-</span>}
-        >
-          <div class="flex items-baseline gap-1.5">
-            <CommitLink
-              hash={reg().introduced_commit_hash}
-              hashFull={reg().introduced_commit_hash_full}
-            />
-            <Show when={reg().introduced_commit_message}>
-              <span class="text-[11px] text-text-muted truncate max-w-[200px]">
-                {truncateMessage(reg().introduced_commit_message!)}
-              </span>
-            </Show>
-          </div>
-          <Show when={reg().introduced_run_date}>
-            <div class="text-[11px] text-text-muted">
-              {formatRelativeDate(reg().introduced_run_date!)}
-            </div>
-          </Show>
-        </Show>
       </td>
       <td class="py-3 px-4 text-right">
         <ArrowRight size={16} class="text-text-muted inline-block" />
@@ -352,8 +308,8 @@ const Regressions: Component = () => {
                 <div class="flex items-center gap-2 text-danger">
                   <AlertTriangle size={18} />
                   <span class="text-[14px] font-medium">
-                    {regressionCount()} regression episode{regressionCount() !== 1 ? "s" : ""} across{" "}
-                    {regressionRuns()} historical run{regressionRuns() !== 1 ? "s" : ""}
+                    {regressionCount()} regression episode{regressionCount() !== 1 ? "s" : ""}{" "}
+                    across {regressionRuns()} historical run{regressionRuns() !== 1 ? "s" : ""}
                   </span>
                 </div>
               </Show>
@@ -454,7 +410,6 @@ const Regressions: Component = () => {
                 <th class="py-3 px-4 font-medium">Benchmark</th>
                 <th class="py-3 px-4 font-medium">Change</th>
                 <th class="py-3 px-4 font-medium">Baseline</th>
-                <th class="py-3 px-4 font-medium">Introduced</th>
                 <th class="py-3 px-4 font-medium w-10"></th>
               </tr>
             </thead>

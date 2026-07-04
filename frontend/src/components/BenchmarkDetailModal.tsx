@@ -49,31 +49,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
   const [showProfileHelp, setShowProfileHelp] = createSignal(false);
   const [showTrendHelp, setShowTrendHelp] = createSignal(false);
   const [chartValueMode, setChartValueMode] = createSignal<"absolute" | "index">("absolute");
-  const [reasonFilter, setReasonFilter] = createSignal<"all" | "compared" | "pre_epoch">("all");
   const [searchParams] = useSearchParams();
-
-  const latestGlobalShift = () => {
-    const shifts = props.trendData?.global_shifts;
-    if (!shifts || shifts.length === 0) return undefined;
-    return shifts.reduce((latest, curr) => (curr.run_id > latest.run_id ? curr : latest));
-  };
-
-  const reasonLabel = (reason: string) => {
-    if (reason === "pre_epoch_not_compared") return "pre-epoch context";
-    if (reason === "insufficient_baseline_history") return "insufficient baseline history";
-    if (reason === "baseline_reference") return "baseline reference";
-    return reason.replaceAll("_", " ");
-  };
-
-  const topTrendReasons = () => {
-    const points = props.trendData?.points || [];
-    const counts = new Map<string, number>();
-    for (const p of points) {
-      if (!p.regression_reason) continue;
-      counts.set(p.regression_reason, (counts.get(p.regression_reason) || 0) + 1);
-    }
-    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
-  };
 
   const isViewingLatestRegression = () => props.regressionContext?.latestRunId === props.runId;
   const currentCommitHashFull = () => {
@@ -258,6 +234,22 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                 <h3 class="text-[12px] font-bold text-black uppercase tracking-widest">
                   Performance History
                 </h3>
+                <Show when={props.trendData?.current_status}>
+                  {(status) => (
+                    <span
+                      title={status().reason}
+                      class={`px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider border ${
+                        status().status === "regressed"
+                          ? "border-danger text-danger"
+                          : status().status === "insufficient"
+                            ? "border-warning text-warning"
+                            : "border-success text-success"
+                      }`}
+                    >
+                      {status().status}
+                    </span>
+                  )}
+                </Show>
                 <button
                   onClick={() => setShowTrendHelp(!showTrendHelp())}
                   class="w-4 h-4 rounded-full border border-text-muted text-[10px] text-text-muted flex items-center justify-center hover:border-black hover:text-black hover:bg-black/5 transition-colors"
@@ -301,39 +293,11 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                       </div>
 
                       <div>
-                        <div class="font-bold mb-1">Global Shift Markers</div>
-                        <p class="text-text-muted leading-relaxed">
-                          Orange dashed vertical lines indicate harness-level shifts detected across
-                          many benchmarks. Compare within an epoch for fair trend interpretation.
-                        </p>
-                      </div>
-
-                      <div>
                         <div class="font-bold mb-1">Value Modes</div>
                         <p class="text-text-muted leading-relaxed">
                           Use <span class="font-mono">ns</span> for absolute timings and
                           <span class="font-mono"> index</span> for normalized history where 100 is
-                          the epoch anchor.
-                        </p>
-                      </div>
-
-                      <div>
-                        <div class="font-bold mb-1">Status Reasons</div>
-                        <p class="text-text-muted leading-relaxed">
-                          Tooltips include reason codes for baseline/insufficient points and
-                          pre-epoch context points so you can see why a point is or is not compared.
-                        </p>
-                      </div>
-
-                      <div>
-                        <div class="font-bold mb-1">Point Filters</div>
-                        <p class="text-text-muted leading-relaxed">
-                          Use filter buttons to view all points, only compared points, or only
-                          pre-epoch context points.
-                        </p>
-                        <p class="text-text-muted leading-relaxed mt-1">
-                          The chart legend also shows point-color meaning for compared vs pre-epoch
-                          context.
+                          the first visible point.
                         </p>
                       </div>
                     </div>
@@ -388,33 +352,6 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                       </div>
                     </div>
                   </label>
-                  <label class="flex items-center gap-1">
-                    <span class="text-[9px] sm:text-[10px] uppercase tracking-wider text-text-muted font-bold">
-                      Filter
-                    </span>
-                    <div class="relative">
-                      <select
-                        class="appearance-none pl-2 pr-6 py-1 border border-border rounded-none text-[11px] bg-white text-black outline-none cursor-pointer font-mono font-medium hover:border-black transition-colors"
-                        value={reasonFilter()}
-                        onChange={(e) =>
-                          setReasonFilter(e.currentTarget.value as "all" | "compared" | "pre_epoch")
-                        }
-                      >
-                        <option value="all">all points</option>
-                        <option value="compared">compared</option>
-                        <option value="pre_epoch">pre-epoch</option>
-                      </select>
-                      <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1.5 text-black">
-                        <svg
-                          class="h-2.5 w-2.5 fill-current"
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 20 20"
-                        >
-                          <path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z" />
-                        </svg>
-                      </div>
-                    </div>
-                  </label>
                 </div>
               </div>
             </div>
@@ -429,16 +366,11 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
               >
                 <TrendChart
                   data={props.trendData!.points}
-                  changePoints={props.trendData!.change_points}
-                  globalShifts={props.trendData!.global_shifts}
                   overlayData={props.branchTrendData?.points}
                   overlayBranch={props.branch}
                   range={props.chartRange}
                   valueMode={chartValueMode()}
-                  reasonFilter={reasonFilter()}
                   currentRunId={props.runId}
-                  baselineCILowerNs={props.trendData!.baseline_ci_lower_ns}
-                  baselineCIUpperNs={props.trendData!.baseline_ci_upper_ns}
                   onPointClick={props.onTrendClick}
                 />
               </Show>
@@ -447,21 +379,6 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
               <span>Error Bars: 95% CI</span>
               <span>Shaded: ±1 SD</span>
             </div>
-            <Show when={latestGlobalShift()}>
-              <div class="mt-2 text-[10px] text-amber-800 font-mono uppercase tracking-wider">
-                Global shift at run #{latestGlobalShift()!.run_id}: +
-                {latestGlobalShift()!.geo_increase_pct.toFixed(1)}% geometric increase across{" "}
-                {latestGlobalShift()!.compared_benchmarks} benchmarks
-              </div>
-            </Show>
-            <Show when={topTrendReasons().length > 0}>
-              <div class="mt-1 text-[10px] text-text-muted font-mono uppercase tracking-wider">
-                Status reasons:{" "}
-                {topTrendReasons()
-                  .map(([k, v]) => `${reasonLabel(k)}=${v}`)
-                  .join(", ")}
-              </div>
-            </Show>
           </div>
 
           {/* Flamegraph Column */}

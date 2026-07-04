@@ -711,6 +711,27 @@ func TestListRunsForBranchMainIncludesLegacyValues(t *testing.T) {
 	}
 }
 
+func TestGetLatestRunForBranchBreaksTimestampTiesByID(t *testing.T) {
+	database := openTestDB(t)
+	runDate := "2026-02-12T12:00:00Z"
+	firstID, err := database.InsertRun(&Run{CommitHash: "tie-1", Branch: "main", RunDate: runDate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := database.InsertRun(&Run{CommitHash: "tie-2", Branch: "main", RunDate: runDate})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	latest, err := database.GetLatestRunForBranch("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.ID != secondID {
+		t.Fatalf("latest run ID = %d, want %d (first was %d)", latest.ID, secondID, firstID)
+	}
+}
+
 func TestRegressionCacheGenerationInvalidation(t *testing.T) {
 	db := openTestDB(t)
 

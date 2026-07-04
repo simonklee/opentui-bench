@@ -608,13 +608,13 @@ func (db *DB) GetLatestRunForBranch(branch string) (*Run, error) {
 			SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
 			FROM runs
 			WHERE branch = 'main' OR branch IS NULL OR branch = ''
-			ORDER BY run_date DESC LIMIT 1`
+			ORDER BY julianday(run_date) DESC, id DESC LIMIT 1`
 	} else {
 		query = `
 			SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
 			FROM runs
 			WHERE branch = ?
-			ORDER BY run_date DESC LIMIT 1`
+			ORDER BY julianday(run_date) DESC, id DESC LIMIT 1`
 		args = append(args, branch)
 	}
 
@@ -651,7 +651,7 @@ func (db *DB) ListRunsForBranch(branch string, limit int) ([]Run, error) {
 		args = append(args, branch)
 	}
 
-	query += ` ORDER BY run_date DESC`
+	query += ` ORDER BY julianday(run_date) DESC, id DESC`
 	if limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, limit)
