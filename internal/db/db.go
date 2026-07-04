@@ -3,7 +3,9 @@ package db
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -113,12 +115,11 @@ CREATE TABLE IF NOT EXISTS regression_cache (
     window INTEGER NOT NULL,
     min_points INTEGER NOT NULL,
     baseline_offset INTEGER NOT NULL,
-    df_mode TEXT NOT NULL,
     generation_key TEXT NOT NULL,
     response_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE(run_id, branch, window, min_points, baseline_offset, df_mode)
+    UNIQUE(run_id, branch, window, min_points, baseline_offset)
 );
 CREATE INDEX IF NOT EXISTS idx_regression_cache_branch_run ON regression_cache(branch, run_id DESC);
 CREATE INDEX IF NOT EXISTS idx_regression_cache_generation ON regression_cache(generation_key);
@@ -184,6 +185,10 @@ func Open(dbPath string) (*DB, error) {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
+	if err := database.removeObsoleteDFCache(); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("remove obsolete regression cache: %w", err)
+	}
 
 	if _, err := sqlDB.Exec(schemaSQL); err != nil {
 		_ = sqlDB.Close()
@@ -191,6 +196,35 @@ func Open(dbPath string) (*DB, error) {
 	}
 
 	return database, nil
+}
+
+// Phase 3 cache entries used df_mode as part of their identity and are not
+// meaningful under the run-level estimator. The cache is disposable, so drop
+// the old table before schema initialization rather than serving stale scores.
+func (db *DB) removeObsoleteDFCache() error {
+	rows, err := db.Query(`PRAGMA table_info(regression_cache)`)
+	if err != nil {
+		return err
+	}
+	hasDFMode := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		hasDFMode = hasDFMode || name == "df_mode"
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !hasDFMode {
+		return nil
+	}
+	_, err = db.Exec(`DROP TABLE regression_cache`)
+	return err
 }
 
 func (db *DB) migrate() error {
@@ -389,7 +423,6 @@ type RegressionCacheKey struct {
 	Window         int
 	MinPoints      int
 	BaselineOffset int
-	DFMode         string
 }
 
 type RegressionCacheEntry struct {
@@ -979,16 +1012,94 @@ func (db *DB) GetTrend(resultID int64, limit int) ([]struct {
 }
 
 func (db *DB) DeleteRun(id int64) error {
-	_, err := db.Exec(`DELETE FROM runs WHERE id = ?`, id)
-	return err
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DELETE FROM runs WHERE id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM regression_cache`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (db *DB) DeleteRunsBefore(date string) (int64, error) {
-	res, err := db.Exec(`DELETE FROM runs WHERE run_date < ?`, date)
+	tx, err := db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(`DELETE FROM runs WHERE run_date < ?`, date)
+	if err != nil {
+		return 0, err
+	}
+	deleted, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if deleted > 0 {
+		if _, err := tx.Exec(`DELETE FROM regression_cache`); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
+// RegressionDataFingerprint identifies all persisted benchmark inputs available
+// at a target's causal boundary. Future runs are deliberately excluded.
+func (db *DB) RegressionDataFingerprint(runID int64) (fingerprint string, err error) {
+	target, err := db.GetRun(runID)
+	if err != nil {
+		return "", err
+	}
+	rows, err := db.Query(`
+		SELECT ru.id, ru.commit_hash, COALESCE(ru.commit_hash_full, ''),
+		       COALESCE(ru.commit_message, ''), COALESCE(ru.commit_date, ''),
+		       COALESCE(ru.branch, ''), ru.run_date, COALESCE(ru.machine_id, ''),
+		       COALESCE(ru.notes, ''), COALESCE(ru.zig_optimize, ''),
+		       r.id, r.category, r.name, r.avg_ns, r.std_dev_ns, r.sample_count
+		FROM runs ru
+		LEFT JOIN results r ON r.run_id = ru.id
+		WHERE julianday(ru.run_date) < julianday(?)
+		   OR (julianday(ru.run_date) = julianday(?) AND ru.id <= ?)
+		ORDER BY julianday(ru.run_date), ru.id, r.category, r.name, r.id`,
+		target.RunDate, target.RunDate, target.ID)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	hash := sha256.New()
+	for rows.Next() {
+		var sourceRunID int64
+		var commitHash, commitHashFull, commitMessage, commitDate, branch, runDate, machineID, notes, zigOptimize string
+		var resultID, avgNs, stdDevNs, sampleCount sql.NullInt64
+		var category, name sql.NullString
+		if err := rows.Scan(
+			&sourceRunID, &commitHash, &commitHashFull, &commitMessage, &commitDate,
+			&branch, &runDate, &machineID, &notes, &zigOptimize,
+			&resultID, &category, &name, &avgNs, &stdDevNs, &sampleCount,
+		); err != nil {
+			return "", err
+		}
+		_, _ = fmt.Fprintf(hash, "%d:%q:%q:%q:%q:%q:%q:%q:%q:%q:%d:%q:%q:%d:%d:%d\n",
+			sourceRunID, commitHash, commitHashFull, commitMessage, commitDate, branch, runDate, machineID, notes, zigOptimize,
+			resultID.Int64, category.String, name.String, avgNs.Int64, stdDevNs.Int64, sampleCount.Int64)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func (db *DB) InsertFlamegraph(fg *Flamegraph) error {
@@ -1501,17 +1612,16 @@ func (db *DB) UpdateJobCommitHash(jobID int64, commitHash string) error {
 func (db *DB) GetRegressionCache(key RegressionCacheKey, generationKey string) (*RegressionCacheEntry, error) {
 	var entry RegressionCacheEntry
 	err := db.QueryRow(`
-		SELECT run_id, branch, window, min_points, baseline_offset, df_mode, generation_key, response_json, created_at, updated_at
+		SELECT run_id, branch, window, min_points, baseline_offset, generation_key, response_json, created_at, updated_at
 		FROM regression_cache
-		WHERE run_id = ? AND branch = ? AND window = ? AND min_points = ? AND baseline_offset = ? AND df_mode = ? AND generation_key = ?`,
-		key.RunID, key.Branch, key.Window, key.MinPoints, key.BaselineOffset, key.DFMode, generationKey,
+		WHERE run_id = ? AND branch = ? AND window = ? AND min_points = ? AND baseline_offset = ? AND generation_key = ?`,
+		key.RunID, key.Branch, key.Window, key.MinPoints, key.BaselineOffset, generationKey,
 	).Scan(
 		&entry.Key.RunID,
 		&entry.Key.Branch,
 		&entry.Key.Window,
 		&entry.Key.MinPoints,
 		&entry.Key.BaselineOffset,
-		&entry.Key.DFMode,
 		&entry.GenerationKey,
 		&entry.ResponseJSON,
 		&entry.CreatedAt,
@@ -1536,10 +1646,10 @@ func (db *DB) UpsertRegressionCache(entry *RegressionCacheEntry) error {
 
 	_, err := db.Exec(`
 		INSERT INTO regression_cache (
-			run_id, branch, window, min_points, baseline_offset, df_mode,
+			run_id, branch, window, min_points, baseline_offset,
 			generation_key, response_json, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(run_id, branch, window, min_points, baseline_offset, df_mode)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(run_id, branch, window, min_points, baseline_offset)
 		DO UPDATE SET
 			generation_key = excluded.generation_key,
 			response_json = excluded.response_json,
@@ -1549,7 +1659,6 @@ func (db *DB) UpsertRegressionCache(entry *RegressionCacheEntry) error {
 		entry.Key.Window,
 		entry.Key.MinPoints,
 		entry.Key.BaselineOffset,
-		entry.Key.DFMode,
 		entry.GenerationKey,
 		entry.ResponseJSON,
 		entry.CreatedAt,

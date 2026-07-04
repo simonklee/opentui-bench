@@ -5,16 +5,10 @@ import (
 	"time"
 )
 
-func snapshotObservation(id int64, at time.Time, median float64) OrderedRunStat {
+func snapshotObservation(id int64, at time.Time, avg float64) OrderedRunStat {
 	return OrderedRunStat{
 		RunDate: at,
-		Stat: RunStat{
-			RunID:       id,
-			Median:      median,
-			Sem:         1,
-			SampleCount: 3,
-			StdDev:      2,
-		},
+		Stat:    RunStat{RunID: id, Avg: avg},
 	}
 }
 
@@ -29,12 +23,12 @@ func TestEvaluateSnapshotExcludesTargetAndFuture(t *testing.T) {
 		snapshotObservation(3, at.Add(2*time.Hour), 100),
 	}
 
-	evaluation := EvaluateSnapshot(target, observations, SnapshotConfig{Window: 3, MinPoints: 3, Alpha: 0.01, DFMode: "baseline"})
+	evaluation := EvaluateSnapshot(target, observations, SnapshotConfig{Window: 3, MinPoints: 3})
 	if evaluation.Baseline == nil {
 		t.Fatal("expected baseline")
 	}
-	if evaluation.Baseline.Median != 100 {
-		t.Fatalf("baseline median = %v, want 100", evaluation.Baseline.Median)
+	if !closeEnough(evaluation.Baseline.BaselineNs, 100) {
+		t.Fatalf("baseline = %v, want 100", evaluation.Baseline.BaselineNs)
 	}
 	if len(evaluation.History) != 3 {
 		t.Fatalf("history length = %d, want 3", len(evaluation.History))
@@ -56,7 +50,7 @@ func TestEvaluateSnapshotUsesInstantThenIDOrdering(t *testing.T) {
 		snapshotObservation(1, at.Add(-time.Hour), 100),
 	}
 
-	evaluation := EvaluateSnapshot(target, observations, SnapshotConfig{Window: 2, MinPoints: 2, BaselineOffset: 1, Alpha: 0.01, DFMode: "baseline"})
+	evaluation := EvaluateSnapshot(target, observations, SnapshotConfig{Window: 2, MinPoints: 2, BaselineOffset: 1})
 	if len(evaluation.History) != 2 {
 		t.Fatalf("history length = %d, want 2", len(evaluation.History))
 	}

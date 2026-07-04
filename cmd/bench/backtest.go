@@ -17,15 +17,12 @@ func backtestCmd() *cobra.Command {
 	var window int
 	var minPoints int
 	var baselineOffset int
-	var alpha float64
 	var fdr float64
 	var minRetainedOffShiftSignal float64
 	var nearShiftWindow int
 	var postShiftWindow int
 	var knownShiftsRaw string
-	var dfModesRaw string
 	var floorsRaw string
-	var cpPoliciesRaw string
 	var jsonOutput string
 
 	cmd := &cobra.Command{
@@ -43,19 +40,9 @@ category concentration, and fraction of alerts near known global-shift events.
 			}
 			defer cleanup()
 
-			dfModes := parseCSVItems(dfModesRaw)
-			if len(dfModes) == 0 {
-				return fmt.Errorf("--df-modes must include at least one value")
-			}
-
 			floors, err := parseCSVFloat64s(floorsRaw)
 			if err != nil {
 				return fmt.Errorf("parse --absolute-floors: %w", err)
-			}
-
-			cpPolicies, err := parseCSVPolicies(cpPoliciesRaw)
-			if err != nil {
-				return fmt.Errorf("parse --cp-policies: %w", err)
 			}
 
 			knownShifts, err := parseCSVInt64s(knownShiftsRaw)
@@ -63,7 +50,7 @@ category concentration, and fraction of alerts near known global-shift events.
 				return fmt.Errorf("parse --known-shifts: %w", err)
 			}
 
-			configs, err := backtest.BuildConfigGrid(dfModes, floors, cpPolicies)
+			configs, err := backtest.BuildConfigGrid(floors)
 			if err != nil {
 				return err
 			}
@@ -73,7 +60,6 @@ category concentration, and fraction of alerts near known global-shift events.
 			opts.Window = window
 			opts.MinPoints = minPoints
 			opts.BaselineOffset = baselineOffset
-			opts.Alpha = alpha
 			opts.FDR = fdr
 			opts.MinRetainedOffShiftSignal = minRetainedOffShiftSignal
 			opts.NearShiftWindow = nearShiftWindow
@@ -104,17 +90,14 @@ category concentration, and fraction of alerts near known global-shift events.
 
 	cmd.Flags().StringVar(&branch, "branch", "main", "branch to replay")
 	cmd.Flags().IntVar(&window, "window", 30, "comparable-runs window")
-	cmd.Flags().IntVar(&minPoints, "min-points", 5, "minimum baseline points")
+	cmd.Flags().IntVar(&minPoints, "min-points", 5, "minimum baseline points (at least 2)")
 	cmd.Flags().IntVar(&baselineOffset, "baseline-offset", 3, "runs skipped before baseline construction")
-	cmd.Flags().Float64Var(&alpha, "alpha", 0.01, "per-hypothesis alpha for t-test path")
 	cmd.Flags().Float64Var(&fdr, "fdr", 0.01, "Benjamini-Hochberg FDR threshold")
 	cmd.Flags().Float64Var(&minRetainedOffShiftSignal, "min-retained-off-shift-signal", 0.25, "minimum retained off-shift signal ratio (0-1) required for recommendation eligibility")
 	cmd.Flags().IntVar(&nearShiftWindow, "near-shift-window", 20, "runs after a shift counted as near-shift")
 	cmd.Flags().IntVar(&postShiftWindow, "post-shift-window", 25, "runs after a shift used for burst/decay metrics")
 	cmd.Flags().StringVar(&knownShiftsRaw, "known-shifts", "", "optional comma-separated shift run IDs (default: auto-detect)")
-	cmd.Flags().StringVar(&dfModesRaw, "df-modes", "baseline,latest", "comma-separated df modes")
 	cmd.Flags().StringVar(&floorsRaw, "absolute-floors", "0,1000,5000", "comma-separated absolute floors in ns")
-	cmd.Flags().StringVar(&cpPoliciesRaw, "cp-policies", "off,attribution-only,recent-trigger", "comma-separated change-point policies")
 	cmd.Flags().StringVar(&jsonOutput, "json", "", "optional path to write JSON output")
 
 	return cmd
@@ -127,8 +110,8 @@ func printModelCard(report *backtest.Report) {
 	fmt.Printf("Near-shift window: %d | Post-shift window: %d\n", report.Options.NearShiftWindow, report.Options.PostShiftWindow)
 	fmt.Printf("Min retained off-shift signal for recommendation: %.0f%%\n\n", report.Options.MinRetainedOffShiftSignal*100.0)
 
-	fmt.Printf("%-4s %-9s %-7s %-17s %-6s %-6s %-6s %7s %10s %8s %8s %8s %11s %12s %8s\n",
-		"Rank", "DF", "Floor", "CP Policy", "Best", "Curr", "Elig", "Retain", "Alerts/Run", "Burst", "Decay", "CatHHI", "NearShift%", "OffShift/Run", "Score")
+	fmt.Printf("%-4s %-7s %-6s %-6s %-6s %7s %10s %8s %8s %8s %11s %12s %8s\n",
+		"Rank", "Floor", "Best", "Curr", "Elig", "Retain", "Alerts/Run", "Burst", "Decay", "CatHHI", "NearShift%", "OffShift/Run", "Score")
 
 	for i, result := range report.ConfigResults {
 		best := ""
@@ -143,11 +126,9 @@ func printModelCard(report *backtest.Report) {
 		if result.EligibleForRecommendation {
 			elig = "yes"
 		}
-		fmt.Printf("%-4d %-9s %-7.0f %-17s %-6s %-6s %-6s %6.1f%% %10.2f %8.2f %8.2f %8.3f %10.1f%% %12.2f %8.3f\n",
+		fmt.Printf("%-4d %-7.0f %-6s %-6s %-6s %6.1f%% %10.2f %8.2f %8.2f %8.3f %10.1f%% %12.2f %8.3f\n",
 			i+1,
-			result.Config.DFMode,
 			result.Config.MinAbsoluteNs,
-			result.Config.ChangePointPolicy,
 			best,
 			curr,
 			elig,
@@ -164,11 +145,7 @@ func printModelCard(report *backtest.Report) {
 
 	recommended := findRecommended(report.ConfigResults)
 	if recommended != nil {
-		fmt.Printf("\nRecommended defaults from scorecard: df=%s, absolute_floor=%.0fns, cp_policy=%s\n",
-			recommended.Config.DFMode,
-			recommended.Config.MinAbsoluteNs,
-			recommended.Config.ChangePointPolicy,
-		)
+		fmt.Printf("\nRecommended absolute floor from scorecard: %.0fns\n", recommended.Config.MinAbsoluteNs)
 	}
 }
 
@@ -182,7 +159,7 @@ func findRecommended(results []backtest.ConfigResult) *backtest.ConfigResult {
 }
 
 func isCurrentDefault(cfg backtest.Config) bool {
-	return cfg.DFMode == "baseline" && cfg.MinAbsoluteNs == 5000 && cfg.ChangePointPolicy == backtest.ChangePointPolicyRecentTrigger
+	return cfg.MinAbsoluteNs == 5000
 }
 
 func formatRunIDs(ids []int64) string {
@@ -241,22 +218,6 @@ func parseCSVInt64s(raw string) ([]int64, error) {
 			return nil, fmt.Errorf("invalid int64 %q", item)
 		}
 		out = append(out, value)
-	}
-	return out, nil
-}
-
-func parseCSVPolicies(raw string) ([]backtest.ChangePointPolicy, error) {
-	items := parseCSVItems(raw)
-	if len(items) == 0 {
-		return nil, fmt.Errorf("no values provided")
-	}
-	out := make([]backtest.ChangePointPolicy, 0, len(items))
-	for _, item := range items {
-		policy, err := backtest.ParseChangePointPolicy(item)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, policy)
 	}
 	return out, nil
 }

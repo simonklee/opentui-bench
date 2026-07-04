@@ -11,22 +11,12 @@ import (
 	"opentui-bench/internal/stats"
 )
 
-type ChangePointPolicy string
-
-const (
-	ChangePointPolicyOff             ChangePointPolicy = "off"
-	ChangePointPolicyAttributionOnly ChangePointPolicy = "attribution-only"
-	ChangePointPolicyRecentTrigger   ChangePointPolicy = "recent-trigger"
-)
-
 type Config struct {
-	DFMode            string            `json:"df_mode"`
-	MinAbsoluteNs     float64           `json:"min_absolute_ns"`
-	ChangePointPolicy ChangePointPolicy `json:"change_point_policy"`
+	MinAbsoluteNs float64 `json:"min_absolute_ns"`
 }
 
 func (c Config) Label() string {
-	return fmt.Sprintf("df=%s floor=%.0f cp=%s", c.DFMode, c.MinAbsoluteNs, c.ChangePointPolicy)
+	return fmt.Sprintf("floor=%.0f", c.MinAbsoluteNs)
 }
 
 type Options struct {
@@ -34,17 +24,11 @@ type Options struct {
 	Window                    int     `json:"window"`
 	MinPoints                 int     `json:"min_points"`
 	BaselineOffset            int     `json:"baseline_offset"`
-	Alpha                     float64 `json:"alpha"`
 	FDR                       float64 `json:"fdr"`
 	MinRetainedOffShiftSignal float64 `json:"min_retained_off_shift_signal"`
 	GlobalShiftMinBench       int     `json:"global_shift_min_benchmarks"`
 	GlobalShiftMinShare       float64 `json:"global_shift_min_positive_share"`
 	GlobalShiftMinGeoPct      float64 `json:"global_shift_min_geo_increase_pct"`
-
-	ChangePointMinSegment int     `json:"change_point_min_segment"`
-	ChangePointAlpha      float64 `json:"change_point_alpha"`
-	ChangePointPerms      int     `json:"change_point_perms"`
-	ChangePointMaxAgeRuns int     `json:"change_point_max_age_runs"`
 
 	NearShiftWindow  int     `json:"near_shift_window"`
 	PostShiftWindow  int     `json:"post_shift_window"`
@@ -91,18 +75,10 @@ type shiftMetrics struct {
 	geoPct   float64
 }
 
-type changePointCandidate struct {
-	pValue      float64
-	effectPct   float64
-	magnitudeNs float64
-	isRecent    bool
-}
-
 type benchmarkContext struct {
 	Category     string
 	Target       stats.OrderedRunStat
 	Observations []stats.OrderedRunStat
-	CP           *changePointCandidate
 }
 
 type runContext struct {
@@ -125,82 +101,40 @@ func DefaultOptions() Options {
 		Window:                    30,
 		MinPoints:                 5,
 		BaselineOffset:            3,
-		Alpha:                     0.01,
 		FDR:                       0.01,
 		MinRetainedOffShiftSignal: 0.25,
 		GlobalShiftMinBench:       50,
 		GlobalShiftMinShare:       0.75,
 		GlobalShiftMinGeoPct:      10.0,
-		ChangePointMinSegment:     5,
-		ChangePointAlpha:          0.05,
-		ChangePointPerms:          199,
-		ChangePointMaxAgeRuns:     2,
 		NearShiftWindow:           20,
 		PostShiftWindow:           25,
 	}
 }
 
 func DefaultConfigs() []Config {
-	dfModes := []string{"baseline", "latest"}
 	floors := []float64{0, 1000, 5000}
-	cpPolicies := []ChangePointPolicy{
-		ChangePointPolicyOff,
-		ChangePointPolicyAttributionOnly,
-		ChangePointPolicyRecentTrigger,
-	}
-	configs, _ := BuildConfigGrid(dfModes, floors, cpPolicies)
+	configs, _ := BuildConfigGrid(floors)
 	return configs
 }
 
-func ParseChangePointPolicy(raw string) (ChangePointPolicy, error) {
-	normalized := strings.ToLower(strings.TrimSpace(raw))
-	switch normalized {
-	case string(ChangePointPolicyOff):
-		return ChangePointPolicyOff, nil
-	case string(ChangePointPolicyAttributionOnly), "attribution_only":
-		return ChangePointPolicyAttributionOnly, nil
-	case string(ChangePointPolicyRecentTrigger), "recent_trigger":
-		return ChangePointPolicyRecentTrigger, nil
-	default:
-		return "", fmt.Errorf("invalid change-point policy %q", raw)
-	}
-}
-
-func BuildConfigGrid(dfModes []string, floors []float64, cpPolicies []ChangePointPolicy) ([]Config, error) {
-	if len(dfModes) == 0 {
-		return nil, fmt.Errorf("at least one df mode is required")
-	}
+func BuildConfigGrid(floors []float64) ([]Config, error) {
 	if len(floors) == 0 {
 		return nil, fmt.Errorf("at least one absolute floor is required")
 	}
-	if len(cpPolicies) == 0 {
-		return nil, fmt.Errorf("at least one change-point policy is required")
-	}
 
-	configs := make([]Config, 0, len(dfModes)*len(floors)*len(cpPolicies))
+	configs := make([]Config, 0, len(floors))
 	seen := make(map[string]struct{})
-	for _, dfMode := range dfModes {
-		dfMode = strings.ToLower(strings.TrimSpace(dfMode))
-		if dfMode != "baseline" && dfMode != "latest" {
-			return nil, fmt.Errorf("invalid df mode %q", dfMode)
+	for _, floor := range floors {
+		if floor < 0 {
+			return nil, fmt.Errorf("absolute floor must be >= 0 (got %.2f)", floor)
 		}
-		for _, floor := range floors {
-			if floor < 0 {
-				return nil, fmt.Errorf("absolute floor must be >= 0 (got %.2f)", floor)
-			}
-			for _, cpPolicy := range cpPolicies {
-				if _, err := ParseChangePointPolicy(string(cpPolicy)); err != nil {
-					return nil, err
-				}
-				cfg := Config{DFMode: dfMode, MinAbsoluteNs: floor, ChangePointPolicy: cpPolicy}
-				key := cfg.Label()
-				if _, ok := seen[key]; ok {
-					continue
-				}
-				seen[key] = struct{}{}
-				configs = append(configs, cfg)
-			}
+		cfg := Config{MinAbsoluteNs: floor}
+		key := cfg.Label()
+		if _, ok := seen[key]; ok {
+			continue
 		}
+		seen[key] = struct{}{}
+		configs = append(configs, cfg)
 	}
 
 	return configs, nil
@@ -286,12 +220,11 @@ func normalizeOptions(opts Options) Options {
 	}
 	if opts.MinPoints <= 0 {
 		opts.MinPoints = defaults.MinPoints
+	} else if opts.MinPoints < 2 {
+		opts.MinPoints = 2
 	}
 	if opts.BaselineOffset < 0 {
 		opts.BaselineOffset = defaults.BaselineOffset
-	}
-	if opts.Alpha <= 0 {
-		opts.Alpha = defaults.Alpha
 	}
 	if opts.FDR <= 0 {
 		opts.FDR = defaults.FDR
@@ -310,18 +243,6 @@ func normalizeOptions(opts Options) Options {
 	}
 	if opts.GlobalShiftMinGeoPct <= 0 {
 		opts.GlobalShiftMinGeoPct = defaults.GlobalShiftMinGeoPct
-	}
-	if opts.ChangePointMinSegment <= 0 {
-		opts.ChangePointMinSegment = defaults.ChangePointMinSegment
-	}
-	if opts.ChangePointAlpha <= 0 {
-		opts.ChangePointAlpha = defaults.ChangePointAlpha
-	}
-	if opts.ChangePointPerms <= 0 {
-		opts.ChangePointPerms = defaults.ChangePointPerms
-	}
-	if opts.ChangePointMaxAgeRuns < 0 {
-		opts.ChangePointMaxAgeRuns = defaults.ChangePointMaxAgeRuns
 	}
 	if opts.NearShiftWindow < 0 {
 		opts.NearShiftWindow = defaults.NearShiftWindow
@@ -448,7 +369,7 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 		if !hasLatest {
 			continue
 		}
-		if latestResult.SampleCount < 2 || latestResult.StdDevNs <= 0 {
+		if latestResult.AvgNs <= 0 {
 			continue
 		}
 		benchmarkTrends, err := database.GetTrend(latestResult.ID, opts.Window+opts.BaselineOffset+1)
@@ -458,8 +379,7 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 
 		var observations []stats.OrderedRunStat
 		var targetObservation stats.OrderedRunStat
-		benchmarkRunAgeByID := make(map[int64]int, len(benchmarkTrends))
-		for age, trend := range benchmarkTrends {
+		for _, trend := range benchmarkTrends {
 			run := trend.Run
 			result := trend.Result
 			runDate, err := time.Parse(time.RFC3339Nano, run.RunDate)
@@ -468,49 +388,22 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 			}
 			observation := stats.OrderedRunStat{RunDate: runDate, Stat: resultToRunStat(run.ID, result)}
 			observations = append(observations, observation)
-			benchmarkRunAgeByID[run.ID] = age
 			if run.ID == latestRunID {
 				targetObservation = observation
 			}
 		}
 
-		var series []stats.RunStat
-		for i := len(benchmarkTrends) - 1; i >= 0; i-- {
-			trend := benchmarkTrends[i]
-			series = append(series, resultToRunStat(trend.Run.ID, trend.Result))
-		}
-
 		evaluation := stats.EvaluateSnapshot(targetObservation, observations, stats.SnapshotConfig{
 			Window: opts.Window, MinPoints: opts.MinPoints, BaselineOffset: opts.BaselineOffset,
-			Alpha: opts.Alpha, DFMode: "baseline",
 		})
 		if evaluation.Baseline == nil {
 			continue
-		}
-
-		var cp *changePointCandidate
-		if len(series) >= 2*opts.ChangePointMinSegment {
-			points := stats.DetectChangePoints(series, opts.ChangePointMinSegment, opts.ChangePointAlpha, opts.ChangePointPerms)
-			for i := len(points) - 1; i >= 0; i-- {
-				point := points[i]
-				if point.Magnitude <= 0 {
-					continue
-				}
-				cp = &changePointCandidate{
-					pValue:      point.PValue,
-					effectPct:   point.EffectPercent,
-					magnitudeNs: point.Magnitude,
-					isRecent:    benchmarkRunAgeByID[point.RunID] <= opts.ChangePointMaxAgeRuns,
-				}
-				break
-			}
 		}
 
 		ctx.Benchmarks = append(ctx.Benchmarks, benchmarkContext{
 			Category:     latestResult.Category,
 			Target:       targetObservation,
 			Observations: observations,
-			CP:           cp,
 		})
 	}
 
@@ -545,87 +438,33 @@ func evaluateConfigForRun(ctx runContext, cfg Config, opts Options) runOutcome {
 		return outcome
 	}
 
-	type hypothesis struct {
-		benchIndex int
-		kind       string
-		pValue     float64
-	}
 	type benchEval struct {
-		category    string
-		testOK      bool
-		cpPractical bool
+		category string
+		testOK   bool
 	}
 
-	hypotheses := make([]hypothesis, 0, len(ctx.Benchmarks)*2)
+	pValues := make([]float64, len(ctx.Benchmarks))
 	evals := make([]benchEval, len(ctx.Benchmarks))
 
 	for i, bench := range ctx.Benchmarks {
 		evaluation := stats.EvaluateSnapshot(bench.Target, bench.Observations, stats.SnapshotConfig{
 			Window: opts.Window, MinPoints: opts.MinPoints, BaselineOffset: opts.BaselineOffset,
-			Alpha: opts.Alpha, DFMode: cfg.DFMode,
 		})
 		if evaluation.Baseline == nil {
 			continue
 		}
 		testResult := evaluation.Result
-		changePct := (bench.Target.Stat.Median - evaluation.Baseline.Median) / evaluation.Baseline.Median * 100.0
-		testOK := changePct >= testResult.MinEffectPercent && (bench.Target.Stat.Median-evaluation.Baseline.Median) >= cfg.MinAbsoluteNs
-
-		cpPractical := false
-		if bench.CP != nil {
-			cpPractical = bench.CP.isRecent &&
-				bench.CP.effectPct >= testResult.MinEffectPercent &&
-				bench.CP.magnitudeNs >= cfg.MinAbsoluteNs
-		}
-
-		evals[i] = benchEval{category: bench.Category, testOK: testOK, cpPractical: cpPractical}
-
-		if testResult.PValue != nil {
-			hypotheses = append(hypotheses, hypothesis{benchIndex: i, kind: "t_test", pValue: *testResult.PValue})
-		}
-		if cfg.ChangePointPolicy == ChangePointPolicyRecentTrigger && bench.CP != nil && bench.CP.isRecent {
-			hypotheses = append(hypotheses, hypothesis{benchIndex: i, kind: "change_point", pValue: bench.CP.pValue})
-		}
+		testOK := *testResult.ChangePercent >= stats.MinPracticalRegressionEffectPercent &&
+			*testResult.AbsoluteChangeNs >= cfg.MinAbsoluteNs
+		evals[i] = benchEval{category: bench.Category, testOK: testOK}
+		pValues[i] = *testResult.PValue
 	}
 
-	type selectedSignal struct {
-		adjPValue float64
-	}
-	selectedByBench := make(map[int]selectedSignal)
-	if len(hypotheses) > 0 {
-		pValues := make([]float64, len(hypotheses))
-		for i, h := range hypotheses {
-			pValues[i] = h.pValue
+	for _, result := range stats.BenjaminiHochberg(pValues, opts.FDR) {
+		if result.IsSignificant && evals[result.Index].testOK {
+			outcome.AlertCount++
+			outcome.CategoryMap[evals[result.Index].category]++
 		}
-
-		bhResults := stats.BenjaminiHochberg(pValues, opts.FDR)
-		for _, bh := range bhResults {
-			if !bh.IsSignificant {
-				continue
-			}
-			h := hypotheses[bh.Index]
-			eval := evals[h.benchIndex]
-			practicalOK := false
-			switch h.kind {
-			case "t_test":
-				practicalOK = eval.testOK
-			case "change_point":
-				practicalOK = eval.cpPractical
-			}
-			if !practicalOK {
-				continue
-			}
-
-			current, exists := selectedByBench[h.benchIndex]
-			if !exists || bh.AdjPValue < current.adjPValue {
-				selectedByBench[h.benchIndex] = selectedSignal{adjPValue: bh.AdjPValue}
-			}
-		}
-	}
-
-	for idx := range selectedByBench {
-		outcome.AlertCount++
-		outcome.CategoryMap[evals[idx].category]++
 	}
 
 	return outcome
@@ -862,7 +701,7 @@ func computeShiftMetrics(getResults func(int64) ([]db.Result, error), newerRunID
 
 	olderMap := make(map[db.BenchmarkKey]int64, len(olderResults))
 	for _, result := range olderResults {
-		olderMap[db.BenchmarkKey{Category: result.Category, Name: result.Name}] = result.P50Ns
+		olderMap[db.BenchmarkKey{Category: result.Category, Name: result.Name}] = result.AvgNs
 	}
 
 	compared := 0
@@ -870,14 +709,14 @@ func computeShiftMetrics(getResults func(int64) ([]db.Result, error), newerRunID
 	logSum := 0.0
 	for _, newer := range newerResults {
 		older, ok := olderMap[db.BenchmarkKey{Category: newer.Category, Name: newer.Name}]
-		if !ok || older <= 0 || newer.P50Ns <= 0 {
+		if !ok || older <= 0 || newer.AvgNs <= 0 {
 			continue
 		}
 		compared++
-		if newer.P50Ns > older {
+		if newer.AvgNs > older {
 			positive++
 		}
-		logSum += math.Log(float64(newer.P50Ns) / float64(older))
+		logSum += math.Log(float64(newer.AvgNs) / float64(older))
 	}
 	if compared == 0 {
 		return shiftMetrics{}, nil
@@ -893,16 +732,9 @@ func computeShiftMetrics(getResults func(int64) ([]db.Result, error), newerRunID
 }
 
 func resultToRunStat(runID int64, result db.Result) stats.RunStat {
-	sem := 0.0
-	if result.SampleCount >= 2 {
-		sem = float64(result.StdDevNs) / math.Sqrt(float64(result.SampleCount))
-	}
 	return stats.RunStat{
-		RunID:       runID,
-		Median:      float64(result.P50Ns),
-		Sem:         sem,
-		SampleCount: result.SampleCount,
-		StdDev:      float64(result.StdDevNs),
+		RunID: runID,
+		Avg:   float64(result.AvgNs),
 	}
 }
 

@@ -15,8 +15,6 @@ type SnapshotConfig struct {
 	Window         int
 	MinPoints      int
 	BaselineOffset int
-	Alpha          float64
-	DFMode         string
 }
 
 type SnapshotEvaluation struct {
@@ -70,6 +68,6 @@ func EvaluateSnapshot(target OrderedRunStat, observations []OrderedRunStat, conf
 	return SnapshotEvaluation{
 		History:  history,
 		Baseline: baseline,
-		Result:   DetectRegressionWithDFMode(target.Stat, baseline, config.Alpha, config.DFMode),
+		Result:   DetectRegression(target.Stat, baseline),
 	}
 }

@@ -4,49 +4,21 @@ import "testing"
 
 func TestBuildConfigGrid(t *testing.T) {
 	configs, err := BuildConfigGrid(
-		[]string{"baseline", "latest"},
 		[]float64{0, 1000},
-		[]ChangePointPolicy{ChangePointPolicyOff, ChangePointPolicyRecentTrigger},
 	)
 	if err != nil {
 		t.Fatalf("BuildConfigGrid failed: %v", err)
 	}
 
-	if len(configs) != 8 {
-		t.Fatalf("expected 8 configs, got %d", len(configs))
-	}
-}
-
-func TestParseChangePointPolicy(t *testing.T) {
-	tests := []struct {
-		input string
-		want  ChangePointPolicy
-	}{
-		{input: "off", want: ChangePointPolicyOff},
-		{input: "attribution-only", want: ChangePointPolicyAttributionOnly},
-		{input: "recent-trigger", want: ChangePointPolicyRecentTrigger},
-		{input: "recent_trigger", want: ChangePointPolicyRecentTrigger},
-	}
-
-	for _, tc := range tests {
-		got, err := ParseChangePointPolicy(tc.input)
-		if err != nil {
-			t.Fatalf("ParseChangePointPolicy(%q) failed: %v", tc.input, err)
-		}
-		if got != tc.want {
-			t.Fatalf("ParseChangePointPolicy(%q): want %q, got %q", tc.input, tc.want, got)
-		}
-	}
-
-	if _, err := ParseChangePointPolicy("nope"); err == nil {
-		t.Fatalf("expected invalid policy to fail")
+	if len(configs) != 2 {
+		t.Fatalf("expected 2 configs, got %d", len(configs))
 	}
 }
 
 func TestBestResultIndex(t *testing.T) {
 	results := []ConfigResult{
 		{
-			Config: Config{DFMode: "baseline", MinAbsoluteNs: 0, ChangePointPolicy: ChangePointPolicyOff},
+			Config: Config{MinAbsoluteNs: 0},
 			Scorecard: Scorecard{
 				AlertsPerRun:           2.0,
 				BurstinessAfterShift:   8,
@@ -57,7 +29,7 @@ func TestBestResultIndex(t *testing.T) {
 			},
 		},
 		{
-			Config: Config{DFMode: "latest", MinAbsoluteNs: 1000, ChangePointPolicy: ChangePointPolicyRecentTrigger},
+			Config: Config{MinAbsoluteNs: 1000},
 			Scorecard: Scorecard{
 				AlertsPerRun:           1.0,
 				BurstinessAfterShift:   2,

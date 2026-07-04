@@ -1,7 +1,7 @@
 import { createResource, createSignal, createMemo, createEffect } from "solid-js";
 import { useParams, useSearchParams, useNavigate } from "@solidjs/router";
 import { api } from "../services/api";
-import type { BenchmarkResult, RegressionDFMode, TrendResponse } from "../services/api";
+import type { BenchmarkResult, TrendResponse } from "../services/api";
 import { globalCategory, globalFilter, setGlobalCategory, setGlobalFilter } from "../store";
 import { useFilteredBenchmarks } from "./useFilteredBenchmarks";
 import { useFilterParams } from "./useFilterParams";
@@ -45,7 +45,6 @@ export interface RegressionNavigationContext {
   introducedRunDate?: string;
   changePercent?: number;
   branch: string;
-  dfMode: RegressionDFMode;
 }
 
 export function useBenchmarkDetail() {
@@ -143,12 +142,8 @@ export function useBenchmarkDetail() {
     if (searchParams.from === "regressions") {
       const params = new URLSearchParams();
       const branch = firstSearchParam(searchParams.regression_branch);
-      const dfMode = firstSearchParam(searchParams.regression_df_mode);
       if (branch && branch !== "main") {
         params.set("branch", branch);
-      }
-      if (dfMode && dfMode !== "baseline") {
-        params.set("df_mode", dfMode);
       }
       navigate(params.toString() ? `/?${params.toString()}` : "/");
       return;
@@ -174,7 +169,6 @@ export function useBenchmarkDetail() {
       return undefined;
     }
 
-    const dfModeRaw = firstSearchParam(searchParams.regression_df_mode);
     return {
       latestRunId,
       latestResultId,
@@ -188,7 +182,6 @@ export function useBenchmarkDetail() {
       introducedRunDate: firstSearchParam(searchParams.regression_intro_run_date),
       changePercent: parseSearchParamFloat(searchParams.regression_change_pct),
       branch: firstSearchParam(searchParams.regression_branch) || "main",
-      dfMode: dfModeRaw === "latest" ? "latest" : "baseline",
     };
   });
 

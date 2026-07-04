@@ -6,8 +6,8 @@ func makeSeries(values []float64) []RunStat {
 	series := make([]RunStat, len(values))
 	for i, v := range values {
 		series[i] = RunStat{
-			RunID:  int64(i + 1),
-			Median: v,
+			RunID: int64(i + 1),
+			Avg:   v,
 		}
 	}
 	return series

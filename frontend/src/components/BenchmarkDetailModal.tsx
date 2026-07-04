@@ -239,11 +239,9 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                     <span
                       title={status().reason}
                       class={`px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider border ${
-                        status().status === "regressed"
-                          ? "border-danger text-danger"
-                          : status().status === "insufficient"
-                            ? "border-warning text-warning"
-                            : "border-success text-success"
+                        status().status === "insufficient"
+                          ? "border-warning text-warning"
+                          : "border-border text-text-muted"
                       }`}
                     >
                       {status().status}
@@ -272,7 +270,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                       <div>
                         <div class="font-bold mb-1">Error Bars (95% CI)</div>
                         <p class="text-text-muted leading-relaxed">
-                          Shows the 95% Confidence Interval around the median estimate. Narrower
+                          Shows the 95% confidence interval around the invocation average. Narrower
                           bars indicate higher precision (more stable results or more samples).
                         </p>
                       </div>
@@ -280,8 +278,8 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                       <div>
                         <div class="font-bold mb-1">Shaded Band (Standard Deviation)</div>
                         <p class="text-text-muted leading-relaxed">
-                          The light gray background band represents +-1 Standard Deviation around
-                          the median, showing the variability of individual benchmark runs.
+                          The light gray background band represents +-1 standard deviation around
+                          the average, showing variability between benchmark invocations.
                         </p>
                       </div>
 

@@ -37,9 +37,7 @@ export const useKeyboardShortcuts = () => {
         if (search.get("from") === "regressions") {
           const params = new URLSearchParams();
           const branch = search.get("regression_branch");
-          const dfMode = search.get("regression_df_mode");
           if (branch && branch !== "main") params.set("branch", branch);
-          if (dfMode && dfMode !== "baseline") params.set("df_mode", dfMode);
           const target = params.toString();
           navigate(target ? `/?${target}` : "/");
           return;

@@ -37,13 +37,8 @@ var tCritical95 = []float64{
 	2.042,
 }
 
-// CI95 computes a 95% confidence interval around the given value.
-// Uses standard error computed from sample standard deviation.
-// This works for both mean and median when the sample size is sufficient.
-//
-// For rigorous median CI, bootstrap methods would be more appropriate,
-// but the parametric approximation is acceptable for benchmark comparison
-// with typical sample sizes (3-30 samples).
+// CI95 computes a Student's t confidence interval around a sample mean.
+// stdDevNs must be the sample standard deviation of the averaged observations.
 func CI95(valueNs, stdDevNs, sampleCount int64) (lower, upper, sem int64) {
 	if sampleCount < 2 || stdDevNs == 0 {
 		return valueNs, valueNs, 0

@@ -1,13 +1,10 @@
-import { createResource, createSignal, Show, For } from "solid-js";
+import { createResource, Show, For } from "solid-js";
 import type { Component } from "solid-js";
 import { useNavigate, useSearchParams } from "@solidjs/router";
 import { api } from "../services/api";
-import type { Regression, RegressionDFMode } from "../services/api";
+import type { Regression } from "../services/api";
 import { formatNs } from "../utils/format";
 import { Check, AlertTriangle, Loader2, ArrowRight, GitBranch } from "lucide-solid";
-
-type DetectionFilter = "all" | "t_test" | "change_point";
-type SensitivityMode = "balanced" | "conservative";
 
 type RegressionWithContext = Regression & {
   run_id: number;
@@ -79,9 +76,7 @@ const CommitLink: Component<{ hash?: string; hashFull?: string }> = (props) => {
   );
 };
 
-const RegressionRow: Component<{ regression: RegressionWithContext; dfMode: RegressionDFMode }> = (
-  props,
-) => {
+const RegressionRow: Component<{ regression: RegressionWithContext }> = (props) => {
   const navigate = useNavigate();
   const reg = () => props.regression;
 
@@ -100,7 +95,6 @@ const RegressionRow: Component<{ regression: RegressionWithContext; dfMode: Regr
     params.set("regression_run_date", regression.run_date);
     params.set("regression_change_pct", String(regression.change_percent));
     params.set("regression_branch", regression.branch || "main");
-    params.set("regression_df_mode", props.dfMode);
 
     navigate(`/benchmarks/${targetRunId}?${params.toString()}`);
   };
@@ -142,14 +136,8 @@ const RegressionRow: Component<{ regression: RegressionWithContext; dfMode: Regr
             );
           })()}
         </Show>
-        <span
-          class={`inline-block text-[9px] font-mono px-1.5 py-0.5 rounded-sm ${
-            reg().detection_method === "change_point"
-              ? "bg-blue-50 text-blue-700"
-              : "bg-gray-100 text-gray-600"
-          }`}
-        >
-          {reg().detection_method === "change_point" ? "change-point" : "t-test"}
+        <span class="inline-block text-[9px] font-mono px-1.5 py-0.5 rounded-sm bg-gray-100 text-gray-600">
+          log-avg score
         </span>
       </td>
       <td class="py-3 px-4">
@@ -167,21 +155,15 @@ const RegressionRow: Component<{ regression: RegressionWithContext; dfMode: Regr
 
 const Regressions: Component = () => {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [detectionFilter, setDetectionFilter] = createSignal<DetectionFilter>("all");
   const [branches] = createResource(() => api.getBranches());
   const branch = (): string => {
     const b = searchParams.branch;
     if (Array.isArray(b)) return b[0] || "main";
     return b || "main";
   };
-  const dfMode = (): RegressionDFMode =>
-    searchParams.df_mode === "latest" ? "latest" : "baseline";
-  const sensitivity = (): SensitivityMode => (dfMode() === "latest" ? "conservative" : "balanced");
-
-  const regressionKey = () => `${dfMode()}:${branch()}:${defaultRegressionHistoryLimit}`;
+  const regressionKey = () => `${branch()}:${defaultRegressionHistoryLimit}`;
   const [history] = createResource(regressionKey, () =>
     api.getRegressionHistory({
-      dfMode: dfMode(),
       branch: branch(),
       limit: defaultRegressionHistoryLimit,
     }),
@@ -190,12 +172,6 @@ const Regressions: Component = () => {
   const setBranch = (next: string) => {
     setSearchParams({ branch: next === "main" ? undefined : next });
   };
-  const setSensitivity = (next: SensitivityMode) => {
-    setSearchParams({
-      df_mode: next === "conservative" ? "latest" : "baseline",
-    });
-  };
-
   const historyEntries = () => history()?.entries ?? [];
   const latestRegressionEntry = () =>
     historyEntries().find((entry) => (entry.regressions?.length ?? 0) > 0);
@@ -213,11 +189,6 @@ const Regressions: Component = () => {
     );
   const regressionEpisodes = (): RegressionWithContext[] =>
     uniqueRegressionEpisodes(allRegressions());
-  const filteredRegressions = () => {
-    const filter = detectionFilter();
-    if (filter === "all") return regressionEpisodes();
-    return regressionEpisodes().filter((r) => r.detection_method === filter);
-  };
   const regressionCount = () => regressionEpisodes().length;
   const hasRegressions = () => regressionCount() > 0;
   const scannedRuns = () => history()?.scanned_runs ?? 0;
@@ -227,12 +198,6 @@ const Regressions: Component = () => {
   const computedRuns = () => history()?.computed_runs ?? 0;
   const globalShiftRuns = () =>
     historyEntries().filter((entry) => entry.global_shift_detected).length;
-
-  // Count by detection method for filter badges
-  const tTestCount = () =>
-    regressionEpisodes().filter((r) => r.detection_method === "t_test").length;
-  const changePointCount = () =>
-    regressionEpisodes().filter((r) => r.detection_method === "change_point").length;
 
   return (
     <div class="flex flex-col h-full w-full">
@@ -258,26 +223,6 @@ const Regressions: Component = () => {
               </div>
             </div>
           </Show>
-          <div class="relative shrink-0">
-            <select
-              class="appearance-none pl-2 pr-5 py-1 border border-border rounded-none text-[10px] sm:text-[11px] bg-white text-black outline-none cursor-pointer font-mono font-medium hover:border-black transition-colors"
-              value={sensitivity()}
-              onChange={(e) => setSensitivity(e.currentTarget.value as SensitivityMode)}
-              title="Regression sensitivity mode"
-            >
-              <option value="balanced">Balanced sensitivity</option>
-              <option value="conservative">Conservative sensitivity</option>
-            </select>
-            <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1 text-black">
-              <svg
-                class="h-2.5 w-2.5 fill-current"
-                xmlns="http://www.w3.org/2000/svg"
-                viewBox="0 0 20 20"
-              >
-                <path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z" />
-              </svg>
-            </div>
-          </div>
         </div>
       </div>
 
@@ -343,10 +288,11 @@ const Regressions: Component = () => {
               </div>
 
               <div class="mt-1 text-[11px] font-mono text-text-muted">
-                Sensitivity:{" "}
-                {sensitivity() === "balanced"
-                  ? "balanced (DF baseline, recommended)"
-                  : "conservative (DF latest)"}
+                {history()?.calibration_status}: {history()?.metric}
+              </div>
+
+              <div class="mt-1 max-w-[760px] text-[11px] font-mono text-text-muted">
+                {history()?.calibration_caveat}
               </div>
             </Show>
 
@@ -357,46 +303,6 @@ const Regressions: Component = () => {
               </div>
             </Show>
           </div>
-
-          {/* Detection method filter */}
-          <Show when={hasRegressions() && tTestCount() > 0 && changePointCount() > 0}>
-            <div class="flex items-center gap-1">
-              <button
-                class={`px-2 py-1 text-[10px] font-mono border transition-colors ${
-                  detectionFilter() === "all"
-                    ? "border-black bg-black text-white"
-                    : "border-border bg-white text-text-muted hover:text-black"
-                }`}
-                onClick={() => setDetectionFilter("all")}
-              >
-                All ({regressionCount()})
-              </button>
-              <Show when={tTestCount() > 0}>
-                <button
-                  class={`px-2 py-1 text-[10px] font-mono border transition-colors ${
-                    detectionFilter() === "t_test"
-                      ? "border-black bg-black text-white"
-                      : "border-border bg-white text-text-muted hover:text-black"
-                  }`}
-                  onClick={() => setDetectionFilter("t_test")}
-                >
-                  t-test ({tTestCount()})
-                </button>
-              </Show>
-              <Show when={changePointCount() > 0}>
-                <button
-                  class={`px-2 py-1 text-[10px] font-mono border transition-colors ${
-                    detectionFilter() === "change_point"
-                      ? "border-black bg-black text-white"
-                      : "border-border bg-white text-text-muted hover:text-black"
-                  }`}
-                  onClick={() => setDetectionFilter("change_point")}
-                >
-                  change-point ({changePointCount()})
-                </button>
-              </Show>
-            </div>
-          </Show>
         </div>
       </div>
 
@@ -414,8 +320,8 @@ const Regressions: Component = () => {
               </tr>
             </thead>
             <tbody>
-              <For each={filteredRegressions()}>
-                {(regression) => <RegressionRow regression={regression} dfMode={dfMode()} />}
+              <For each={regressionEpisodes()}>
+                {(regression) => <RegressionRow regression={regression} />}
               </For>
             </tbody>
           </table>

@@ -62,12 +62,11 @@ CREATE TABLE IF NOT EXISTS regression_cache (
     window INTEGER NOT NULL,
     min_points INTEGER NOT NULL,
     baseline_offset INTEGER NOT NULL,
-    df_mode TEXT NOT NULL,
     generation_key TEXT NOT NULL,
     response_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE(run_id, branch, window, min_points, baseline_offset, df_mode)
+    UNIQUE(run_id, branch, window, min_points, baseline_offset)
 );
 
 CREATE INDEX IF NOT EXISTS idx_regression_cache_branch_run ON regression_cache(branch, run_id DESC);

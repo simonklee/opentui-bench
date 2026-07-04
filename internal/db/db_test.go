@@ -755,7 +755,6 @@ func TestRegressionCacheGenerationInvalidation(t *testing.T) {
 		Window:         30,
 		MinPoints:      5,
 		BaselineOffset: 3,
-		DFMode:         "baseline",
 	}
 
 	first := &RegressionCacheEntry{
@@ -812,6 +811,137 @@ func TestRegressionCacheGenerationInvalidation(t *testing.T) {
 	}
 	if newGen.ResponseJSON != second.ResponseJSON {
 		t.Fatalf("response_json = %q, want %q", newGen.ResponseJSON, second.ResponseJSON)
+	}
+}
+
+func TestDeletingBaselineRunInvalidatesRegressionCache(t *testing.T) {
+	database := openTestDB(t)
+	baselineID, err := database.InsertRun(&Run{CommitHash: "baseline", RunDate: "2026-01-01T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID, err := database.InsertRun(&Run{CommitHash: "target", RunDate: "2026-01-02T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertTestResult(t, database, baselineID, "render", "frame")
+	insertTestResult(t, database, targetID, "render", "frame")
+	fingerprintBefore, err := database.RegressionDataFingerprint(targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE results SET std_dev_ns = std_dev_ns + 1 WHERE run_id = ?`, targetID); err != nil {
+		t.Fatal(err)
+	}
+	fingerprintAfterSummaryChange, err := database.RegressionDataFingerprint(targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprintAfterSummaryChange == fingerprintBefore {
+		t.Fatal("expected summary correction to change target data fingerprint")
+	}
+	fingerprintBefore = fingerprintAfterSummaryChange
+	key := RegressionCacheKey{RunID: targetID, Branch: "main", Window: 30, MinPoints: 5, BaselineOffset: 3}
+	if err := database.UpsertRegressionCache(&RegressionCacheEntry{
+		Key: key, GenerationKey: "generation", ResponseJSON: `{"run_id":2}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := database.DeleteRun(baselineID); err != nil {
+		t.Fatal(err)
+	}
+	fingerprintAfter, err := database.RegressionDataFingerprint(targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprintAfter == fingerprintBefore {
+		t.Fatal("expected baseline deletion to change target data fingerprint")
+	}
+	entry, err := database.GetRegressionCache(key, "generation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry != nil {
+		t.Fatal("expected baseline deletion to invalidate cached target snapshot")
+	}
+
+	if _, err := database.InsertRun(&Run{CommitHash: "bulk-baseline", RunDate: "2026-01-01T12:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertRegressionCache(&RegressionCacheEntry{
+		Key: key, GenerationKey: "generation", ResponseJSON: `{"run_id":2}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.DeleteRunsBefore("2026-01-02T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	entry, err = database.GetRegressionCache(key, "generation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry != nil {
+		t.Fatal("expected bulk baseline deletion to invalidate cached target snapshot")
+	}
+}
+
+func TestOpenDropsObsoleteDFKeyedRegressionCache(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-cache.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`
+		CREATE TABLE runs (
+			id INTEGER PRIMARY KEY, commit_hash TEXT NOT NULL, commit_hash_full TEXT,
+			commit_message TEXT, commit_date TEXT, branch TEXT, run_date TEXT NOT NULL,
+			machine_id TEXT, notes TEXT, zig_optimize TEXT DEFAULT 'ReleaseFast'
+		);
+		CREATE TABLE regression_cache (
+			id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, branch TEXT NOT NULL,
+			window INTEGER NOT NULL, min_points INTEGER NOT NULL, baseline_offset INTEGER NOT NULL,
+			df_mode TEXT NOT NULL, generation_key TEXT NOT NULL, response_json TEXT NOT NULL,
+			created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+			UNIQUE(run_id, branch, window, min_points, baseline_offset, df_mode)
+		);
+		INSERT INTO runs(id, commit_hash, run_date) VALUES (1, 'old', '2026-01-01T00:00:00Z');
+		INSERT INTO regression_cache VALUES (1, 1, 'main', 30, 5, 3, 'baseline', 'old', '{}', 'now', 'now');
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = database.Close() }()
+	rows, err := database.Query(`PRAGMA table_info(regression_cache)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		if name == "df_mode" {
+			t.Fatal("obsolete df_mode cache column remains reachable")
+		}
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM regression_cache`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("obsolete cache rows remain: %d", count)
 	}
 }
 

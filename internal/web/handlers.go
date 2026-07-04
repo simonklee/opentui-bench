@@ -365,8 +365,16 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type trendResponse struct {
-		Points        []trendPoint `json:"points"`
-		CurrentStatus struct {
+		Points            []trendPoint `json:"points"`
+		AlgorithmVersion  string       `json:"algorithm_version"`
+		Metric            string       `json:"metric"`
+		Estimator         string       `json:"estimator"`
+		CohortPolicy      string       `json:"cohort_policy"`
+		FamilyDefinition  string       `json:"family_definition"`
+		CalibrationStatus string       `json:"calibration_status"`
+		CalibrationCaveat string       `json:"calibration_caveat"`
+		FDRLevel          float64      `json:"fdr_level"`
+		CurrentStatus     struct {
 			RunID  int64  `json:"run_id"`
 			Status string `json:"status"`
 			Reason string `json:"reason,omitempty"`
@@ -382,13 +390,8 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid run date: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		sem := float64(0)
-		if t.Result.SampleCount >= 2 {
-			sem = float64(t.Result.StdDevNs) / math.Sqrt(float64(t.Result.SampleCount))
-		}
 		observation := stats.OrderedRunStat{RunDate: runDate, Stat: stats.RunStat{
-			RunID: t.Run.ID, Median: float64(t.Result.P50Ns), Sem: sem,
-			SampleCount: t.Result.SampleCount, StdDev: float64(t.Result.StdDevNs),
+			RunID: t.Run.ID, Avg: float64(t.Result.AvgNs),
 		}}
 		observations = append(observations, observation)
 		if t.Result.ID == resultID {
@@ -402,7 +405,7 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		if i >= limit {
 			break
 		}
-		ciLower, ciUpper, sem := stats.CI95(t.Result.P50Ns, t.Result.StdDevNs, t.Result.SampleCount)
+		ciLower, ciUpper, sem := stats.CI95(t.Result.AvgNs, t.Result.StdDevNs, t.Result.SampleCount)
 
 		point := trendPoint{
 			RunID:         t.Run.ID,
@@ -425,11 +428,15 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		points = append(points, point)
 	}
 
-	response := trendResponse{Points: points}
+	response := trendResponse{
+		Points: points, AlgorithmVersion: regressionAlgorithmVersion, Metric: regressionMetric,
+		Estimator: regressionEstimator, CohortPolicy: regressionCohortPolicy,
+		FamilyDefinition: regressionFamilyDefinition, CalibrationStatus: regressionCalibrationStatus,
+		CalibrationCaveat: regressionCalibrationCaveat, FDRLevel: defaultFDR,
+	}
 	if targetFound {
 		evaluation := stats.EvaluateSnapshot(target, observations, stats.SnapshotConfig{
 			Window: defaultWindow, MinPoints: defaultMinPoints, BaselineOffset: defaultBaselineOffset,
-			Alpha: defaultAlpha, DFMode: defaultRegressionDFMode,
 		})
 		response.CurrentStatus.RunID = target.Stat.RunID
 		response.CurrentStatus.Status = evaluation.Result.Status
@@ -1188,9 +1195,15 @@ const (
 	defaultWindow                = 30
 	defaultMinPoints             = 5
 	defaultBaselineOffset        = 3
-	defaultAlpha                 = 0.01
-	defaultFDR                   = defaultAlpha
+	defaultFDR                   = 0.01
 	defaultMinAbsoluteNs         = 5000.0
+	regressionAlgorithmVersion   = "v5-log-avg-prediction"
+	regressionMetric             = "log(avg_ns)"
+	regressionEstimator          = "historical_log_mean_prediction"
+	regressionCohortPolicy       = "phase2_exact_identity_compatible_as_of"
+	regressionFamilyDefinition   = "one_slowdown_hypothesis_per_eligible_benchmark_complete_snapshot"
+	regressionCalibrationStatus  = "uncalibrated_regression_score"
+	regressionCalibrationCaveat  = "Under valid p-values and BH's cross-benchmark dependence assumptions, BH controls FDR within each snapshot only; it does not control accumulated false-alert rates across sequential snapshots. Scores also assume approximately stationary independent normal log run averages."
 	globalShiftMinBenchmarks     = 50
 	globalShiftMinPositiveShare  = 0.75
 	globalShiftMinGeoIncreasePct = 10.0
@@ -1198,9 +1211,6 @@ const (
 	changePointAlpha             = 0.05
 	changePointPerms             = 199
 	changePointMaxAgeRuns        = 2
-	regressionDFModeBaseline     = "baseline"
-	regressionDFModeLatest       = "latest"
-	defaultRegressionDFMode      = regressionDFModeBaseline
 )
 
 func (s *Server) handleDatabaseDownload(w http.ResponseWriter, r *http.Request) {
@@ -1234,18 +1244,32 @@ func (s *Server) handleDatabaseDownload(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	if raw := r.URL.Query().Get("method"); raw != "" {
-		http.Error(w, "method parameter is no longer supported; use df_mode only", http.StatusBadRequest)
+		http.Error(w, "method parameter is no longer supported", http.StatusBadRequest)
 		return
 	}
-
-	dfMode := defaultRegressionDFMode
 	if raw := r.URL.Query().Get("df_mode"); raw != "" {
-		switch raw {
-		case regressionDFModeBaseline, regressionDFModeLatest:
-			dfMode = raw
-		default:
-			http.Error(w, "invalid df_mode, expected 'baseline' or 'latest'", http.StatusBadRequest)
+		http.Error(w, "df_mode is no longer supported; degrees of freedom are always history_count - 1", http.StatusBadRequest)
+		return
+	}
+	window := defaultWindow
+	if raw := r.URL.Query().Get("window"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			window = n
+		}
+	}
+	minPoints := defaultMinPoints
+	if raw := r.URL.Query().Get("min_points"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 2 {
+			http.Error(w, "min_points must be at least 2", http.StatusBadRequest)
 			return
+		}
+		minPoints = n
+	}
+	baselineOffset := defaultBaselineOffset
+	if raw := r.URL.Query().Get("baseline_offset"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			baselineOffset = n
 		}
 	}
 
@@ -1274,12 +1298,19 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"run_id":               nil,
 					"branch":               branch,
-					"window":               defaultWindow,
+					"window":               window,
 					"compared_runs":        0,
-					"min_points":           defaultMinPoints,
-					"effective_min_points": defaultMinPoints,
-					"baseline_offset":      defaultBaselineOffset,
-					"df_mode":              dfMode,
+					"min_points":           minPoints,
+					"effective_min_points": minPoints,
+					"baseline_offset":      baselineOffset,
+					"algorithm_version":    regressionAlgorithmVersion,
+					"metric":               regressionMetric,
+					"estimator":            regressionEstimator,
+					"cohort_policy":        regressionCohortPolicy,
+					"family_definition":    regressionFamilyDefinition,
+					"calibration_status":   regressionCalibrationStatus,
+					"calibration_caveat":   regressionCalibrationCaveat,
+					"fdr_level":            defaultFDR,
 					"insufficient_history": true,
 					"insufficient_reason":  "no_runs_for_branch",
 					"total_benchmarks":     0,
@@ -1295,28 +1326,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		runID = latestRun.ID
-	}
-
-	// Parse optional parameters
-	window := defaultWindow
-	if w := r.URL.Query().Get("window"); w != "" {
-		if n, err := strconv.Atoi(w); err == nil && n > 0 {
-			window = n
-		}
-	}
-
-	minPoints := defaultMinPoints
-	if mp := r.URL.Query().Get("min_points"); mp != "" {
-		if n, err := strconv.Atoi(mp); err == nil && n > 0 {
-			minPoints = n
-		}
-	}
-
-	baselineOffset := defaultBaselineOffset
-	if bo := r.URL.Query().Get("baseline_offset"); bo != "" {
-		if n, err := strconv.Atoi(bo); err == nil && n >= 0 {
-			baselineOffset = n
-		}
 	}
 
 	// Get comparable runs window.
@@ -1419,7 +1428,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 
 		olderMap := make(map[db.BenchmarkKey]int64, len(olderResults))
 		for _, r := range olderResults {
-			olderMap[db.BenchmarkKey{Category: r.Category, Name: r.Name}] = r.P50Ns
+			olderMap[db.BenchmarkKey{Category: r.Category, Name: r.Name}] = r.AvgNs
 		}
 
 		positiveCount := 0
@@ -1427,14 +1436,14 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		logSum := 0.0
 		for _, newer := range newerResults {
 			older, ok := olderMap[db.BenchmarkKey{Category: newer.Category, Name: newer.Name}]
-			if !ok || older <= 0 || newer.P50Ns <= 0 {
+			if !ok || older <= 0 || newer.AvgNs <= 0 {
 				continue
 			}
 			compared++
-			if newer.P50Ns > older {
+			if newer.AvgNs > older {
 				positiveCount++
 			}
-			logSum += math.Log(float64(newer.P50Ns) / float64(older))
+			logSum += math.Log(float64(newer.AvgNs) / float64(older))
 		}
 
 		if compared == 0 {
@@ -1466,25 +1475,35 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		globalShiftComparedBenchmarks = metrics.compared
 	}
 
-	type regression struct {
-		Name                   string   `json:"name"`
-		Category               string   `json:"category"`
-		LatestResultID         int64    `json:"latest_result_id"`
-		LatestCILowerNs        int64    `json:"latest_ci_lower_ns"`
-		LatestCIUpperNs        int64    `json:"latest_ci_upper_ns"`
-		BaselineRunID          int64    `json:"baseline_run_id"`
-		BaselineCommitHash     string   `json:"baseline_commit_hash"`
-		BaselineCommitHashFull string   `json:"baseline_commit_hash_full"`
-		BaselineCILowerNs      int64    `json:"baseline_ci_lower_ns"`
-		BaselineCIUpperNs      int64    `json:"baseline_ci_upper_ns"`
-		ChangePercent          float64  `json:"change_percent"`
-		MinEffectPercent       float64  `json:"min_effect_percent"`
-		PValue                 *float64 `json:"p_value,omitempty"`
-		AdjustedPValue         *float64 `json:"adjusted_p_value,omitempty"`
-		DetectionMethod        string   `json:"detection_method"`
-		Alpha                  float64  `json:"alpha"`
+	type changePointDiagnostic struct {
+		RunID         int64   `json:"run_id"`
+		PValue        float64 `json:"p_value"`
+		EffectPercent float64 `json:"effect_percent"`
+		MagnitudeNs   float64 `json:"magnitude_ns"`
+		Recent        bool    `json:"recent"`
 	}
-
+	type regression struct {
+		Name                   string                 `json:"name"`
+		Category               string                 `json:"category"`
+		LatestResultID         int64                  `json:"latest_result_id"`
+		LatestCILowerNs        int64                  `json:"latest_ci_lower_ns"`
+		LatestCIUpperNs        int64                  `json:"latest_ci_upper_ns"`
+		BaselineRunID          int64                  `json:"baseline_run_id"`
+		BaselineCommitHash     string                 `json:"baseline_commit_hash"`
+		BaselineCommitHashFull string                 `json:"baseline_commit_hash_full"`
+		BaselineCILowerNs      int64                  `json:"baseline_ci_lower_ns"`
+		BaselineCIUpperNs      int64                  `json:"baseline_ci_upper_ns"`
+		ChangePercent          float64                `json:"change_percent"`
+		AbsoluteChangeNs       float64                `json:"absolute_change_ns"`
+		BaselineNs             float64                `json:"baseline_ns"`
+		MinEffectPercent       float64                `json:"min_effect_percent"`
+		PValue                 *float64               `json:"p_value,omitempty"`
+		AdjustedPValue         *float64               `json:"adjusted_p_value,omitempty"`
+		DetectionMethod        string                 `json:"detection_method"`
+		TScore                 *float64               `json:"t_score,omitempty"`
+		DegreesOfFreedom       int                    `json:"degrees_of_freedom"`
+		ChangePointDiagnostic  *changePointDiagnostic `json:"change_point_diagnostic,omitempty"`
+	}
 	type regressionsResponse struct {
 		RunID                         *int64         `json:"run_id"`
 		Branch                        string         `json:"branch"`
@@ -1493,7 +1512,15 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		MinPoints                     int            `json:"min_points"`
 		EffectiveMinPoints            int            `json:"effective_min_points"`
 		BaselineOffset                int            `json:"baseline_offset"`
-		DFMode                        string         `json:"df_mode"`
+		AlgorithmVersion              string         `json:"algorithm_version"`
+		Metric                        string         `json:"metric"`
+		Estimator                     string         `json:"estimator"`
+		CohortPolicy                  string         `json:"cohort_policy"`
+		FamilyDefinition              string         `json:"family_definition"`
+		CalibrationStatus             string         `json:"calibration_status"`
+		CalibrationCaveat             string         `json:"calibration_caveat"`
+		FDRLevel                      float64        `json:"fdr_level"`
+		HypothesisCount               int            `json:"hypothesis_count"`
 		TotalBenchmarks               int            `json:"total_benchmarks"`
 		AnalyzedBenchmarks            int            `json:"analyzed_benchmarks"`
 		InsufficientHistory           bool           `json:"insufficient_history"`
@@ -1506,27 +1533,11 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		Regressions                   []regression   `json:"regressions"`
 	}
 
-	type cpCandidate struct {
-		point       stats.ChangePoint
-		effectPct   float64
-		magnitudeNs float64
-		isRecent    bool
-		practicalOK bool
-	}
-
 	type benchResult struct {
-		testResult stats.RegressionResult
-		latest     db.Result
-		baseline   *stats.BaselineStats
-		changePct  float64
-		testOK     bool
-		cp         *cpCandidate
-	}
-
-	type hypothesis struct {
-		benchIndex int
-		kind       string
-		pValue     float64
+		testResult  stats.RegressionResult
+		latest      db.Result
+		baseline    *stats.BaselineStats
+		changePoint *changePointDiagnostic
 	}
 
 	var regressions []regression
@@ -1553,8 +1564,8 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			incrementExclusion("missing_latest")
 			continue
 		}
-		if latestResult.SampleCount < 2 || latestResult.StdDevNs <= 0 {
-			incrementExclusion("invalid_latest_stats")
+		if latestResult.AvgNs <= 0 {
+			incrementExclusion("invalid_latest_avg")
 			continue
 		}
 		benchmarkTrends, err := s.db.GetTrend(latestResult.ID, window+baselineOffset+1)
@@ -1564,22 +1575,12 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		toRunStat := func(runID int64, result db.Result) stats.RunStat {
-			sem := float64(0)
-			if result.SampleCount >= 2 {
-				sem = float64(result.StdDevNs) / math.Sqrt(float64(result.SampleCount))
-			}
-			return stats.RunStat{
-				RunID:       runID,
-				Median:      float64(result.P50Ns),
-				Sem:         sem,
-				SampleCount: result.SampleCount,
-				StdDev:      float64(result.StdDevNs),
-			}
+			return stats.RunStat{RunID: runID, Avg: float64(result.AvgNs)}
 		}
 
 		var observations []stats.OrderedRunStat
 		var targetObservation stats.OrderedRunStat
-		benchmarkRunAgeByID := make(map[int64]int, len(benchmarkTrends))
+		ageByRunID := make(map[int64]int, len(benchmarkTrends))
 		for age, trend := range benchmarkTrends {
 			run := trend.Run
 			result := trend.Result
@@ -1590,23 +1591,15 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			}
 			observation := stats.OrderedRunStat{RunDate: runDate, Stat: toRunStat(run.ID, result)}
 			observations = append(observations, observation)
-			benchmarkRunAgeByID[run.ID] = age
+			ageByRunID[run.ID] = age
 			runByID[run.ID] = run
 			if run.ID == latestRunID {
 				targetObservation = observation
 			}
 		}
 
-		// Build full series (oldest-first) for change-point detection.
-		var series []stats.RunStat
-		for i := len(benchmarkTrends) - 1; i >= 0; i-- {
-			trend := benchmarkTrends[i]
-			series = append(series, toRunStat(trend.Run.ID, trend.Result))
-		}
-
 		evaluation := stats.EvaluateSnapshot(targetObservation, observations, stats.SnapshotConfig{
 			Window: window, MinPoints: minPoints, BaselineOffset: baselineOffset,
-			Alpha: defaultAlpha, DFMode: dfMode,
 		})
 		if evaluation.Baseline == nil {
 			incrementExclusion("history_too_short_or_invalid")
@@ -1615,140 +1608,72 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		baseline := evaluation.Baseline
 		analyzableBenchmarks++
 
-		latestStat := toRunStat(latestRunID, latestResult)
-
 		result := evaluation.Result
-
-		changePct := 0.0
-		if baseline.Median > 0 {
-			changePct = (latestStat.Median - baseline.Median) / baseline.Median * 100.0
-		}
-
-		var cp *cpCandidate
-		if len(series) >= 2*changePointMinSegment {
+		var diagnostic *changePointDiagnostic
+		if len(benchmarkTrends) >= 2*changePointMinSegment {
+			series := make([]stats.RunStat, 0, len(benchmarkTrends))
+			for i := len(benchmarkTrends) - 1; i >= 0; i-- {
+				trend := benchmarkTrends[i]
+				series = append(series, toRunStat(trend.Run.ID, trend.Result))
+			}
 			points := stats.DetectChangePoints(series, changePointMinSegment, changePointAlpha, changePointPerms)
-			for i := len(points) - 1; i >= 0; i-- {
-				point := points[i]
-				if point.Magnitude <= 0 {
-					continue
+			if len(points) > 0 {
+				point := points[len(points)-1]
+				diagnostic = &changePointDiagnostic{
+					RunID: point.RunID, PValue: point.PValue, EffectPercent: point.EffectPercent,
+					MagnitudeNs: point.Magnitude, Recent: ageByRunID[point.RunID] <= changePointMaxAgeRuns,
 				}
-				cp = &cpCandidate{
-					point:       point,
-					effectPct:   point.EffectPercent,
-					magnitudeNs: point.Magnitude,
-					isRecent:    benchmarkRunAgeByID[point.RunID] <= changePointMaxAgeRuns,
-					practicalOK: point.EffectPercent >= result.MinEffectPercent && point.Magnitude >= defaultMinAbsoluteNs,
-				}
-				break
 			}
 		}
 
 		benchResults = append(benchResults, benchResult{
-			testResult: result,
-			latest:     latestResult,
-			baseline:   baseline,
-			changePct:  changePct,
-			testOK:     changePct >= result.MinEffectPercent && (latestStat.Median-baseline.Median) >= defaultMinAbsoluteNs,
-			cp:         cp,
+			testResult:  result,
+			latest:      latestResult,
+			baseline:    baseline,
+			changePoint: diagnostic,
 		})
 	}
 
 	if len(benchResults) > 0 {
-		var hypotheses []hypothesis
+		pValues := make([]float64, len(benchResults))
 		for i, bench := range benchResults {
-			if bench.testResult.PValue != nil {
-				hypotheses = append(hypotheses, hypothesis{
-					benchIndex: i,
-					kind:       "t_test",
-					pValue:     *bench.testResult.PValue,
-				})
-			}
-
-			if bench.cp != nil && bench.cp.isRecent {
-				hypotheses = append(hypotheses, hypothesis{
-					benchIndex: i,
-					kind:       "change_point",
-					pValue:     bench.cp.point.PValue,
-				})
-			}
+			pValues[i] = *bench.testResult.PValue
 		}
-
-		type selectedSignal struct {
-			rawPValue float64
-			adjPValue float64
-			method    string
-			changePct float64
-		}
-
-		selectedByBench := make(map[int]selectedSignal)
-		if len(hypotheses) > 0 {
-			pValues := make([]float64, len(hypotheses))
-			for i, h := range hypotheses {
-				pValues[i] = h.pValue
-			}
-
-			bhResults := stats.BenjaminiHochberg(pValues, defaultFDR)
-			for _, bh := range bhResults {
-				h := hypotheses[bh.Index]
-				bench := benchResults[h.benchIndex]
-				if !bh.IsSignificant {
-					continue
-				}
-
-				practicalOK := false
-				changePct := bench.changePct
-				detectionMethod := "t_test"
-				switch h.kind {
-				case "t_test":
-					practicalOK = bench.testOK
-				case "change_point":
-					detectionMethod = "change_point"
-					if bench.cp != nil {
-						practicalOK = bench.cp.practicalOK && bench.cp.isRecent
-						changePct = bench.cp.effectPct
-					}
-				}
-				if !practicalOK {
-					continue
-				}
-
-				current, exists := selectedByBench[h.benchIndex]
-				if !exists || bh.AdjPValue < current.adjPValue {
-					selectedByBench[h.benchIndex] = selectedSignal{
-						rawPValue: h.pValue,
-						adjPValue: bh.AdjPValue,
-						method:    detectionMethod,
-						changePct: changePct,
-					}
-				}
-			}
-		}
-
-		for i, bench := range benchResults {
-			signal, ok := selectedByBench[i]
-			if !ok {
+		for _, bh := range stats.BenjaminiHochberg(pValues, defaultFDR) {
+			bench := benchResults[bh.Index]
+			changePercent := *bench.testResult.ChangePercent
+			absoluteChange := *bench.testResult.AbsoluteChangeNs
+			if !bh.IsSignificant || changePercent < stats.MinPracticalRegressionEffectPercent || absoluteChange < defaultMinAbsoluteNs {
 				continue
 			}
 
-			ciLower, ciUpper, _ := stats.CI95(bench.latest.P50Ns, bench.latest.StdDevNs, bench.latest.SampleCount)
-			rawPValue := signal.rawPValue
-			adjustedPValue := signal.adjPValue
+			ciLower, ciUpper, _ := stats.CI95(bench.latest.AvgNs, bench.latest.StdDevNs, bench.latest.SampleCount)
+			rawPValue := *bench.testResult.PValue
+			adjustedPValue := bh.AdjPValue
+			var tScore *float64
+			if !math.IsInf(*bench.testResult.TScore, 0) {
+				tScore = bench.testResult.TScore
+			}
 
 			reg := regression{
-				Name:              bench.latest.Name,
-				Category:          bench.latest.Category,
-				LatestResultID:    bench.latest.ID,
-				LatestCILowerNs:   ciLower,
-				LatestCIUpperNs:   ciUpper,
-				BaselineRunID:     bench.baseline.RunID,
-				BaselineCILowerNs: int64(bench.baseline.CILower),
-				BaselineCIUpperNs: int64(bench.baseline.CIUpper),
-				ChangePercent:     signal.changePct,
-				MinEffectPercent:  bench.testResult.MinEffectPercent,
-				PValue:            &rawPValue,
-				AdjustedPValue:    &adjustedPValue,
-				DetectionMethod:   signal.method,
-				Alpha:             defaultAlpha,
+				Name:                  bench.latest.Name,
+				Category:              bench.latest.Category,
+				LatestResultID:        bench.latest.ID,
+				LatestCILowerNs:       ciLower,
+				LatestCIUpperNs:       ciUpper,
+				BaselineRunID:         bench.baseline.RunID,
+				BaselineCILowerNs:     int64(bench.baseline.CILower),
+				BaselineCIUpperNs:     int64(bench.baseline.CIUpper),
+				ChangePercent:         changePercent,
+				AbsoluteChangeNs:      absoluteChange,
+				BaselineNs:            bench.baseline.BaselineNs,
+				MinEffectPercent:      bench.testResult.MinEffectPercent,
+				PValue:                &rawPValue,
+				AdjustedPValue:        &adjustedPValue,
+				DetectionMethod:       "log_avg_prediction_score",
+				TScore:                tScore,
+				DegreesOfFreedom:      bench.testResult.DegreesOfFreedom,
+				ChangePointDiagnostic: bench.changePoint,
 			}
 
 			if baselineRun, ok := runByID[bench.baseline.RunID]; ok {
@@ -1773,7 +1698,15 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		MinPoints:                     minPoints,
 		EffectiveMinPoints:            effectiveMinPoints,
 		BaselineOffset:                baselineOffset,
-		DFMode:                        dfMode,
+		AlgorithmVersion:              regressionAlgorithmVersion,
+		Metric:                        regressionMetric,
+		Estimator:                     regressionEstimator,
+		CohortPolicy:                  regressionCohortPolicy,
+		FamilyDefinition:              regressionFamilyDefinition,
+		CalibrationStatus:             regressionCalibrationStatus,
+		CalibrationCaveat:             regressionCalibrationCaveat,
+		FDRLevel:                      defaultFDR,
+		HypothesisCount:               len(benchResults),
 		TotalBenchmarks:               len(benchmarkKeys),
 		AnalyzedBenchmarks:            analyzableBenchmarks,
 		InsufficientHistory:           analyzableBenchmarks == 0,

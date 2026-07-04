@@ -53,7 +53,7 @@ const errorBarPlugin = {
       return;
     }
 
-    // Draw error bars for both "Median" and branch datasets
+    // Draw error bars for both "Average" and branch datasets
     for (let dsIndex = 0; dsIndex < datasets.length; dsIndex++) {
       const dataset = datasets[dsIndex] as any;
       const ciLower = dataset.ciLower as number[] | undefined;
@@ -362,10 +362,10 @@ const TrendChart: Component<Props> = (props) => {
     const shiftRunId = latestGlobalShiftRunId();
     if (shiftRunId !== undefined) {
       const shiftPoint = valid.find((p) => p.run_id === shiftRunId);
-      if (shiftPoint && shiftPoint.median_ns > 0) return shiftPoint.median_ns;
+      if (shiftPoint && shiftPoint.avg_ns > 0) return shiftPoint.avg_ns;
     }
     const first = valid[0]!;
-    return first.median_ns > 0 ? first.median_ns : null;
+    return first.avg_ns > 0 ? first.avg_ns : null;
   };
 
   const showData = () => {
@@ -415,34 +415,34 @@ const TrendChart: Component<Props> = (props) => {
 
       // Main series values (null where no main point)
       const mainValues = mainData.map((d) =>
-        d ? (isIndexMode() ? toIndex(d.median_ns, anchorNs) : d.median_ns) : null,
+        d ? (isIndexMode() ? toIndex(d.avg_ns, anchorNs) : d.avg_ns) : null,
       );
       const mainCiLower = mainData.map((d) =>
         d
           ? isIndexMode()
-            ? toIndex(d.ci_lower_ns ?? d.median_ns, anchorNs)
-            : (d.ci_lower_ns ?? d.median_ns)
+            ? toIndex(d.ci_lower_ns ?? d.avg_ns, anchorNs)
+            : (d.ci_lower_ns ?? d.avg_ns)
           : null,
       );
       const mainCiUpper = mainData.map((d) =>
         d
           ? isIndexMode()
-            ? toIndex(d.ci_upper_ns ?? d.median_ns, anchorNs)
-            : (d.ci_upper_ns ?? d.median_ns)
+            ? toIndex(d.ci_upper_ns ?? d.avg_ns, anchorNs)
+            : (d.ci_upper_ns ?? d.avg_ns)
           : null,
       );
       const mainSdLower = mainData.map((d) =>
         d
           ? isIndexMode()
-            ? toIndex(Math.max(d.median_ns - d.std_dev_ns, 0), anchorNs)
-            : Math.max(d.median_ns - d.std_dev_ns, 0)
+            ? toIndex(Math.max(d.avg_ns - d.std_dev_ns, 0), anchorNs)
+            : Math.max(d.avg_ns - d.std_dev_ns, 0)
           : null,
       );
       const mainSdUpper = mainData.map((d) =>
         d
           ? isIndexMode()
-            ? toIndex(d.median_ns + d.std_dev_ns, anchorNs)
-            : d.median_ns + d.std_dev_ns
+            ? toIndex(d.avg_ns + d.std_dev_ns, anchorNs)
+            : d.avg_ns + d.std_dev_ns
           : null,
       );
 
@@ -462,20 +462,20 @@ const TrendChart: Component<Props> = (props) => {
 
       // Branch series values (null where no branch point)
       const branchValues = branchData!.map((d) =>
-        d ? (isIndexMode() ? toIndex(d.median_ns, anchorNs) : d.median_ns) : null,
+        d ? (isIndexMode() ? toIndex(d.avg_ns, anchorNs) : d.avg_ns) : null,
       );
       const branchCiLower = branchData!.map((d) =>
         d
           ? isIndexMode()
-            ? toIndex(d.ci_lower_ns ?? d.median_ns, anchorNs)
-            : (d.ci_lower_ns ?? d.median_ns)
+            ? toIndex(d.ci_lower_ns ?? d.avg_ns, anchorNs)
+            : (d.ci_lower_ns ?? d.avg_ns)
           : null,
       );
       const branchCiUpper = branchData!.map((d) =>
         d
           ? isIndexMode()
-            ? toIndex(d.ci_upper_ns ?? d.median_ns, anchorNs)
-            : (d.ci_upper_ns ?? d.median_ns)
+            ? toIndex(d.ci_upper_ns ?? d.avg_ns, anchorNs)
+            : (d.ci_upper_ns ?? d.avg_ns)
           : null,
       );
 
@@ -523,7 +523,7 @@ const TrendChart: Component<Props> = (props) => {
             spanGaps: true,
           },
           {
-            label: "Median",
+            label: "Average",
             data: mainValues,
             borderColor: "#000000",
             backgroundColor: "#ffffff",
@@ -569,22 +569,18 @@ const TrendChart: Component<Props> = (props) => {
     const data = showData();
     const anchorNs = getAnchorNs(data);
     const ciLower = data.map((d) =>
-      isIndexMode()
-        ? toIndex(d.ci_lower_ns ?? d.median_ns, anchorNs)
-        : (d.ci_lower_ns ?? d.median_ns),
+      isIndexMode() ? toIndex(d.ci_lower_ns ?? d.avg_ns, anchorNs) : (d.ci_lower_ns ?? d.avg_ns),
     );
     const ciUpper = data.map((d) =>
-      isIndexMode()
-        ? toIndex(d.ci_upper_ns ?? d.median_ns, anchorNs)
-        : (d.ci_upper_ns ?? d.median_ns),
+      isIndexMode() ? toIndex(d.ci_upper_ns ?? d.avg_ns, anchorNs) : (d.ci_upper_ns ?? d.avg_ns),
     );
     const sdLower = data.map((d) =>
       isIndexMode()
-        ? toIndex(Math.max(d.median_ns - d.std_dev_ns, 0), anchorNs)
-        : Math.max(d.median_ns - d.std_dev_ns, 0),
+        ? toIndex(Math.max(d.avg_ns - d.std_dev_ns, 0), anchorNs)
+        : Math.max(d.avg_ns - d.std_dev_ns, 0),
     );
     const sdUpper = data.map((d) =>
-      isIndexMode() ? toIndex(d.median_ns + d.std_dev_ns, anchorNs) : d.median_ns + d.std_dev_ns,
+      isIndexMode() ? toIndex(d.avg_ns + d.std_dev_ns, anchorNs) : d.avg_ns + d.std_dev_ns,
     );
 
     const pointBgColors = data.map((d) => {
@@ -618,8 +614,8 @@ const TrendChart: Component<Props> = (props) => {
           fill: "-1",
         },
         {
-          label: "Median",
-          data: data.map((d) => (isIndexMode() ? toIndex(d.median_ns, anchorNs) : d.median_ns)),
+          label: "Average",
+          data: data.map((d) => (isIndexMode() ? toIndex(d.avg_ns, anchorNs) : d.avg_ns)),
           borderColor: "#000000",
           backgroundColor: "#ffffff",
           borderWidth: 1.5,
@@ -692,8 +688,8 @@ const TrendChart: Component<Props> = (props) => {
               generateLabels: (chart: any) => {
                 const datasets = chart.data.datasets;
                 const items: any[] = [];
-                const medianDs = datasets.find((d: any) => d.label === "Median");
-                if (medianDs) {
+                const averageDataset = datasets.find((d: any) => d.label === "Average");
+                if (averageDataset) {
                   items.push({
                     text: "main",
                     fillStyle: "#000000",
@@ -754,7 +750,7 @@ const TrendChart: Component<Props> = (props) => {
         },
         filter: function (context: any) {
           const label = context.dataset?.label;
-          return label === "Median" || label === "Branch";
+          return label === "Average" || label === "Branch";
         },
         callbacks: {
           title: function (context: any[]) {
@@ -784,10 +780,11 @@ const TrendChart: Component<Props> = (props) => {
             }
 
             if (!d) return "";
-            const ciLower = d.ci_lower_ns ?? d.median_ns;
-            const ciUpper = d.ci_upper_ns ?? d.median_ns;
+            const ciLower = d.ci_lower_ns ?? d.avg_ns;
+            const ciUpper = d.ci_upper_ns ?? d.avg_ns;
             const lines = [
-              `Median: ${formatNs(d.median_ns)}`,
+              `Average: ${formatNs(d.avg_ns)}`,
+              `P50: ${formatNs(d.median_ns)}`,
               `95% CI: ${formatNs(ciLower)} - ${formatNs(ciUpper)}`,
               `Range: ${formatNs(d.min_ns)} - ${formatNs(d.max_ns)}`,
               `Samples: ${d.sample_count}`,
@@ -795,9 +792,7 @@ const TrendChart: Component<Props> = (props) => {
             if (isIndexMode()) {
               const anchorNs = currentAnchorNs();
               if (anchorNs && anchorNs > 0) {
-                lines.unshift(
-                  `Index: ${((d.median_ns / anchorNs) * 100).toFixed(2)} (100 = anchor)`,
-                );
+                lines.unshift(`Index: ${((d.avg_ns / anchorNs) * 100).toFixed(2)} (100 = anchor)`);
               }
             }
             if (isBranch && d.branch) {

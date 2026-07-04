@@ -34,26 +34,32 @@ export interface TrendPoint {
   branch: string;
   run_date: string;
   avg_ns: number;
-  median_ns: number; // Primary metric for regression detection (p50)
+  median_ns: number; // Descriptive p50 only
   min_ns: number;
   max_ns: number;
   std_dev_ns: number;
   sample_count: number;
-  ci_lower_ns?: number;
+  ci_lower_ns?: number; // Invocation-mean CI around avg_ns
   ci_upper_ns?: number;
   sem_ns?: number;
 }
 
 export interface TrendResponse {
   points: TrendPoint[];
+  algorithm_version: string;
+  metric: string;
+  estimator: string;
+  cohort_policy: string;
+  family_definition: string;
+  calibration_status: string;
+  calibration_caveat: string;
+  fdr_level: number;
   current_status: {
     run_id: number;
-    status: "ok" | "regressed" | "insufficient";
+    status: "scored" | "insufficient";
     reason?: string;
   };
 }
-
-export type RegressionDFMode = "baseline" | "latest";
 
 export interface CompareResult {
   comparisons: {
@@ -79,11 +85,21 @@ export interface Regression {
   baseline_ci_lower_ns: number;
   baseline_ci_upper_ns: number;
   change_percent: number;
+  absolute_change_ns: number;
+  baseline_ns: number;
   min_effect_percent: number;
   p_value?: number;
   adjusted_p_value?: number;
-  detection_method: "t_test" | "change_point";
-  alpha: number;
+  detection_method: "log_avg_prediction_score";
+  t_score?: number;
+  degrees_of_freedom: number;
+  change_point_diagnostic?: {
+    run_id: number;
+    p_value: number;
+    effect_percent: number;
+    magnitude_ns: number;
+    recent: boolean;
+  };
 }
 
 export interface RegressionsResponse {
@@ -94,7 +110,15 @@ export interface RegressionsResponse {
   min_points: number;
   effective_min_points?: number;
   baseline_offset: number;
-  df_mode?: RegressionDFMode;
+  algorithm_version: string;
+  metric: string;
+  estimator: string;
+  cohort_policy: string;
+  family_definition: string;
+  calibration_status: string;
+  calibration_caveat: string;
+  fdr_level: number;
+  hypothesis_count: number;
   total_benchmarks?: number;
   analyzed_benchmarks?: number;
   insufficient_history?: boolean;
@@ -137,7 +161,14 @@ export interface RegressionHistoryResponse {
   window: number;
   min_points: number;
   baseline_offset: number;
-  df_mode: RegressionDFMode;
+  algorithm_version: string;
+  metric: string;
+  estimator: string;
+  cohort_policy: string;
+  family_definition: string;
+  calibration_status: string;
+  calibration_caveat: string;
+  fdr_level: number;
   generation_key: string;
   scanned_runs: number;
   entry_count: number;
@@ -176,7 +207,6 @@ export const api = {
       window?: number;
       minPoints?: number;
       baselineOffset?: number;
-      dfMode?: RegressionDFMode;
       branch?: string;
     },
   ) => {
@@ -196,9 +226,6 @@ export const api = {
     if (options?.baselineOffset !== undefined) {
       params.set("baseline_offset", String(options.baselineOffset));
     }
-    if (options?.dfMode) {
-      params.set("df_mode", options.dfMode);
-    }
     const query = params.toString();
     const url = query ? `/api/regressions?${query}` : "/api/regressions";
     return fetchJson<RegressionsResponse>(url);
@@ -207,7 +234,6 @@ export const api = {
     window?: number;
     minPoints?: number;
     baselineOffset?: number;
-    dfMode?: RegressionDFMode;
     branch?: string;
     limit?: number;
   }) => {
@@ -223,9 +249,6 @@ export const api = {
     }
     if (options?.baselineOffset !== undefined) {
       params.set("baseline_offset", String(options.baselineOffset));
-    }
-    if (options?.dfMode) {
-      params.set("df_mode", options.dfMode);
     }
     if (options?.limit) {
       params.set("limit", String(options.limit));

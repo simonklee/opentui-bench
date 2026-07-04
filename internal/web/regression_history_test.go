@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,9 +58,9 @@ func insertRegressionHistoryTestResult(t *testing.T, database *db.DB, runID int6
 func TestRegressionCacheGenerationKeyIsTargetIndependent(t *testing.T) {
 	server := &Server{}
 
-	before := server.regressionCacheGenerationKey("feature/cache", 30, 5, 3, regressionDFModeBaseline)
+	before := server.regressionCacheGenerationKey("feature/cache", 30, 5, 3, "same-data")
 	insertRegressionHistoryTestRun(t, openRegressionHistoryTestDB(t), "main", time.Now(), "future")
-	after := server.regressionCacheGenerationKey("feature/cache", 30, 5, 3, regressionDFModeBaseline)
+	after := server.regressionCacheGenerationKey("feature/cache", 30, 5, 3, "same-data")
 	if before != after {
 		t.Fatalf("future data changed generation key: %q != %q", before, after)
 	}
@@ -133,6 +134,113 @@ func TestRegressionsBackfillsSparseBenchmarkHistory(t *testing.T) {
 	}
 	if response.AnalyzedBenchmarks != 1 {
 		t.Fatalf("analyzed_benchmarks = %d, want 1; body=%s", response.AnalyzedBenchmarks, rec.Body.String())
+	}
+}
+
+func TestRegressionsUsesCompleteFamilyThenFixedGates(t *testing.T) {
+	database := openRegressionHistoryTestDB(t)
+	server := &Server{db: database}
+	at := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
+	insertResult := func(runID int64, name string, avg int64) {
+		t.Helper()
+		_, err := database.InsertResult(&db.Result{
+			RunID: runID, Category: "render", Name: name,
+			MinNs: avg, AvgNs: avg, MaxNs: avg, StdDevNs: 0,
+			P50Ns: avg, P95Ns: avg, P99Ns: avg, TotalNs: avg,
+			Iterations: 1, SampleCount: 1,
+		})
+		if err != nil {
+			t.Fatalf("insert %s: %v", name, err)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		runID := insertRegressionHistoryTestRun(t, database, "main", at.Add(time.Duration(i)*time.Hour), fmt.Sprintf("prior-%d", i))
+		for _, name := range []string{"large", "improvement", "below-floor"} {
+			insertResult(runID, name, 100_000)
+		}
+	}
+	targetID := insertRegressionHistoryTestRun(t, database, "main", at.Add(5*time.Hour), "target")
+	insertResult(targetID, "large", 200_000)
+	insertResult(targetID, "improvement", 50_000)
+	insertResult(targetID, "below-floor", 102_000)
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/regressions?run_id=%d&window=5&min_points=5&baseline_offset=0", targetID), nil)
+	rec := httptest.NewRecorder()
+	server.handleRegressions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%q", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		AlgorithmVersion  string                   `json:"algorithm_version"`
+		Metric            string                   `json:"metric"`
+		CalibrationStatus string                   `json:"calibration_status"`
+		HypothesisCount   int                      `json:"hypothesis_count"`
+		Regressions       []regressionSnapshotItem `json:"regressions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.HypothesisCount != 3 {
+		t.Fatalf("hypothesis_count = %d, want complete family of 3", response.HypothesisCount)
+	}
+	if len(response.Regressions) != 1 || response.Regressions[0].Name != "large" {
+		t.Fatalf("regressions = %#v, want only post-BH over-gate alert", response.Regressions)
+	}
+	if response.AlgorithmVersion != regressionAlgorithmVersion || response.Metric != regressionMetric || response.CalibrationStatus != regressionCalibrationStatus {
+		t.Fatalf("missing score metadata: %#v", response)
+	}
+}
+
+func TestRegressionEndpointsRejectDFMode(t *testing.T) {
+	server := &Server{db: openRegressionHistoryTestDB(t)}
+	for _, path := range []string{"/api/regressions?df_mode=baseline", "/api/regressions/history?df_mode=latest"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		if strings.Contains(path, "/history") {
+			server.handleRegressionsHistory(rec, req)
+		} else {
+			server.handleRegressions(rec, req)
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want 400", path, rec.Code)
+		}
+	}
+}
+
+func TestRegressionEndpointsRejectSinglePointMinimum(t *testing.T) {
+	server := &Server{db: openRegressionHistoryTestDB(t)}
+	for _, path := range []string{"/api/regressions?min_points=1", "/api/regressions/history?min_points=1"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		if strings.Contains(path, "/history") {
+			server.handleRegressionsHistory(rec, req)
+		} else {
+			server.handleRegressions(rec, req)
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want 400", path, rec.Code)
+		}
+	}
+}
+
+func TestRegressionsNoRunsReportsRequestedConfiguration(t *testing.T) {
+	server := &Server{db: openRegressionHistoryTestDB(t)}
+	req := httptest.NewRequest(http.MethodGet, "/api/regressions?window=7&min_points=2&baseline_offset=1", nil)
+	rec := httptest.NewRecorder()
+	server.handleRegressions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Window         int `json:"window"`
+		MinPoints      int `json:"min_points"`
+		BaselineOffset int `json:"baseline_offset"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Window != 7 || response.MinPoints != 2 || response.BaselineOffset != 1 {
+		t.Fatalf("configuration = %+v, want window=7 min_points=2 baseline_offset=1", response)
 	}
 }
 

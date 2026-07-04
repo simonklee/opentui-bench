@@ -16,7 +16,7 @@ type ChangePoint struct {
 }
 
 // DetectChangePoints finds statistically significant distribution shifts
-// in a time series of benchmark medians using an E-Divisive-style recursion.
+// in a time series of run averages using an E-Divisive-style recursion.
 //
 // series must be in chronological order (oldest first).
 func DetectChangePoints(series []RunStat, minSegment int, alpha float64, nPerms int) []ChangePoint {
@@ -38,7 +38,7 @@ func DetectChangePoints(series []RunStat, minSegment int, alpha float64, nPerms 
 
 	values := make([]float64, len(series))
 	for i, s := range series {
-		values[i] = s.Median
+		values[i] = s.Avg
 	}
 
 	rng := rand.New(rand.NewSource(42))

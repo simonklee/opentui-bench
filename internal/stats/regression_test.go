@@ -6,265 +6,105 @@ import (
 	"testing"
 )
 
-func TestRegressionDegreesOfFreedom(t *testing.T) {
-	t.Run("uses baseline point count when available", func(t *testing.T) {
-		df := regressionDegreesOfFreedom(3, 20)
-		if df != 19 {
-			t.Fatalf("expected df=19, got %d", df)
-		}
-	})
-
-	t.Run("falls back to latest df when baseline count missing", func(t *testing.T) {
-		df := regressionDegreesOfFreedom(3, 0)
-		if df != 2 {
-			t.Fatalf("expected df=2 fallback, got %d", df)
-		}
-	})
-
-	t.Run("returns one when both counts are too small", func(t *testing.T) {
-		df := regressionDegreesOfFreedom(1, 1)
-		if df != 1 {
-			t.Fatalf("expected df=1, got %d", df)
-		}
-	})
-
-	t.Run("latest mode prefers latest sample count", func(t *testing.T) {
-		df := regressionDegreesOfFreedomWithMode(3, 20, "latest")
-		if df != 2 {
-			t.Fatalf("expected latest-mode df=2, got %d", df)
-		}
-	})
+func closeEnough(got, want float64) bool {
+	return math.Abs(got-want) <= 1e-12*math.Max(1, math.Abs(want))
 }
 
-func TestTCriticalOneSided(t *testing.T) {
-	testCases := []struct {
-		name     string
-		df       int
-		alpha    float64
-		expected float64
+func TestLogAveragePredictionFormula(t *testing.T) {
+	history := []RunStat{{RunID: 3, Avg: math.Exp(3)}, {RunID: 2, Avg: math.Exp(2)}, {RunID: 1, Avg: math.Exp(1)}}
+	baseline, err := ComputeBaseline(history, 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !closeEnough(baseline.LogMean, 2) || !closeEnough(baseline.BaselineNs, math.Exp(2)) {
+		t.Fatalf("baseline log/ns = %v/%v", baseline.LogMean, baseline.BaselineNs)
+	}
+	if !closeEnough(baseline.Variance, 1) || !closeEnough(baseline.PredictionSE, math.Sqrt(1+1.0/3.0)) {
+		t.Fatalf("variance/prediction SE = %v/%v", baseline.Variance, baseline.PredictionSE)
+	}
+
+	result := DetectRegression(RunStat{RunID: 4, Avg: math.Exp(4)}, baseline)
+	wantT := 2 / math.Sqrt(1+1.0/3.0)
+	if result.DegreesOfFreedom != 2 || !closeEnough(*result.TScore, wantT) {
+		t.Fatalf("df/t = %d/%v, want 2/%v", result.DegreesOfFreedom, *result.TScore, wantT)
+	}
+	if !closeEnough(*result.PValue, tDistSurvival(wantT, 2)) {
+		t.Fatalf("p = %v", *result.PValue)
+	}
+	if !closeEnough(*result.ChangePercent, (math.Exp(2)-1)*100) ||
+		!closeEnough(*result.AbsoluteChangeNs, math.Exp(4)-math.Exp(2)) {
+		t.Fatalf("relative/absolute = %v/%v", *result.ChangePercent, *result.AbsoluteChangeNs)
+	}
+}
+
+func TestPredictionScoreZeroVariance(t *testing.T) {
+	baseline, err := ComputeBaseline([]RunStat{{RunID: 3, Avg: 100}, {RunID: 2, Avg: 100}, {RunID: 1, Avg: 100}}, 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		avg float64
+		p   float64
+		inf int
 	}{
-		{name: "df10_alpha005", df: 10, alpha: 0.05, expected: 1.812},
-		{name: "df10_alpha001", df: 10, alpha: 0.01, expected: 2.764},
-		{name: "df20_alpha005", df: 20, alpha: 0.05, expected: 1.725},
-		{name: "df20_alpha001", df: 20, alpha: 0.01, expected: 2.528},
-		{name: "df5_alpha0005", df: 5, alpha: 0.005, expected: 4.032},
+		{avg: 110, p: 0, inf: 1},
+		{avg: 100, p: 0.5, inf: 0},
+		{avg: 90, p: 1, inf: -1},
 	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := TCriticalOneSided(tc.df, tc.alpha)
-			if math.Abs(got-tc.expected) > 0.01 {
-				t.Fatalf("expected t-critical ~= %.3f, got %.6f", tc.expected, got)
-			}
-		})
+	for _, test := range tests {
+		result := DetectRegression(RunStat{Avg: test.avg}, baseline)
+		if *result.PValue != test.p {
+			t.Fatalf("avg %v: p=%v", test.avg, *result.PValue)
+		}
+		if test.inf != 0 && !math.IsInf(*result.TScore, test.inf) {
+			t.Fatalf("avg %v: t=%v", test.avg, *result.TScore)
+		}
 	}
 }
 
-func TestTCriticalOneSidedEdgeCases(t *testing.T) {
-	t.Run("alpha less than or equal zero returns +Inf", func(t *testing.T) {
-		got := TCriticalOneSided(10, 0)
-		if !math.IsInf(got, 1) {
-			t.Fatalf("expected +Inf, got %v", got)
-		}
-
-		got = TCriticalOneSided(10, -0.1)
-		if !math.IsInf(got, 1) {
-			t.Fatalf("expected +Inf for negative alpha, got %v", got)
-		}
-	})
-
-	t.Run("alpha greater than or equal 0.5 returns zero", func(t *testing.T) {
-		for _, alpha := range []float64{0.5, 0.6, 1.0} {
-			got := TCriticalOneSided(10, alpha)
-			if got != 0 {
-				t.Fatalf("alpha=%v: expected 0, got %v", alpha, got)
-			}
-		}
-	})
-
-	t.Run("df less than one clamps to one", func(t *testing.T) {
-		clamped := TCriticalOneSided(0, 0.01)
-		dfOne := TCriticalOneSided(1, 0.01)
-		if math.Abs(clamped-dfOne) > 1e-9 {
-			t.Fatalf("expected df<1 to match df=1, got df<1=%v df=1=%v", clamped, dfOne)
-		}
-	})
+func TestPredictionScoreInvalidAveragesAndInvocationStatsIrrelevance(t *testing.T) {
+	history := []RunStat{{RunID: 4, Avg: 100}, {RunID: 3, Avg: 101}, {RunID: 2, Avg: 0}, {RunID: 1, Avg: -1}}
+	baseline, err := ComputeBaseline(history, 2, 0)
+	if err != nil || baseline.PointCount != 2 {
+		t.Fatalf("baseline count/error = %d/%v", baseline.PointCount, err)
+	}
+	if DetectRegression(RunStat{Avg: 0}, baseline).Status != "insufficient" {
+		t.Fatal("zero latest average must be invalid")
+	}
 }
 
-func TestDetectRegressionUsesBaselinePointCount(t *testing.T) {
-	latest := RunStat{
-		RunID:       2,
-		Median:      400,
-		Sem:         10,
-		SampleCount: 3,
-		StdDev:      20,
-	}
-
-	t.Run("regresses when baseline history provides meaningful df", func(t *testing.T) {
-		baseline := &BaselineStats{
-			RunID:      1,
-			Median:     100,
-			Variance:   10000,
-			PointCount: 20,
-			CILower:    90,
-			CIUpper:    110,
-			CV:         0,
-		}
-
-		result := DetectRegression(latest, baseline, 0.01)
-		if result.Status != "regressed" {
-			t.Fatalf("expected regressed status, got %q", result.Status)
-		}
-		if result.ChangePercent == nil {
-			t.Fatal("expected change percent for regression")
-		}
-	})
-
-	t.Run("stays ok when baseline point count is unavailable", func(t *testing.T) {
-		baseline := &BaselineStats{
-			RunID:      1,
-			Median:     100,
-			Variance:   10000,
-			PointCount: 0,
-			CILower:    90,
-			CIUpper:    110,
-			CV:         0,
-		}
-
-		result := DetectRegression(latest, baseline, 0.01)
-		if result.Status != "ok" {
-			t.Fatalf("expected ok status, got %q", result.Status)
-		}
-	})
-}
-
-func TestDetectRegressionMinimumPracticalEffectFloor(t *testing.T) {
-	baseline := &BaselineStats{
-		RunID:      1,
-		Median:     100000,
-		Variance:   1,
-		PointCount: 20,
-		CILower:    99999,
-		CIUpper:    100001,
-		CV:         0,
-	}
-
-	t.Run("suppresses statistically significant sub-floor changes", func(t *testing.T) {
-		latest := RunStat{
-			RunID:       2,
-			Median:      101200,
-			Sem:         1,
-			SampleCount: 30,
-			StdDev:      5,
-		}
-
-		result := DetectRegression(latest, baseline, 0.01)
-		if result.MinEffectPercent != minPracticalRegressionEffectPercent {
-			t.Fatalf("expected min effect floor %.1f, got %.2f", minPracticalRegressionEffectPercent, result.MinEffectPercent)
-		}
-		if result.Status != "ok" {
-			t.Fatalf("expected ok status for sub-floor change, got %q", result.Status)
-		}
-	})
-
-	t.Run("keeps over-floor changes eligible", func(t *testing.T) {
-		latest := RunStat{
-			RunID:       2,
-			Median:      101600,
-			Sem:         1,
-			SampleCount: 30,
-			StdDev:      5,
-		}
-
-		result := DetectRegression(latest, baseline, 0.01)
-		if result.Status != "regressed" {
-			t.Fatalf("expected regressed status for over-floor change, got %q", result.Status)
-		}
-	})
-}
-
-func TestComputeBaselineCIWidth(t *testing.T) {
-	buildHistory := func(n int) []RunStat {
-		pattern := []float64{95, 98, 101, 99, 102, 97, 100, 103, 96, 104}
-		history := make([]RunStat, n)
-		for i := 0; i < n; i++ {
-			history[i] = RunStat{
-				RunID:       int64(n - i),
-				Median:      pattern[i%len(pattern)],
-				Sem:         0.5,
-				SampleCount: 30,
-				StdDev:      2,
-			}
-		}
-		return history
-	}
-
-	baseline10, err := ComputeBaseline(buildHistory(10), 10, 0)
+func TestPredictionScoreIsSlowdownDirectionForImprovements(t *testing.T) {
+	baseline, err := ComputeBaseline([]RunStat{{RunID: 3, Avg: 90}, {RunID: 2, Avg: 100}, {RunID: 1, Avg: 110}}, 3, 0)
 	if err != nil {
-		t.Fatalf("ComputeBaseline(10) returned error: %v", err)
+		t.Fatal(err)
 	}
-
-	baseline20, err := ComputeBaseline(buildHistory(20), 10, 0)
-	if err != nil {
-		t.Fatalf("ComputeBaseline(20) returned error: %v", err)
-	}
-
-	if baseline20.Variance >= baseline10.Variance {
-		t.Fatalf("expected n=20 baseline variance < n=10 baseline variance, got n20=%f n10=%f", baseline20.Variance, baseline10.Variance)
-	}
-
-	ratio := baseline20.Variance / baseline10.Variance
-	if ratio < 0.4 || ratio > 0.6 {
-		t.Fatalf("expected variance ratio near 0.5, got %f (n20=%f n10=%f)", ratio, baseline20.Variance, baseline10.Variance)
+	result := DetectRegression(RunStat{Avg: 50}, baseline)
+	if *result.PValue <= 0.5 || *result.ChangePercent >= 0 {
+		t.Fatalf("improvement p/change = %v/%v", *result.PValue, *result.ChangePercent)
 	}
 }
 
 func TestBenjaminiHochberg(t *testing.T) {
 	pValues := []float64{0.039, 0.001, 0.23, 0.008, 0.041}
 	results := BenjaminiHochberg(pValues, 0.05)
-
-	if len(results) != len(pValues) {
-		t.Fatalf("expected %d results, got %d", len(pValues), len(results))
-	}
-
 	expectedAdj := []float64{0.05125, 0.005, 0.23, 0.02, 0.05125}
 	expectedSig := []bool{false, true, false, true, false}
-
 	for i := range pValues {
-		if results[i].Index != i {
-			t.Fatalf("result[%d]: expected index %d, got %d", i, i, results[i].Index)
-		}
-		if results[i].PValue != pValues[i] {
-			t.Fatalf("result[%d]: expected p-value %f, got %f", i, pValues[i], results[i].PValue)
-		}
-		if math.Abs(results[i].AdjPValue-expectedAdj[i]) > 1e-9 {
-			t.Fatalf("result[%d]: expected adjusted p-value %f, got %f", i, expectedAdj[i], results[i].AdjPValue)
-		}
-		if results[i].IsSignificant != expectedSig[i] {
-			t.Fatalf("result[%d]: expected significant=%v, got %v", i, expectedSig[i], results[i].IsSignificant)
+		if !closeEnough(results[i].AdjPValue, expectedAdj[i]) || results[i].IsSignificant != expectedSig[i] {
+			t.Fatalf("result[%d] = %#v", i, results[i])
 		}
 	}
-
-	indices := make([]int, len(pValues))
-	for i := range indices {
-		indices[i] = i
-	}
-	sort.Slice(indices, func(i, j int) bool {
-		return pValues[indices[i]] < pValues[indices[j]]
-	})
-
+	indices := []int{0, 1, 2, 3, 4}
+	sort.Slice(indices, func(i, j int) bool { return pValues[indices[i]] < pValues[indices[j]] })
 	for i := 1; i < len(indices); i++ {
-		prev := results[indices[i-1]].AdjPValue
-		curr := results[indices[i]].AdjPValue
-		if curr < prev {
-			t.Fatalf("expected adjusted p-values to be monotone in sorted order, got rank %d value %f < rank %d value %f", i+1, curr, i, prev)
+		if results[indices[i]].AdjPValue < results[indices[i-1]].AdjPValue {
+			t.Fatal("adjusted p-values are not monotone")
 		}
 	}
 }
 
-func TestBenjaminiHochbergEmpty(t *testing.T) {
-	results := BenjaminiHochberg(nil, 0.05)
-	if results != nil {
-		t.Fatalf("expected nil for empty input, got %#v", results)
+func TestTCriticalOneSided(t *testing.T) {
+	if got := TCriticalOneSided(10, 0.05); math.Abs(got-1.812) > 0.01 {
+		t.Fatalf("critical value = %v", got)
 	}
 }
