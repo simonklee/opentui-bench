@@ -316,7 +316,7 @@ func replay(runs []runData, branch string) ([]snapshot, []runData, error) {
 	})
 	history := make(map[historyKey][]point)
 	commitSeen := make(map[string]int)
-	var previousByCohort = make(map[string]runData)
+	previousByCohort := make(map[string]runData)
 	var snapshots []snapshot
 	var selected []runData
 	for _, current := range runs {
@@ -860,6 +860,7 @@ func mean(v []float64) float64 {
 	}
 	return s / float64(len(v))
 }
+
 func variance(v []float64, m float64) float64 {
 	if len(v) < 2 {
 		return 0
@@ -871,6 +872,7 @@ func variance(v []float64, m float64) float64 {
 	}
 	return s / float64(len(v)-1)
 }
+
 func median(v []float64) float64 {
 	if len(v) == 0 {
 		return 0
@@ -882,6 +884,7 @@ func median(v []float64) float64 {
 	}
 	return (x[len(x)/2-1] + x[len(x)/2]) / 2
 }
+
 func quantile(sorted []float64, q float64) float64 {
 	if len(sorted) == 0 {
 		return 0
