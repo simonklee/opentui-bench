@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -93,7 +94,7 @@ func RunAndCollect(ctx context.Context, cfg RunConfig) (*record.ParsedRun, []Col
 		return nil, nil, fmt.Errorf("find benchmark binary: %w", err)
 	}
 
-	var buf bytes.Buffer
+	outputs := make([][]byte, 0, cfg.Samples)
 	for i := 0; i < cfg.Samples; i++ {
 		cmdArgs := []string{"--json", "--mem"}
 		cmdArgs = append(cmdArgs, args...)
@@ -105,13 +106,14 @@ func RunAndCollect(ctx context.Context, cfg RunConfig) (*record.ParsedRun, []Col
 			return nil, nil, fmt.Errorf("sample %d failed: %w", i+1, err)
 		}
 
-		buf.Write(out)
-		if len(out) > 0 && out[len(out)-1] != '\n' {
-			buf.WriteByte('\n')
-		}
+		outputs = append(outputs, out)
 	}
 
-	parsed, err := record.Parse(bytes.NewReader(buf.Bytes()), meta)
+	invocations := make([]io.Reader, len(outputs))
+	for i := range outputs {
+		invocations[i] = bytes.NewReader(outputs[i])
+	}
+	parsed, err := record.ParseInvocations(invocations, meta)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse results: %w", err)
 	}

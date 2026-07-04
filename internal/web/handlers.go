@@ -116,19 +116,23 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type resultResponse struct {
-		ID          int64             `json:"id"`
-		Category    string            `json:"category"`
-		Name        string            `json:"name"`
-		MinNs       int64             `json:"min_ns"`
-		AvgNs       int64             `json:"avg_ns"`
-		MaxNs       int64             `json:"max_ns"`
-		StdDevNs    int64             `json:"std_dev_ns"`
-		P50Ns       int64             `json:"p50_ns"`
-		P95Ns       int64             `json:"p95_ns"`
-		P99Ns       int64             `json:"p99_ns"`
-		Iterations  int64             `json:"iterations"`
-		SampleCount int64             `json:"sample_count"`
-		MemStats    []memStatResponse `json:"mem_stats,omitempty"`
+		ID                   int64             `json:"id"`
+		Category             string            `json:"category"`
+		Name                 string            `json:"name"`
+		MinNs                int64             `json:"min_ns"`
+		AvgNs                int64             `json:"avg_ns"`
+		MaxNs                int64             `json:"max_ns"`
+		StdDevNs             int64             `json:"std_dev_ns"`
+		P50Ns                int64             `json:"p50_ns"`
+		P95Ns                int64             `json:"p95_ns"`
+		P99Ns                int64             `json:"p99_ns"`
+		Iterations           int64             `json:"iterations"`
+		SampleCount          int64             `json:"sample_count"`
+		SampleAvgVarianceNs2 *float64          `json:"sample_avg_variance_ns2"`
+		SampleDataVersion    int64             `json:"sample_data_version"`
+		SummaryVersion       int64             `json:"summary_version"`
+		Samples              []db.ResultSample `json:"samples"`
+		MemStats             []memStatResponse `json:"mem_stats,omitempty"`
 	}
 
 	type runDetailResponse struct {
@@ -144,18 +148,22 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	var resultResponses []resultResponse
 	for _, res := range results {
 		rr := resultResponse{
-			ID:          res.ID,
-			Category:    res.Category,
-			Name:        res.Name,
-			MinNs:       res.MinNs,
-			AvgNs:       res.AvgNs,
-			MaxNs:       res.MaxNs,
-			StdDevNs:    res.StdDevNs,
-			P50Ns:       res.P50Ns,
-			P95Ns:       res.P95Ns,
-			P99Ns:       res.P99Ns,
-			Iterations:  res.Iterations,
-			SampleCount: res.SampleCount,
+			ID:                   res.ID,
+			Category:             res.Category,
+			Name:                 res.Name,
+			MinNs:                res.MinNs,
+			AvgNs:                res.AvgNs,
+			MaxNs:                res.MaxNs,
+			StdDevNs:             res.StdDevNs,
+			P50Ns:                res.P50Ns,
+			P95Ns:                res.P95Ns,
+			P99Ns:                res.P99Ns,
+			Iterations:           res.Iterations,
+			SampleCount:          res.SampleCount,
+			SampleAvgVarianceNs2: res.SampleAvgVarianceNs2,
+			SampleDataVersion:    res.SampleDataVersion,
+			SummaryVersion:       res.SummaryVersion,
+			Samples:              res.Samples,
 		}
 		for _, ms := range res.MemStats {
 			rr.MemStats = append(rr.MemStats, memStatResponse{
@@ -2006,19 +2014,23 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		Notes          string `json:"notes"`
 		ZigOptimize    string `json:"zig_optimize"`
 		Results        []struct {
-			Category    string `json:"category"`
-			Name        string `json:"name"`
-			MinNs       int64  `json:"min_ns"`
-			AvgNs       int64  `json:"avg_ns"`
-			MaxNs       int64  `json:"max_ns"`
-			StdDevNs    int64  `json:"std_dev_ns"`
-			P50Ns       int64  `json:"p50_ns"`
-			P95Ns       int64  `json:"p95_ns"`
-			P99Ns       int64  `json:"p99_ns"`
-			TotalNs     int64  `json:"total_ns"`
-			Iterations  int64  `json:"iterations"`
-			SampleCount int64  `json:"sample_count"`
-			MemStats    []struct {
+			Category             string            `json:"category"`
+			Name                 string            `json:"name"`
+			MinNs                int64             `json:"min_ns"`
+			AvgNs                int64             `json:"avg_ns"`
+			MaxNs                int64             `json:"max_ns"`
+			StdDevNs             int64             `json:"std_dev_ns"`
+			P50Ns                int64             `json:"p50_ns"`
+			P95Ns                int64             `json:"p95_ns"`
+			P99Ns                int64             `json:"p99_ns"`
+			TotalNs              int64             `json:"total_ns"`
+			Iterations           int64             `json:"iterations"`
+			SampleCount          int64             `json:"sample_count"`
+			SampleAvgVarianceNs2 *float64          `json:"sample_avg_variance_ns2"`
+			SampleDataVersion    *int64            `json:"sample_data_version"`
+			SummaryVersion       *int64            `json:"summary_version"`
+			Samples              []db.ResultSample `json:"samples"`
+			MemStats             []struct {
 				Name  string `json:"name"`
 				Bytes int64  `json:"bytes"`
 			} `json:"mem_stats,omitempty"`
@@ -2039,33 +2051,6 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		req.ZigOptimize = "ReleaseFast"
 	}
 
-	// Idempotency: check for existing run with same (commit_hash_full, machine_id, zig_optimize)
-	if req.CommitHashFull != "" {
-		existingRun, err := s.findExistingRun(req.CommitHashFull, req.MachineID, req.ZigOptimize)
-		if err == nil && existingRun != nil {
-			// Return existing run
-			resultIDs, err := s.buildResultIDMap(existingRun.ID)
-			if err != nil {
-				writeJSONError(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			count, _ := s.db.CountResultsForRun(existingRun.ID)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK) // 200 instead of 201 for existing
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"id":               existingRun.ID,
-				"commit_hash":      existingRun.CommitHash,
-				"commit_hash_full": existingRun.CommitHashFull,
-				"run_date":         existingRun.RunDate,
-				"result_count":     count,
-				"result_ids":       legacyResultIDMap(resultIDs),
-				"results":          resultIDList(resultIDs),
-			})
-			return
-		}
-	}
-
-	// Insert run
 	run := &db.Run{
 		CommitHash:     req.CommitHash,
 		CommitHashFull: req.CommitHashFull,
@@ -2078,102 +2063,64 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		ZigOptimize:    req.ZigOptimize,
 	}
 
-	runID, err := s.db.InsertRun(run)
+	results := make([]db.Result, 0, len(req.Results))
+	for _, rr := range req.Results {
+		result := db.Result{
+			Category:             rr.Category,
+			Name:                 rr.Name,
+			MinNs:                rr.MinNs,
+			AvgNs:                rr.AvgNs,
+			MaxNs:                rr.MaxNs,
+			StdDevNs:             rr.StdDevNs,
+			P50Ns:                rr.P50Ns,
+			P95Ns:                rr.P95Ns,
+			P99Ns:                rr.P99Ns,
+			TotalNs:              rr.TotalNs,
+			Iterations:           rr.Iterations,
+			SampleCount:          rr.SampleCount,
+			SampleAvgVarianceNs2: rr.SampleAvgVarianceNs2,
+			Samples:              rr.Samples,
+		}
+		// Missing fields identify old clients and deliberately retain legacy
+		// provenance rather than inferring samples from aggregate summaries.
+		if rr.SampleDataVersion != nil {
+			result.SampleDataVersion = *rr.SampleDataVersion
+		}
+		if rr.SummaryVersion != nil {
+			result.SummaryVersion = *rr.SummaryVersion
+		} else {
+			result.SummaryVersion = 1
+		}
+		for _, ms := range rr.MemStats {
+			result.MemStats = append(result.MemStats, db.MemStat{
+				StatName: ms.Name,
+				Bytes:    ms.Bytes,
+			})
+		}
+		results = append(results, result)
+	}
+
+	storedRun, resultIDs, created, err := s.db.InsertRunWithResultsIfAbsent(run, results)
 	if err != nil {
 		writeJSONError(w, "insert run: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	cleanup := func() {
-		_ = s.db.DeleteRun(runID)
-	}
-
-	resultIDs := make(map[db.BenchmarkKey]int64, len(req.Results))
-
-	for _, rr := range req.Results {
-		result := &db.Result{
-			RunID:       runID,
-			Category:    rr.Category,
-			Name:        rr.Name,
-			MinNs:       rr.MinNs,
-			AvgNs:       rr.AvgNs,
-			MaxNs:       rr.MaxNs,
-			StdDevNs:    rr.StdDevNs,
-			P50Ns:       rr.P50Ns,
-			P95Ns:       rr.P95Ns,
-			P99Ns:       rr.P99Ns,
-			TotalNs:     rr.TotalNs,
-			Iterations:  rr.Iterations,
-			SampleCount: rr.SampleCount,
-		}
-
-		resultID, err := s.db.InsertResult(result)
-		if err != nil {
-			cleanup()
-			writeJSONError(w, "insert result: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		resultIDs[db.BenchmarkKey{Category: rr.Category, Name: rr.Name}] = resultID
-
-		for _, ms := range rr.MemStats {
-			stat := &db.MemStat{
-				ResultID: resultID,
-				StatName: ms.Name,
-				Bytes:    ms.Bytes,
-			}
-			if err := s.db.InsertMemStat(stat); err != nil {
-				cleanup()
-				writeJSONError(w, "insert mem stat: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
+	if created {
+		w.WriteHeader(http.StatusCreated)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"id":               runID,
-		"commit_hash":      req.CommitHash,
-		"commit_hash_full": req.CommitHashFull,
-		"run_date":         run.RunDate,
-		"result_count":     len(req.Results),
+		"id":               storedRun.ID,
+		"commit_hash":      storedRun.CommitHash,
+		"commit_hash_full": storedRun.CommitHashFull,
+		"run_date":         storedRun.RunDate,
+		"result_count":     len(resultIDs),
 		"result_ids":       legacyResultIDMap(resultIDs),
 		"results":          resultIDList(resultIDs),
 	})
-}
-
-// findExistingRun checks for a run matching (commit_hash_full, machine_id, zig_optimize).
-func (s *Server) findExistingRun(commitHashFull, machineID, zigOptimize string) (*db.Run, error) {
-	var r db.Run
-	var commitHashFullN, commitMessage, commitDate, branch, machineIDN, notes, zigOptimizeN sql.NullString
-	err := s.db.QueryRow(`
-		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
-		FROM runs WHERE commit_hash_full = ? AND machine_id = ? AND zig_optimize = ?
-		ORDER BY run_date DESC LIMIT 1`, commitHashFull, machineID, zigOptimize).Scan(
-		&r.ID, &r.CommitHash, &commitHashFullN, &commitMessage, &commitDate, &branch, &r.RunDate, &machineIDN, &notes, &zigOptimizeN)
-	if err != nil {
-		return nil, err
-	}
-	r.CommitHashFull = commitHashFullN.String
-	r.CommitMessage = commitMessage.String
-	r.CommitDate = commitDate.String
-	r.Branch = branch.String
-	r.MachineID = machineIDN.String
-	r.Notes = notes.String
-	r.ZigOptimize = zigOptimizeN.String
-	return &r, nil
-}
-
-func (s *Server) buildResultIDMap(runID int64) (map[db.BenchmarkKey]int64, error) {
-	results, err := s.db.GetResultsForRun(runID)
-	if err != nil {
-		return nil, err
-	}
-	m := make(map[db.BenchmarkKey]int64, len(results))
-	for _, r := range results {
-		m[db.BenchmarkKey{Category: r.Category, Name: r.Name}] = r.ID
-	}
-	return m, nil
 }
 
 // legacyResultIDMap is retained for already deployed record clients. New

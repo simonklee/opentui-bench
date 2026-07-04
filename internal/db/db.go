@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -51,7 +52,10 @@ CREATE TABLE IF NOT EXISTS results (
     p99_ns INTEGER NOT NULL DEFAULT 0,
     total_ns INTEGER NOT NULL,
     iterations INTEGER NOT NULL,
-    sample_count INTEGER NOT NULL DEFAULT 1
+    sample_count INTEGER NOT NULL DEFAULT 1,
+    sample_avg_variance_ns2 REAL,
+    sample_data_version INTEGER NOT NULL DEFAULT 0,
+    summary_version INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_results_run ON results(run_id);
 CREATE INDEX IF NOT EXISTS idx_results_name ON results(name);
@@ -66,6 +70,13 @@ CREATE TABLE IF NOT EXISTS mem_stats (
     bytes INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mem_stats_result ON mem_stats(result_id);
+
+CREATE TABLE IF NOT EXISTS result_samples (
+    result_id INTEGER NOT NULL REFERENCES results(id) ON DELETE CASCADE,
+    sample_index INTEGER NOT NULL,
+    avg_ns INTEGER NOT NULL CHECK (avg_ns > 0),
+    PRIMARY KEY (result_id, sample_index)
+);
 
 CREATE TABLE IF NOT EXISTS flamegraphs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,7 +134,21 @@ CREATE TABLE IF NOT EXISTS regression_cache (
 );
 CREATE INDEX IF NOT EXISTS idx_regression_cache_branch_run ON regression_cache(branch, run_id DESC);
 CREATE INDEX IF NOT EXISTS idx_regression_cache_generation ON regression_cache(generation_key);
+
+CREATE VIEW IF NOT EXISTS results_with_run AS
+SELECT r.id AS result_id, r.category, r.name, r.min_ns, r.avg_ns, r.max_ns,
+       r.std_dev_ns, r.p50_ns, r.p95_ns, r.p99_ns, r.total_ns, r.iterations,
+       r.sample_count, r.sample_avg_variance_ns2, r.sample_data_version,
+       r.summary_version, ru.id AS run_id, ru.commit_hash, ru.commit_hash_full,
+       ru.commit_message, ru.commit_date, ru.branch, ru.run_date, ru.machine_id, ru.notes
+FROM results r JOIN runs ru ON r.run_id = ru.id;
 `
+
+const (
+	CurrentSchemaVersion     = 4
+	CurrentSampleDataVersion = 1
+	CurrentSummaryVersion    = 2
+)
 
 type DB struct {
 	*sql.DB
@@ -185,145 +210,8 @@ func Open(dbPath string) (*DB, error) {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("migrate database: %w", err)
 	}
-	if err := database.removeObsoleteDFCache(); err != nil {
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("remove obsolete regression cache: %w", err)
-	}
-
-	if _, err := sqlDB.Exec(schemaSQL); err != nil {
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("initialize schema: %w", err)
-	}
 
 	return database, nil
-}
-
-// Phase 3 cache entries used df_mode as part of their identity and are not
-// meaningful under the run-level estimator. The cache is disposable, so drop
-// the old table before schema initialization rather than serving stale scores.
-func (db *DB) removeObsoleteDFCache() error {
-	rows, err := db.Query(`PRAGMA table_info(regression_cache)`)
-	if err != nil {
-		return err
-	}
-	hasDFMode := false
-	for rows.Next() {
-		var cid, notNull, primaryKey int
-		var name, columnType string
-		var defaultValue sql.NullString
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		hasDFMode = hasDFMode || name == "df_mode"
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if !hasDFMode {
-		return nil
-	}
-	_, err = db.Exec(`DROP TABLE regression_cache`)
-	return err
-}
-
-func (db *DB) migrate() error {
-	var tableName string
-	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='flamegraphs'`).Scan(&tableName)
-	if err == sql.ErrNoRows {
-		return db.enforceResultIdentity()
-	}
-	if err != nil {
-		return err
-	}
-
-	hasOldSchema, err := db.checkOldFlamegraphSchema()
-	if err != nil {
-		return err
-	}
-	if !hasOldSchema {
-		return db.enforceResultIdentity()
-	}
-
-	fmt.Println("Migrating flamegraphs table to compressed format...")
-
-	oldData, err := db.readOldFlamegraphs()
-	if err != nil {
-		return err
-	}
-
-	if err := db.performFlamegraphMigration(oldData); err != nil {
-		return err
-	}
-
-	if _, err := db.Exec(`VACUUM`); err != nil {
-		fmt.Printf("Warning: VACUUM failed: %v\n", err)
-	}
-
-	fmt.Printf("Migrated %d flamegraphs to compressed format\n", len(oldData))
-	return db.enforceResultIdentity()
-}
-
-func (db *DB) enforceResultIdentity() error {
-	var tableName string
-	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='results'`).Scan(&tableName)
-	if err == sql.ErrNoRows {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	var duplicateGroups, duplicateRows int
-	err = db.QueryRow(`
-		SELECT COUNT(*), COALESCE(SUM(row_count - 1), 0)
-		FROM (
-			SELECT COUNT(*) AS row_count
-			FROM results
-			GROUP BY run_id, category, name
-			HAVING COUNT(*) > 1
-		)`).Scan(&duplicateGroups, &duplicateRows)
-	if err != nil {
-		return fmt.Errorf("audit duplicate benchmark results: %w", err)
-	}
-	if duplicateGroups > 0 {
-		return fmt.Errorf("cannot enforce benchmark identity: found %d duplicate (run_id, category, name) groups containing %d extra rows; resolve them explicitly before reopening the database", duplicateGroups, duplicateRows)
-	}
-
-	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_results_run_benchmark ON results(run_id, category, name)`); err != nil {
-		return fmt.Errorf("enforce unique benchmark results: %w", err)
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_results_benchmark_run ON results(category, name, run_id)`); err != nil {
-		return fmt.Errorf("index benchmark history: %w", err)
-	}
-	return nil
-}
-
-func (db *DB) checkOldFlamegraphSchema() (bool, error) {
-	rows, err := db.Query(`PRAGMA table_info(flamegraphs)`)
-	if err != nil {
-		return false, err
-	}
-
-	var hasOldSchema bool
-	for rows.Next() {
-		var cid int
-		var name, colType string
-		var notNull, pk int
-		var dfltValue sql.NullString
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
-			_ = rows.Close()
-			return false, err
-		}
-		if name == "folded_stacks" || name == "svg" {
-			hasOldSchema = true
-		}
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		return false, err
-	}
-	return hasOldSchema, nil
 }
 
 type oldFlamegraph struct {
@@ -333,70 +221,6 @@ type oldFlamegraph struct {
 	foldedStacks  string
 	samplingFreq  int
 	createdAt     string
-}
-
-func (db *DB) readOldFlamegraphs() ([]oldFlamegraph, error) {
-	rows, err := db.Query(`SELECT id, run_id, benchmark_name, folded_stacks, sampling_freq, created_at FROM flamegraphs`)
-	if err != nil {
-		return nil, fmt.Errorf("read old flamegraphs: %w", err)
-	}
-
-	var oldData []oldFlamegraph
-	for rows.Next() {
-		var fg oldFlamegraph
-		if err := rows.Scan(&fg.id, &fg.runID, &fg.benchmarkName, &fg.foldedStacks, &fg.samplingFreq, &fg.createdAt); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("scan old flamegraph: %w", err)
-		}
-		oldData = append(oldData, fg)
-	}
-	_ = rows.Close()
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read old flamegraphs: %w", err)
-	}
-	return oldData, nil
-}
-
-func (db *DB) performFlamegraphMigration(oldData []oldFlamegraph) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.Exec(`DROP TABLE flamegraphs`); err != nil {
-		return fmt.Errorf("drop old table: %w", err)
-	}
-
-	createSQL := `CREATE TABLE flamegraphs (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-		benchmark_name TEXT NOT NULL,
-		folded_stacks_gz BLOB NOT NULL,
-		sampling_freq INTEGER NOT NULL DEFAULT 997,
-		created_at TEXT NOT NULL
-	)`
-	if _, err := tx.Exec(createSQL); err != nil {
-		return fmt.Errorf("create new table: %w", err)
-	}
-
-	if _, err := tx.Exec(`CREATE UNIQUE INDEX idx_flamegraphs_run_benchmark ON flamegraphs(run_id, benchmark_name)`); err != nil {
-		return fmt.Errorf("create index: %w", err)
-	}
-
-	for _, fg := range oldData {
-		compressed, err := gzipCompress([]byte(fg.foldedStacks))
-		if err != nil {
-			return fmt.Errorf("compress flamegraph %s: %w", fg.benchmarkName, err)
-		}
-		if _, err := tx.Exec(`INSERT INTO flamegraphs (run_id, benchmark_name, folded_stacks_gz, sampling_freq, created_at) VALUES (?, ?, ?, ?, ?)`,
-			fg.runID, fg.benchmarkName, compressed, fg.samplingFreq, fg.createdAt); err != nil {
-			return fmt.Errorf("insert flamegraph %s: %w", fg.benchmarkName, err)
-		}
-	}
-
-	return tx.Commit()
 }
 
 type Run struct {
@@ -434,21 +258,31 @@ type RegressionCacheEntry struct {
 }
 
 type Result struct {
-	ID          int64
-	RunID       int64
-	Category    string
-	Name        string
-	MinNs       int64
-	AvgNs       int64
-	MaxNs       int64
-	StdDevNs    int64
-	P50Ns       int64
-	P95Ns       int64
-	P99Ns       int64
-	TotalNs     int64
-	Iterations  int64
-	SampleCount int64
-	MemStats    []MemStat
+	ID                   int64
+	RunID                int64
+	Category             string
+	Name                 string
+	MinNs                int64
+	AvgNs                int64
+	MaxNs                int64
+	StdDevNs             int64
+	P50Ns                int64
+	P95Ns                int64
+	P99Ns                int64
+	TotalNs              int64
+	Iterations           int64
+	SampleCount          int64
+	SampleAvgVarianceNs2 *float64
+	SampleDataVersion    int64
+	SummaryVersion       int64
+	MemStats             []MemStat
+	Samples              []ResultSample
+}
+
+type ResultSample struct {
+	ResultID    int64 `json:"-"`
+	SampleIndex int64 `json:"sample_index"`
+	AvgNs       int64 `json:"avg_ns"`
 }
 
 type MemStat struct {
@@ -503,16 +337,162 @@ func (db *DB) InsertRun(run *Run) (int64, error) {
 
 func (db *DB) InsertResult(result *Result) (int64, error) {
 	res, err := db.Exec(`
-		INSERT INTO results (run_id, category, name, min_ns, avg_ns, max_ns, std_dev_ns, p50_ns, p95_ns, p99_ns, total_ns, iterations, sample_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO results (run_id, category, name, min_ns, avg_ns, max_ns, std_dev_ns, p50_ns, p95_ns, p99_ns, total_ns, iterations, sample_count, sample_avg_variance_ns2, sample_data_version, summary_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		result.RunID, result.Category, result.Name,
 		result.MinNs, result.AvgNs, result.MaxNs, result.StdDevNs,
 		result.P50Ns, result.P95Ns, result.P99Ns,
-		result.TotalNs, result.Iterations, result.SampleCount)
+		result.TotalNs, result.Iterations, result.SampleCount, result.SampleAvgVarianceNs2,
+		result.SampleDataVersion, normalizedSummaryVersion(result.SummaryVersion))
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+func normalizedSummaryVersion(version int64) int64 {
+	if version == 0 {
+		return 1
+	}
+	return version
+}
+
+// InsertRunWithResults persists the complete measurement atomically. The
+// returned IDs use the structured benchmark identity and are only visible after
+// run, result, memory-stat, and raw-sample insertion all succeed.
+func (db *DB) InsertRunWithResults(run *Run, results []Result) (int64, map[BenchmarkKey]int64, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	runID, ids, err := insertRunWithResultsTx(tx, run, results)
+	if err != nil {
+		return 0, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, nil, err
+	}
+	return runID, ids, nil
+}
+
+// InsertRunWithResultsIfAbsent serializes the remote idempotency check and
+// insertion in one transaction. Empty commit hashes are never deduplicated.
+func (db *DB) InsertRunWithResultsIfAbsent(run *Run, results []Result) (*Run, map[BenchmarkKey]int64, bool, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if run.CommitHashFull != "" {
+		existing, err := getRunByMeasurementIdentityTx(tx, run.CommitHashFull, run.MachineID, run.ZigOptimize)
+		if err == nil {
+			ids, err := resultIDsForRunTx(tx, existing.ID)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, nil, false, err
+			}
+			return existing, ids, false, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, false, err
+		}
+	}
+
+	runID, ids, err := insertRunWithResultsTx(tx, run, results)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, false, err
+	}
+	stored := *run
+	stored.ID = runID
+	return &stored, ids, true, nil
+}
+
+func insertRunWithResultsTx(tx *sql.Tx, run *Run, results []Result) (int64, map[BenchmarkKey]int64, error) {
+	res, err := tx.Exec(`INSERT INTO runs (commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, run.CommitHash, run.CommitHashFull, run.CommitMessage,
+		run.CommitDate, run.Branch, run.RunDate, run.MachineID, run.Notes, run.ZigOptimize)
+	if err != nil {
+		return 0, nil, err
+	}
+	runID, err := res.LastInsertId()
+	if err != nil {
+		return 0, nil, err
+	}
+	ids := make(map[BenchmarkKey]int64, len(results))
+	for i := range results {
+		result := &results[i]
+		res, err := tx.Exec(`INSERT INTO results (run_id, category, name, min_ns, avg_ns, max_ns, std_dev_ns, p50_ns, p95_ns, p99_ns, total_ns, iterations, sample_count, sample_avg_variance_ns2, sample_data_version, summary_version)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, runID, result.Category, result.Name,
+			result.MinNs, result.AvgNs, result.MaxNs, result.StdDevNs, result.P50Ns, result.P95Ns,
+			result.P99Ns, result.TotalNs, result.Iterations, result.SampleCount,
+			result.SampleAvgVarianceNs2, result.SampleDataVersion, normalizedSummaryVersion(result.SummaryVersion))
+		if err != nil {
+			return 0, nil, err
+		}
+		resultID, err := res.LastInsertId()
+		if err != nil {
+			return 0, nil, err
+		}
+		ids[BenchmarkKey{Category: result.Category, Name: result.Name}] = resultID
+		for _, stat := range result.MemStats {
+			if _, err := tx.Exec(`INSERT INTO mem_stats(result_id, stat_name, bytes) VALUES (?, ?, ?)`, resultID, stat.StatName, stat.Bytes); err != nil {
+				return 0, nil, err
+			}
+		}
+		for _, sample := range result.Samples {
+			if _, err := tx.Exec(`INSERT INTO result_samples(result_id, sample_index, avg_ns) VALUES (?, ?, ?)`, resultID, sample.SampleIndex, sample.AvgNs); err != nil {
+				return 0, nil, err
+			}
+		}
+	}
+	return runID, ids, nil
+}
+
+func getRunByMeasurementIdentityTx(tx *sql.Tx, commitHashFull, machineID, zigOptimize string) (*Run, error) {
+	var run Run
+	var commitHashFullN, commitMessage, commitDate, branch, machineIDN, notes, zigOptimizeN sql.NullString
+	err := tx.QueryRow(`
+		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
+		FROM runs WHERE commit_hash_full = ? AND machine_id = ? AND zig_optimize = ?
+		ORDER BY julianday(run_date) DESC, id DESC LIMIT 1`, commitHashFull, machineID, zigOptimize).Scan(
+		&run.ID, &run.CommitHash, &commitHashFullN, &commitMessage, &commitDate, &branch, &run.RunDate, &machineIDN, &notes, &zigOptimizeN)
+	if err != nil {
+		return nil, err
+	}
+	run.CommitHashFull = commitHashFullN.String
+	run.CommitMessage = commitMessage.String
+	run.CommitDate = commitDate.String
+	run.Branch = branch.String
+	run.MachineID = machineIDN.String
+	run.Notes = notes.String
+	run.ZigOptimize = zigOptimizeN.String
+	return &run, nil
+}
+
+func resultIDsForRunTx(tx *sql.Tx, runID int64) (map[BenchmarkKey]int64, error) {
+	rows, err := tx.Query(`SELECT id, category, name FROM results WHERE run_id = ?`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	ids := make(map[BenchmarkKey]int64)
+	for rows.Next() {
+		var id int64
+		var key BenchmarkKey
+		if err := rows.Scan(&id, &key.Category, &key.Name); err != nil {
+			return nil, err
+		}
+		ids[key] = id
+	}
+	return ids, rows.Err()
 }
 
 func (db *DB) InsertMemStat(stat *MemStat) error {
@@ -769,7 +749,8 @@ func (db *DB) GetResultsForRun(runID int64) ([]Result, error) {
 	rows, err := db.Query(`
 		SELECT id, run_id, category, name, min_ns, avg_ns, max_ns, 
 		       COALESCE(std_dev_ns, 0), COALESCE(p50_ns, 0), COALESCE(p95_ns, 0), COALESCE(p99_ns, 0),
-		       total_ns, iterations, COALESCE(sample_count, 1)
+		       total_ns, iterations, COALESCE(sample_count, 1), sample_avg_variance_ns2,
+		       sample_data_version, summary_version
 		FROM results WHERE run_id = ? ORDER BY category, name`, runID)
 	if err != nil {
 		return nil, err
@@ -783,10 +764,14 @@ func (db *DB) GetResultsForRun(runID int64) ([]Result, error) {
 	var results []Result
 	for rows.Next() {
 		var r Result
+		var variance sql.NullFloat64
 		if err := rows.Scan(&r.ID, &r.RunID, &r.Category, &r.Name, &r.MinNs, &r.AvgNs, &r.MaxNs,
 			&r.StdDevNs, &r.P50Ns, &r.P95Ns, &r.P99Ns,
-			&r.TotalNs, &r.Iterations, &r.SampleCount); err != nil {
+			&r.TotalNs, &r.Iterations, &r.SampleCount, &variance, &r.SampleDataVersion, &r.SummaryVersion); err != nil {
 			return nil, err
+		}
+		if variance.Valid {
+			r.SampleAvgVarianceNs2 = &variance.Float64
 		}
 		results = append(results, r)
 	}
@@ -800,6 +785,11 @@ func (db *DB) GetResultsForRun(runID int64) ([]Result, error) {
 			return nil, err
 		}
 		results[i].MemStats = memStats
+		samples, err := db.GetResultSamples(results[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		results[i].Samples = samples
 	}
 
 	return results, nil
@@ -807,18 +797,44 @@ func (db *DB) GetResultsForRun(runID int64) ([]Result, error) {
 
 func (db *DB) GetResult(resultID int64) (*Result, error) {
 	var r Result
+	var variance sql.NullFloat64
 	err := db.QueryRow(`
 		SELECT id, run_id, category, name, min_ns, avg_ns, max_ns,
 		       COALESCE(std_dev_ns, 0), COALESCE(p50_ns, 0), COALESCE(p95_ns, 0), COALESCE(p99_ns, 0),
-		       total_ns, iterations, COALESCE(sample_count, 1)
+		       total_ns, iterations, COALESCE(sample_count, 1), sample_avg_variance_ns2,
+		       sample_data_version, summary_version
 		FROM results WHERE id = ?`, resultID).Scan(
 		&r.ID, &r.RunID, &r.Category, &r.Name, &r.MinNs, &r.AvgNs, &r.MaxNs,
 		&r.StdDevNs, &r.P50Ns, &r.P95Ns, &r.P99Ns,
-		&r.TotalNs, &r.Iterations, &r.SampleCount)
+		&r.TotalNs, &r.Iterations, &r.SampleCount, &variance, &r.SampleDataVersion, &r.SummaryVersion)
+	if err != nil {
+		return nil, err
+	}
+	if variance.Valid {
+		r.SampleAvgVarianceNs2 = &variance.Float64
+	}
+	r.Samples, err = db.GetResultSamples(resultID)
 	if err != nil {
 		return nil, err
 	}
 	return &r, nil
+}
+
+func (db *DB) GetResultSamples(resultID int64) ([]ResultSample, error) {
+	rows, err := db.Query(`SELECT result_id, sample_index, avg_ns FROM result_samples WHERE result_id = ? ORDER BY sample_index`, resultID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	samples := []ResultSample{}
+	for rows.Next() {
+		var sample ResultSample
+		if err := rows.Scan(&sample.ResultID, &sample.SampleIndex, &sample.AvgNs); err != nil {
+			return nil, err
+		}
+		samples = append(samples, sample)
+	}
+	return samples, rows.Err()
 }
 
 type ProfiledResult struct {

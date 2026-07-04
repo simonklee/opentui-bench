@@ -48,19 +48,23 @@ type createRunRequest struct {
 }
 
 type createRunResultReq struct {
-	Category    string               `json:"category"`
-	Name        string               `json:"name"`
-	MinNs       int64                `json:"min_ns"`
-	AvgNs       int64                `json:"avg_ns"`
-	MaxNs       int64                `json:"max_ns"`
-	StdDevNs    int64                `json:"std_dev_ns"`
-	P50Ns       int64                `json:"p50_ns"`
-	P95Ns       int64                `json:"p95_ns"`
-	P99Ns       int64                `json:"p99_ns"`
-	TotalNs     int64                `json:"total_ns"`
-	Iterations  int64                `json:"iterations"`
-	SampleCount int64                `json:"sample_count"`
-	MemStats    []record.MemStatJSON `json:"mem_stats,omitempty"`
+	Category             string               `json:"category"`
+	Name                 string               `json:"name"`
+	MinNs                int64                `json:"min_ns"`
+	AvgNs                int64                `json:"avg_ns"`
+	MaxNs                int64                `json:"max_ns"`
+	StdDevNs             int64                `json:"std_dev_ns"`
+	P50Ns                int64                `json:"p50_ns"`
+	P95Ns                int64                `json:"p95_ns"`
+	P99Ns                int64                `json:"p99_ns"`
+	TotalNs              int64                `json:"total_ns"`
+	Iterations           int64                `json:"iterations"`
+	SampleCount          int64                `json:"sample_count"`
+	SampleAvgVarianceNs2 *float64             `json:"sample_avg_variance_ns2,omitempty"`
+	SampleDataVersion    int64                `json:"sample_data_version,omitempty"`
+	SummaryVersion       int64                `json:"summary_version,omitempty"`
+	Samples              []db.ResultSample    `json:"samples,omitempty"`
+	MemStats             []record.MemStatJSON `json:"mem_stats,omitempty"`
 }
 
 type createRunResponse struct {
@@ -95,19 +99,23 @@ func (r *RemoteRecorder) RecordRun(parsed *record.ParsedRun) (int64, map[db.Benc
 
 	for _, pr := range parsed.Results {
 		reqBody.Results = append(reqBody.Results, createRunResultReq{
-			Category:    pr.Category,
-			Name:        pr.Name,
-			MinNs:       pr.MinNs,
-			AvgNs:       pr.AvgNs,
-			MaxNs:       pr.MaxNs,
-			StdDevNs:    pr.StdDevNs,
-			P50Ns:       pr.P50Ns,
-			P95Ns:       pr.P95Ns,
-			P99Ns:       pr.P99Ns,
-			TotalNs:     pr.TotalNs,
-			Iterations:  pr.Iterations,
-			SampleCount: pr.SampleCount,
-			MemStats:    pr.MemStats,
+			Category:             pr.Category,
+			Name:                 pr.Name,
+			MinNs:                pr.MinNs,
+			AvgNs:                pr.AvgNs,
+			MaxNs:                pr.MaxNs,
+			StdDevNs:             pr.StdDevNs,
+			P50Ns:                pr.P50Ns,
+			P95Ns:                pr.P95Ns,
+			P99Ns:                pr.P99Ns,
+			TotalNs:              pr.TotalNs,
+			Iterations:           pr.Iterations,
+			SampleCount:          pr.SampleCount,
+			SampleAvgVarianceNs2: pr.SampleAvgVarianceNs2,
+			SampleDataVersion:    pr.SampleDataVersion,
+			SummaryVersion:       pr.SummaryVersion,
+			Samples:              pr.Samples,
+			MemStats:             pr.MemStats,
 		})
 	}
 

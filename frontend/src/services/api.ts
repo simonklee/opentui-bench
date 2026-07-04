@@ -18,6 +18,10 @@ export interface BenchmarkResult {
   max_ns: number;
   std_dev_ns: number;
   sample_count: number;
+  sample_avg_variance_ns2: number | null;
+  sample_data_version: number;
+  summary_version: number;
+  samples: { sample_index: number; avg_ns: number }[];
   iterations: number;
   mem_stats?: { name: string; bytes: number }[];
 }

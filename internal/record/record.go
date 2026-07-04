@@ -54,22 +54,27 @@ type ParsedRun struct {
 
 // ParsedResult is a single aggregated benchmark result with optional memory stats.
 type ParsedResult struct {
-	Category    string
-	Name        string
-	MinNs       int64
-	AvgNs       int64
-	MaxNs       int64
-	StdDevNs    int64
-	P50Ns       int64
-	P95Ns       int64
-	P99Ns       int64
-	TotalNs     int64
-	Iterations  int64
-	SampleCount int64
-	MemStats    []MemStatJSON
+	Category             string
+	Name                 string
+	MinNs                int64
+	AvgNs                int64
+	MaxNs                int64
+	StdDevNs             int64
+	P50Ns                int64
+	P95Ns                int64
+	P99Ns                int64
+	TotalNs              int64
+	Iterations           int64
+	SampleCount          int64
+	SampleAvgVarianceNs2 *float64
+	SampleDataVersion    int64
+	SummaryVersion       int64
+	Samples              []db.ResultSample
+	MemStats             []MemStatJSON
 }
 
 type sample struct {
+	index      int64
 	minNs      int64
 	avgNs      int64
 	maxNs      int64
@@ -82,12 +87,60 @@ type sample struct {
 // It does everything Record() does up to the DB write: parses JSON, aggregates
 // samples, builds the result structs. No DB dependency. No side effects.
 func Parse(reader io.Reader, meta RunMetadata) (*ParsedRun, error) {
+	return ParseInvocations([]io.Reader{reader}, meta)
+}
+
+// ParseInvocations preserves process invocation boundaries. A benchmark absent
+// from one invocation has a gap in sample_index rather than shifting later
+// samples or being paired by output row position.
+func ParseInvocations(invocations []io.Reader, meta RunMetadata) (*ParsedRun, error) {
 	if meta.ZigOptimize == "" {
 		meta.ZigOptimize = "ReleaseFast"
 	}
 
 	samples := make(map[db.BenchmarkKey][]sample)
 	keyOrder := []db.BenchmarkKey{}
+	for invocationIndex, reader := range invocations {
+		invocation, order, err := parseInvocation(reader)
+		if err != nil {
+			return nil, fmt.Errorf("parse invocation %d: %w", invocationIndex, err)
+		}
+		for _, key := range order {
+			if _, exists := samples[key]; !exists {
+				keyOrder = append(keyOrder, key)
+			}
+			s := invocation[key]
+			s.index = int64(invocationIndex)
+			samples[key] = append(samples[key], s)
+		}
+	}
+
+	parsed := &ParsedRun{Meta: meta}
+	for _, key := range keyOrder {
+		sampleList := samples[key]
+		agg := aggregateSamples(key.Category, key.Name, sampleList)
+		var memStats []MemStatJSON
+		for _, s := range sampleList {
+			if len(s.memStats) > 0 {
+				memStats = s.memStats
+				break
+			}
+		}
+		parsed.Results = append(parsed.Results, ParsedResult{
+			Category: agg.Category, Name: agg.Name, MinNs: agg.MinNs, AvgNs: agg.AvgNs,
+			MaxNs: agg.MaxNs, StdDevNs: agg.StdDevNs, P50Ns: agg.P50Ns, P95Ns: agg.P95Ns,
+			P99Ns: agg.P99Ns, TotalNs: agg.TotalNs, Iterations: agg.Iterations,
+			SampleCount: agg.SampleCount, SampleAvgVarianceNs2: agg.SampleAvgVarianceNs2,
+			SampleDataVersion: agg.SampleDataVersion, SummaryVersion: agg.SummaryVersion,
+			Samples: agg.Samples, MemStats: memStats,
+		})
+	}
+	return parsed, nil
+}
+
+func parseInvocation(reader io.Reader) (map[db.BenchmarkKey]sample, []db.BenchmarkKey, error) {
+	results := make(map[db.BenchmarkKey]sample)
+	var order []db.BenchmarkKey
 
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
@@ -106,58 +159,30 @@ func Parse(reader io.Reader, meta RunMetadata) (*ParsedRun, error) {
 
 		var bench BenchmarkJSON
 		if err := json.Unmarshal([]byte(trimmed), &bench); err != nil {
-			return nil, fmt.Errorf("parse benchmark JSON on line %d: %w", lineNum, err)
+			return nil, nil, fmt.Errorf("parse benchmark JSON on line %d: %w", lineNum, err)
 		}
 
 		for _, r := range bench.Results {
 			key := db.BenchmarkKey{Category: bench.Benchmark, Name: r.Name}
-			if _, exists := samples[key]; !exists {
-				keyOrder = append(keyOrder, key)
+			if _, exists := results[key]; exists {
+				return nil, nil, fmt.Errorf("duplicate benchmark %s/%s on line %d", key.Category, key.Name, lineNum)
 			}
-			samples[key] = append(samples[key], sample{
+			order = append(order, key)
+			results[key] = sample{
 				minNs:      r.MinNs,
 				avgNs:      r.AvgNs,
 				maxNs:      r.MaxNs,
 				totalNs:    r.TotalNs,
 				iterations: r.Iterations,
 				memStats:   r.MemStats,
-			})
+			}
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan input: %w", err)
+		return nil, nil, fmt.Errorf("scan input: %w", err)
 	}
-
-	parsed := &ParsedRun{Meta: meta}
-
-	for _, key := range keyOrder {
-		sampleList := samples[key]
-		agg := aggregateSamples(key.Category, key.Name, sampleList)
-
-		var memStats []MemStatJSON
-		if len(sampleList) > 0 && len(sampleList[0].memStats) > 0 {
-			memStats = sampleList[0].memStats
-		}
-
-		parsed.Results = append(parsed.Results, ParsedResult{
-			Category:    agg.Category,
-			Name:        agg.Name,
-			MinNs:       agg.MinNs,
-			AvgNs:       agg.AvgNs,
-			MaxNs:       agg.MaxNs,
-			StdDevNs:    agg.StdDevNs,
-			P50Ns:       agg.P50Ns,
-			P95Ns:       agg.P95Ns,
-			P99Ns:       agg.P99Ns,
-			TotalNs:     agg.TotalNs,
-			Iterations:  agg.Iterations,
-			SampleCount: agg.SampleCount,
-			MemStats:    memStats,
-		})
-	}
-
-	return parsed, nil
+	return results, order, nil
 }
 
 // Store writes a ParsedRun to the database. Returns the run ID and result count.
@@ -178,50 +203,38 @@ func Store(database *db.DB, parsed *ParsedRun) (int64, int, error) {
 		run.ZigOptimize = "ReleaseFast"
 	}
 
-	runID, err := database.InsertRun(run)
+	results := make([]db.Result, 0, len(parsed.Results))
+	for _, pr := range parsed.Results {
+		result := db.Result{
+			Category:             pr.Category,
+			Name:                 pr.Name,
+			MinNs:                pr.MinNs,
+			AvgNs:                pr.AvgNs,
+			MaxNs:                pr.MaxNs,
+			StdDevNs:             pr.StdDevNs,
+			P50Ns:                pr.P50Ns,
+			P95Ns:                pr.P95Ns,
+			P99Ns:                pr.P99Ns,
+			TotalNs:              pr.TotalNs,
+			Iterations:           pr.Iterations,
+			SampleCount:          pr.SampleCount,
+			SampleAvgVarianceNs2: pr.SampleAvgVarianceNs2,
+			SampleDataVersion:    pr.SampleDataVersion,
+			SummaryVersion:       pr.SummaryVersion,
+			Samples:              pr.Samples,
+		}
+		for _, ms := range pr.MemStats {
+			result.MemStats = append(result.MemStats, db.MemStat{
+				StatName: ms.Name,
+				Bytes:    ms.Bytes,
+			})
+		}
+		results = append(results, result)
+	}
+	runID, _, err := database.InsertRunWithResults(run, results)
 	if err != nil {
 		return 0, 0, fmt.Errorf("insert run: %w", err)
 	}
-	cleanup := func() {
-		_ = database.DeleteRun(runID)
-	}
-
-	for _, pr := range parsed.Results {
-		result := &db.Result{
-			RunID:       runID,
-			Category:    pr.Category,
-			Name:        pr.Name,
-			MinNs:       pr.MinNs,
-			AvgNs:       pr.AvgNs,
-			MaxNs:       pr.MaxNs,
-			StdDevNs:    pr.StdDevNs,
-			P50Ns:       pr.P50Ns,
-			P95Ns:       pr.P95Ns,
-			P99Ns:       pr.P99Ns,
-			TotalNs:     pr.TotalNs,
-			Iterations:  pr.Iterations,
-			SampleCount: pr.SampleCount,
-		}
-
-		resultID, err := database.InsertResult(result)
-		if err != nil {
-			cleanup()
-			return 0, 0, fmt.Errorf("insert result: %w", err)
-		}
-
-		for _, ms := range pr.MemStats {
-			stat := &db.MemStat{
-				ResultID: resultID,
-				StatName: ms.Name,
-				Bytes:    ms.Bytes,
-			}
-			if err := database.InsertMemStat(stat); err != nil {
-				cleanup()
-				return 0, 0, fmt.Errorf("insert mem stat: %w", err)
-			}
-		}
-	}
-
 	return runID, len(parsed.Results), nil
 }
 
@@ -249,18 +262,21 @@ func aggregateSamples(category, name string, sampleList []sample) *db.Result {
 	if n == 1 {
 		s := sampleList[0]
 		return &db.Result{
-			Category:    category,
-			Name:        name,
-			MinNs:       s.minNs,
-			AvgNs:       s.avgNs,
-			MaxNs:       s.maxNs,
-			StdDevNs:    0,
-			P50Ns:       s.avgNs,
-			P95Ns:       s.avgNs,
-			P99Ns:       s.avgNs,
-			TotalNs:     s.totalNs,
-			Iterations:  s.iterations,
-			SampleCount: 1,
+			Category:          category,
+			Name:              name,
+			MinNs:             s.minNs,
+			AvgNs:             s.avgNs,
+			MaxNs:             s.maxNs,
+			StdDevNs:          0,
+			P50Ns:             s.avgNs,
+			P95Ns:             s.avgNs,
+			P99Ns:             s.avgNs,
+			TotalNs:           s.totalNs,
+			Iterations:        s.iterations,
+			SampleCount:       1,
+			SampleDataVersion: db.CurrentSampleDataVersion,
+			SummaryVersion:    db.CurrentSummaryVersion,
+			Samples:           []db.ResultSample{{SampleIndex: s.index, AvgNs: s.avgNs}},
 		}
 	}
 
@@ -283,25 +299,33 @@ func aggregateSamples(category, name string, sampleList []sample) *db.Result {
 	}
 
 	avgNs := mean(avgs)
-	stdDevNs := stddev(avgs)
+	variance := sampleVariance(avgs)
+	stdDevNs := int64(math.Sqrt(*variance))
 	p50Ns := percentile(avgs, 0.50)
 	p95Ns := percentile(avgs, 0.95)
 	p99Ns := percentile(avgs, 0.99)
 
-	return &db.Result{
-		Category:    category,
-		Name:        name,
-		MinNs:       minNs,
-		AvgNs:       avgNs,
-		MaxNs:       maxNs,
-		StdDevNs:    stdDevNs,
-		P50Ns:       p50Ns,
-		P95Ns:       p95Ns,
-		P99Ns:       p99Ns,
-		TotalNs:     totalNs,
-		Iterations:  totalIter,
-		SampleCount: int64(n),
+	result := &db.Result{
+		Category:             category,
+		Name:                 name,
+		MinNs:                minNs,
+		AvgNs:                avgNs,
+		MaxNs:                maxNs,
+		StdDevNs:             stdDevNs,
+		P50Ns:                p50Ns,
+		P95Ns:                p95Ns,
+		P99Ns:                p99Ns,
+		TotalNs:              totalNs,
+		Iterations:           totalIter,
+		SampleCount:          int64(n),
+		SampleAvgVarianceNs2: variance,
+		SampleDataVersion:    db.CurrentSampleDataVersion,
+		SummaryVersion:       db.CurrentSummaryVersion,
 	}
+	for _, s := range sampleList {
+		result.Samples = append(result.Samples, db.ResultSample{SampleIndex: s.index, AvgNs: s.avgNs})
+	}
+	return result
 }
 
 func mean(values []int64) int64 {
@@ -315,20 +339,19 @@ func mean(values []int64) int64 {
 	return sum / int64(len(values))
 }
 
-func stddev(values []int64) int64 {
+func sampleVariance(values []int64) *float64 {
 	n := len(values)
 	if n < 2 {
-		return 0
+		return nil
 	}
-
-	avg := mean(values)
-	var sumSquares float64
-	for _, v := range values {
-		diff := float64(v - avg)
-		sumSquares += diff * diff
+	var mean, sumSquares float64
+	for i, v := range values {
+		delta := float64(v) - mean
+		mean += delta / float64(i+1)
+		sumSquares += delta * (float64(v) - mean)
 	}
 	variance := sumSquares / float64(n-1)
-	return int64(math.Sqrt(variance))
+	return &variance
 }
 
 func percentile(values []int64, p float64) int64 {

@@ -366,12 +366,15 @@ func (s *Server) computeRegressionsSnapshot(ctx context.Context, runID int64, br
 
 func (s *Server) regressionCacheGenerationKey(branch string, window int, minPoints int, baselineOffset int, dataFingerprint string) string {
 	cacheSeed := fmt.Sprintf(
-		"algorithm=%s|metric=%s|estimator=%s|cohort=%s|family=%s|branch=%s|window=%d|min_points=%d|baseline_offset=%d|data=%s|fdr=%g|min_relative_pct=%g|min_abs_ns=%g|global_shift=%d,%g,%g|change_point_diagnostic=%d,%g,%d,%d",
+		"algorithm=%s|metric=%s|estimator=%s|cohort=%s|family=%s|schema=%d|sample_data=%d|summary=%d|branch=%s|window=%d|min_points=%d|baseline_offset=%d|data=%s|fdr=%g|min_relative_pct=%g|min_abs_ns=%g|global_shift=%d,%g,%g|change_point_diagnostic=%d,%g,%d,%d",
 		regressionCacheAlgorithmVersion,
 		regressionMetric,
 		regressionEstimator,
 		regressionCohortPolicy,
 		regressionFamilyDefinition,
+		db.CurrentSchemaVersion,
+		db.CurrentSampleDataVersion,
+		db.CurrentSummaryVersion,
 		branch,
 		window,
 		minPoints,

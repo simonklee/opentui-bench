@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -459,6 +460,8 @@ func TestOpenRejectsAmbiguousExistingResultDuplicates(t *testing.T) {
 	if database, err := Open(path); err == nil {
 		_ = database.Close()
 		t.Fatal("expected duplicate audit to reject database")
+	} else if !strings.Contains(err.Error(), "duplicate groups") {
+		t.Fatalf("duplicate error = %q, want actionable audit", err)
 	}
 }
 
@@ -942,6 +945,174 @@ func TestOpenDropsObsoleteDFKeyedRegressionCache(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("obsolete cache rows remain: %d", count)
+	}
+}
+
+func TestMigrationPreservesHistoricalResultsWithoutFabricatingSamples(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "production.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`
+		CREATE TABLE runs (id INTEGER PRIMARY KEY, commit_hash TEXT NOT NULL, commit_hash_full TEXT,
+			commit_message TEXT, commit_date TEXT, branch TEXT, run_date TEXT NOT NULL,
+			machine_id TEXT, notes TEXT, zig_optimize TEXT DEFAULT 'ReleaseFast');
+		CREATE TABLE results (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES runs(id),
+			category TEXT NOT NULL, name TEXT NOT NULL, min_ns INTEGER NOT NULL, avg_ns INTEGER NOT NULL,
+			max_ns INTEGER NOT NULL, std_dev_ns INTEGER NOT NULL DEFAULT 0, p50_ns INTEGER NOT NULL DEFAULT 0,
+			p95_ns INTEGER NOT NULL DEFAULT 0, p99_ns INTEGER NOT NULL DEFAULT 0, total_ns INTEGER NOT NULL,
+			iterations INTEGER NOT NULL, sample_count INTEGER NOT NULL DEFAULT 1);
+		CREATE VIEW results_with_run AS
+			SELECT r.id AS result_id, r.avg_ns, ru.id AS run_id, ru.commit_hash
+			FROM results r JOIN runs ru ON r.run_id = ru.id;
+		INSERT INTO runs VALUES (1, 'abc', 'abcdef', '', '', 'main', '2026-01-01T00:00:00Z', 'host', '', 'ReleaseFast');
+		INSERT INTO results VALUES (1, 1, 'cat', 'bench', 1, 2, 3, 1, 2, 3, 3, 10, 5, 3);
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = database.Close() }()
+	var version int
+	if err := database.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != CurrentSchemaVersion {
+		t.Fatalf("version = %d, err = %v", version, err)
+	}
+	result, err := database.GetResult(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SampleAvgVarianceNs2 != nil || result.SampleDataVersion != 0 || result.SummaryVersion != 1 || len(result.Samples) != 0 {
+		t.Fatalf("historical provenance changed: %+v", result)
+	}
+	viewColumns, err := database.Query(`PRAGMA table_info(results_with_run)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundVariance := false
+	for viewColumns.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := viewColumns.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		if name == "sample_avg_variance_ns2" {
+			foundVariance = true
+		}
+	}
+	if !foundVariance {
+		t.Fatal("migrated results_with_run view is missing precision columns")
+	}
+	if err := viewColumns.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.migrate(); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+}
+
+func TestMigrationCompressesLegacyFlamegraphs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-flamegraph.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`
+		CREATE TABLE runs (id INTEGER PRIMARY KEY, commit_hash TEXT NOT NULL, commit_hash_full TEXT,
+			commit_message TEXT, commit_date TEXT, branch TEXT, run_date TEXT NOT NULL,
+			machine_id TEXT, notes TEXT, zig_optimize TEXT DEFAULT 'ReleaseFast');
+		CREATE TABLE flamegraphs (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, benchmark_name TEXT NOT NULL,
+			folded_stacks TEXT NOT NULL, svg TEXT, sampling_freq INTEGER NOT NULL DEFAULT 997, created_at TEXT NOT NULL);
+		INSERT INTO runs VALUES (1, 'abc', '', '', '', 'main', '2026-01-01T00:00:00Z', '', '', 'ReleaseFast');
+		INSERT INTO flamegraphs VALUES (1, 1, 'bench', 'main;work 7', '<svg/>', 997, 'now');
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = database.Close() }()
+	flamegraph, err := database.GetFlamegraph(1, "bench")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flamegraph.FoldedStacks != "main;work 7" {
+		t.Fatalf("folded stacks = %q", flamegraph.FoldedStacks)
+	}
+}
+
+func TestMigrationFailureRollsBackVersionAndRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "duplicate.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`
+		CREATE TABLE results (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, category TEXT NOT NULL, name TEXT NOT NULL);
+		INSERT INTO results VALUES (1, 1, 'cat', 'same'), (2, 1, 'cat', 'same');
+		PRAGMA user_version = 1;
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+	if database, err := Open(path); err == nil {
+		_ = database.Close()
+		t.Fatal("expected duplicate identity migration failure")
+	}
+	raw, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	var version, rows int
+	_ = raw.QueryRow(`PRAGMA user_version`).Scan(&version)
+	_ = raw.QueryRow(`SELECT COUNT(*) FROM results`).Scan(&rows)
+	if version != 1 || rows != 2 {
+		t.Fatalf("migration partially applied: version=%d rows=%d", version, rows)
+	}
+}
+
+func TestOpenRejectsNewerSchemaVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "future.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 999`); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+	if database, err := Open(path); err == nil {
+		_ = database.Close()
+		t.Fatal("expected newer schema rejection")
+	}
+}
+
+func TestInsertRunWithResultsRollsBackOnSampleConstraint(t *testing.T) {
+	database := openTestDB(t)
+	_, _, err := database.InsertRunWithResults(&Run{CommitHash: "bad", RunDate: "2026-01-01T00:00:00Z"}, []Result{{
+		Category: "cat", Name: "bench", MinNs: 1, AvgNs: 2, MaxNs: 3, TotalNs: 2, Iterations: 1,
+		SampleCount: 1, SampleDataVersion: 1, SummaryVersion: 2,
+		Samples: []ResultSample{{SampleIndex: 0, AvgNs: 0}},
+	}})
+	if err == nil {
+		t.Fatal("expected sample CHECK failure")
+	}
+	var runs, results int
+	_ = database.QueryRow(`SELECT COUNT(*) FROM runs`).Scan(&runs)
+	_ = database.QueryRow(`SELECT COUNT(*) FROM results`).Scan(&results)
+	if runs != 0 || results != 0 {
+		t.Fatalf("partial write remains: runs=%d results=%d", runs, results)
 	}
 }
 
