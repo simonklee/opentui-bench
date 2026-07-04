@@ -2,11 +2,11 @@ package backtest
 
 import (
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"time"
 
+	"opentui-bench/internal/broadshift"
 	"opentui-bench/internal/db"
 	"opentui-bench/internal/stats"
 )
@@ -20,19 +20,19 @@ func (c Config) Label() string {
 }
 
 type Options struct {
-	Branch                    string  `json:"branch"`
-	Window                    int     `json:"window"`
-	MinPoints                 int     `json:"min_points"`
-	BaselineOffset            int     `json:"baseline_offset"`
-	FDR                       float64 `json:"fdr"`
-	MinRetainedOffShiftSignal float64 `json:"min_retained_off_shift_signal"`
-	GlobalShiftMinBench       int     `json:"global_shift_min_benchmarks"`
-	GlobalShiftMinShare       float64 `json:"global_shift_min_positive_share"`
-	GlobalShiftMinGeoPct      float64 `json:"global_shift_min_geo_increase_pct"`
+	Branch                 string  `json:"branch"`
+	Window                 int     `json:"window"`
+	MinPoints              int     `json:"min_points"`
+	BaselineOffset         int     `json:"baseline_offset"`
+	FDR                    float64 `json:"fdr"`
+	MinRetainedAlertSignal float64 `json:"min_retained_alert_signal"`
+	BroadShiftMinBench     int     `json:"broad_shift_min_benchmarks"`
+	BroadShiftMinShare     float64 `json:"broad_shift_min_positive_share"`
+	BroadShiftMinGeoPct    float64 `json:"broad_shift_min_geometric_change_percent"`
 
 	NearShiftWindow  int     `json:"near_shift_window"`
 	PostShiftWindow  int     `json:"post_shift_window"`
-	KnownShiftRunIDs []int64 `json:"known_shift_run_ids,omitempty"`
+	BroadShiftRunIDs []int64 `json:"broad_shift_run_ids,omitempty"`
 }
 
 type Scorecard struct {
@@ -49,7 +49,7 @@ type Scorecard struct {
 	CategoryHHI            float64 `json:"category_hhi"`
 	NearShiftAlertFraction float64 `json:"near_shift_alert_fraction"`
 	OffShiftAlertsPerRun   float64 `json:"off_shift_alerts_per_run"`
-	RetainedOffShiftSignal float64 `json:"retained_off_shift_signal"`
+	RetainedAlertSignal    float64 `json:"retained_alert_signal"`
 }
 
 type ConfigResult struct {
@@ -61,18 +61,11 @@ type ConfigResult struct {
 }
 
 type Report struct {
-	GeneratedAt   string         `json:"generated_at"`
-	Options       Options        `json:"options"`
-	RunIDs        []int64        `json:"run_ids"`
-	ShiftRunIDs   []int64        `json:"shift_run_ids"`
-	ConfigResults []ConfigResult `json:"config_results"`
-}
-
-type shiftMetrics struct {
-	detected bool
-	compared int
-	share    float64
-	geoPct   float64
+	GeneratedAt      string         `json:"generated_at"`
+	Options          Options        `json:"options"`
+	RunIDs           []int64        `json:"run_ids"`
+	BroadShiftRunIDs []int64        `json:"broad_shift_run_ids"`
+	ConfigResults    []ConfigResult `json:"config_results"`
 }
 
 type benchmarkContext struct {
@@ -84,7 +77,6 @@ type benchmarkContext struct {
 type runContext struct {
 	RunID                int64
 	AnalyzableBenchmarks int
-	GlobalShiftDetected  bool
 	Benchmarks           []benchmarkContext
 }
 
@@ -97,17 +89,17 @@ type runOutcome struct {
 
 func DefaultOptions() Options {
 	return Options{
-		Branch:                    "main",
-		Window:                    30,
-		MinPoints:                 5,
-		BaselineOffset:            3,
-		FDR:                       0.01,
-		MinRetainedOffShiftSignal: 0.25,
-		GlobalShiftMinBench:       50,
-		GlobalShiftMinShare:       0.75,
-		GlobalShiftMinGeoPct:      10.0,
-		NearShiftWindow:           20,
-		PostShiftWindow:           25,
+		Branch:                 "main",
+		Window:                 30,
+		MinPoints:              5,
+		BaselineOffset:         3,
+		FDR:                    0.01,
+		MinRetainedAlertSignal: 0.25,
+		BroadShiftMinBench:     50,
+		BroadShiftMinShare:     0.75,
+		BroadShiftMinGeoPct:    10.0,
+		NearShiftWindow:        20,
+		PostShiftWindow:        25,
 	}
 }
 
@@ -161,14 +153,14 @@ func Run(database *db.DB, opts Options, configs []Config) (*Report, error) {
 		return report, nil
 	}
 
-	shiftRunIDs := uniqueSortedRunIDs(opts.KnownShiftRunIDs)
+	shiftRunIDs := uniqueSortedRunIDs(opts.BroadShiftRunIDs)
 	if len(shiftRunIDs) == 0 {
-		shiftRunIDs, err = detectKnownShiftRuns(database, replayRunIDs, opts)
+		shiftRunIDs, err = detectBroadShiftRuns(database, replayRunIDs, opts)
 		if err != nil {
-			return nil, fmt.Errorf("detect known shifts: %w", err)
+			return nil, fmt.Errorf("detect broad shifts: %w", err)
 		}
 	}
-	report.ShiftRunIDs = filterKnownShiftRuns(shiftRunIDs, replayRunIDs)
+	report.BroadShiftRunIDs = filterBroadShiftRuns(shiftRunIDs, replayRunIDs)
 
 	contexts := make([]runContext, len(replayRunIDs))
 	for i, runID := range replayRunIDs {
@@ -185,12 +177,12 @@ func Run(database *db.DB, opts Options, configs []Config) (*Report, error) {
 		for i, ctx := range contexts {
 			outcomes[i] = evaluateConfigForRun(ctx, cfg, opts)
 		}
-		score := computeScorecard(replayRunIDs, outcomes, report.ShiftRunIDs, opts)
+		score := computeScorecard(replayRunIDs, outcomes, report.BroadShiftRunIDs, opts)
 		results = append(results, ConfigResult{Config: cfg, Scorecard: score})
 	}
 
 	assignObjectiveScores(results)
-	applyRetentionConstraint(results, opts.MinRetainedOffShiftSignal)
+	applyRetentionConstraint(results, opts.MinRetainedAlertSignal)
 	bestIndex := bestResultIndex(results)
 	if bestIndex >= 0 {
 		results[bestIndex].Recommended = true
@@ -229,20 +221,20 @@ func normalizeOptions(opts Options) Options {
 	if opts.FDR <= 0 {
 		opts.FDR = defaults.FDR
 	}
-	if opts.MinRetainedOffShiftSignal < 0 {
-		opts.MinRetainedOffShiftSignal = defaults.MinRetainedOffShiftSignal
+	if opts.MinRetainedAlertSignal < 0 {
+		opts.MinRetainedAlertSignal = defaults.MinRetainedAlertSignal
 	}
-	if opts.MinRetainedOffShiftSignal > 1 {
-		opts.MinRetainedOffShiftSignal = 1
+	if opts.MinRetainedAlertSignal > 1 {
+		opts.MinRetainedAlertSignal = 1
 	}
-	if opts.GlobalShiftMinBench <= 0 {
-		opts.GlobalShiftMinBench = defaults.GlobalShiftMinBench
+	if opts.BroadShiftMinBench <= 0 {
+		opts.BroadShiftMinBench = defaults.BroadShiftMinBench
 	}
-	if opts.GlobalShiftMinShare <= 0 {
-		opts.GlobalShiftMinShare = defaults.GlobalShiftMinShare
+	if opts.BroadShiftMinShare <= 0 {
+		opts.BroadShiftMinShare = defaults.BroadShiftMinShare
 	}
-	if opts.GlobalShiftMinGeoPct <= 0 {
-		opts.GlobalShiftMinGeoPct = defaults.GlobalShiftMinGeoPct
+	if opts.BroadShiftMinGeoPct <= 0 {
+		opts.BroadShiftMinGeoPct = defaults.BroadShiftMinGeoPct
 	}
 	if opts.NearShiftWindow < 0 {
 		opts.NearShiftWindow = defaults.NearShiftWindow
@@ -250,7 +242,7 @@ func normalizeOptions(opts Options) Options {
 	if opts.PostShiftWindow < 0 {
 		opts.PostShiftWindow = defaults.PostShiftWindow
 	}
-	opts.KnownShiftRunIDs = uniqueSortedRunIDs(opts.KnownShiftRunIDs)
+	opts.BroadShiftRunIDs = uniqueSortedRunIDs(opts.BroadShiftRunIDs)
 	return opts
 }
 
@@ -282,7 +274,7 @@ func listReplayRunIDs(database *db.DB, branch string) ([]int64, error) {
 	return ids, nil
 }
 
-func detectKnownShiftRuns(database *db.DB, replayRunIDs []int64, opts Options) ([]int64, error) {
+func detectBroadShiftRuns(database *db.DB, replayRunIDs []int64, opts Options) ([]int64, error) {
 	resultsCache := make(map[int64][]db.Result)
 	getResults := func(runID int64) ([]db.Result, error) {
 		if cached, ok := resultsCache[runID]; ok {
@@ -305,11 +297,11 @@ func detectKnownShiftRuns(database *db.DB, replayRunIDs []int64, opts Options) (
 		if len(runs) < 2 {
 			continue
 		}
-		metrics, err := computeShiftMetrics(getResults, runs[0].ID, runs[1].ID, opts)
+		incident, err := computeBroadShift(getResults, runs[0].ID, runs[1].ID, opts)
 		if err != nil {
 			return nil, err
 		}
-		if metrics.detected {
+		if incident.Detected {
 			shiftRuns = append(shiftRuns, runs[0].ID)
 		}
 	}
@@ -339,26 +331,6 @@ func buildRunContext(database *db.DB, runID int64, opts Options) (runContext, er
 	}
 
 	latestRunID := runID
-	resultsCache := make(map[int64][]db.Result)
-	getResults := func(id int64) ([]db.Result, error) {
-		if cached, ok := resultsCache[id]; ok {
-			return cached, nil
-		}
-		fetched, err := database.GetResultsForRun(id)
-		if err != nil {
-			return nil, err
-		}
-		resultsCache[id] = fetched
-		return fetched, nil
-	}
-
-	if len(runs) >= 2 {
-		metrics, err := computeShiftMetrics(getResults, runs[0].ID, runs[1].ID, opts)
-		if err != nil {
-			return ctx, err
-		}
-		ctx.GlobalShiftDetected = metrics.detected
-	}
 	for _, benchmarkKey := range benchmarkKeys {
 		resultsMap, err := database.GetResultsForBenchmarkInRuns(benchmarkKey, runIDs)
 		if err != nil {
@@ -583,20 +555,12 @@ func assignObjectiveScores(results []ConfigResult) {
 	}
 
 	alertsRange := metricRangeFrom(results, func(r ConfigResult) float64 { return r.Scorecard.AlertsPerRun })
-	burstRange := metricRangeFrom(results, func(r ConfigResult) float64 { return r.Scorecard.BurstinessAfterShift })
-	persistRange := metricRangeFrom(results, func(r ConfigResult) float64 { return r.Scorecard.PersistenceAfterShift })
 	hhiRange := metricRangeFrom(results, func(r ConfigResult) float64 { return r.Scorecard.CategoryHHI })
-	nearRange := metricRangeFrom(results, func(r ConfigResult) float64 { return r.Scorecard.NearShiftAlertFraction })
-	offShiftRange := metricRangeFrom(results, func(r ConfigResult) float64 { return r.Scorecard.OffShiftAlertsPerRun })
 
 	for i := range results {
 		penalties := []float64{
 			normalizedPenalty(results[i].Scorecard.AlertsPerRun, alertsRange, false),
-			normalizedPenalty(results[i].Scorecard.BurstinessAfterShift, burstRange, false),
-			normalizedPenalty(results[i].Scorecard.PersistenceAfterShift, persistRange, false),
 			normalizedPenalty(results[i].Scorecard.CategoryHHI, hhiRange, false),
-			normalizedPenalty(results[i].Scorecard.NearShiftAlertFraction, nearRange, false),
-			normalizedPenalty(results[i].Scorecard.OffShiftAlertsPerRun, offShiftRange, true),
 		}
 		sum := 0.0
 		for _, p := range penalties {
@@ -611,19 +575,19 @@ func applyRetentionConstraint(results []ConfigResult, minRetained float64) {
 		return
 	}
 
-	maxOffShift := 0.0
+	maxAlerts := 0
 	for _, result := range results {
-		if result.Scorecard.OffShiftAlertsPerRun > maxOffShift {
-			maxOffShift = result.Scorecard.OffShiftAlertsPerRun
+		if result.Scorecard.TotalAlerts > maxAlerts {
+			maxAlerts = result.Scorecard.TotalAlerts
 		}
 	}
 
 	for i := range results {
 		retained := 1.0
-		if maxOffShift > 0 {
-			retained = results[i].Scorecard.OffShiftAlertsPerRun / maxOffShift
+		if maxAlerts > 0 {
+			retained = float64(results[i].Scorecard.TotalAlerts) / float64(maxAlerts)
 		}
-		results[i].Scorecard.RetainedOffShiftSignal = retained
+		results[i].Scorecard.RetainedAlertSignal = retained
 
 		if minRetained <= 0 {
 			results[i].EligibleForRecommendation = true
@@ -668,16 +632,10 @@ func isBetterResult(a, b ConfigResult) bool {
 	if a.ObjectiveScore > b.ObjectiveScore+eps {
 		return false
 	}
-	if a.Scorecard.OffShiftAlertsPerRun > b.Scorecard.OffShiftAlertsPerRun+eps {
+	if a.Scorecard.RetainedAlertSignal > b.Scorecard.RetainedAlertSignal+eps {
 		return true
 	}
-	if a.Scorecard.OffShiftAlertsPerRun < b.Scorecard.OffShiftAlertsPerRun-eps {
-		return false
-	}
-	if a.Scorecard.NearShiftAlertFraction < b.Scorecard.NearShiftAlertFraction-eps {
-		return true
-	}
-	if a.Scorecard.NearShiftAlertFraction > b.Scorecard.NearShiftAlertFraction+eps {
+	if a.Scorecard.RetainedAlertSignal < b.Scorecard.RetainedAlertSignal-eps {
 		return false
 	}
 	if a.Scorecard.AlertsPerRun < b.Scorecard.AlertsPerRun-eps {
@@ -689,46 +647,20 @@ func isBetterResult(a, b ConfigResult) bool {
 	return a.Config.Label() < b.Config.Label()
 }
 
-func computeShiftMetrics(getResults func(int64) ([]db.Result, error), newerRunID int64, olderRunID int64, opts Options) (shiftMetrics, error) {
+func computeBroadShift(getResults func(int64) ([]db.Result, error), newerRunID int64, olderRunID int64, opts Options) (broadshift.Incident, error) {
 	newerResults, err := getResults(newerRunID)
 	if err != nil {
-		return shiftMetrics{}, err
+		return broadshift.Incident{}, err
 	}
 	olderResults, err := getResults(olderRunID)
 	if err != nil {
-		return shiftMetrics{}, err
+		return broadshift.Incident{}, err
 	}
-
-	olderMap := make(map[db.BenchmarkKey]int64, len(olderResults))
-	for _, result := range olderResults {
-		olderMap[db.BenchmarkKey{Category: result.Category, Name: result.Name}] = result.AvgNs
-	}
-
-	compared := 0
-	positive := 0
-	logSum := 0.0
-	for _, newer := range newerResults {
-		older, ok := olderMap[db.BenchmarkKey{Category: newer.Category, Name: newer.Name}]
-		if !ok || older <= 0 || newer.AvgNs <= 0 {
-			continue
-		}
-		compared++
-		if newer.AvgNs > older {
-			positive++
-		}
-		logSum += math.Log(float64(newer.AvgNs) / float64(older))
-	}
-	if compared == 0 {
-		return shiftMetrics{}, nil
-	}
-
-	share := float64(positive) / float64(compared)
-	geoPct := (math.Exp(logSum/float64(compared)) - 1.0) * 100.0
-	detected := compared >= opts.GlobalShiftMinBench &&
-		share >= opts.GlobalShiftMinShare &&
-		geoPct >= opts.GlobalShiftMinGeoPct
-
-	return shiftMetrics{detected: detected, compared: compared, share: share, geoPct: geoPct}, nil
+	return broadshift.Detect(newerResults, olderResults, broadshift.Config{
+		MinBenchmarks:    opts.BroadShiftMinBench,
+		MinPositiveShare: opts.BroadShiftMinShare,
+		MinGeometricPct:  opts.BroadShiftMinGeoPct,
+	}), nil
 }
 
 func resultToRunStat(runID int64, result db.Result) stats.RunStat {
@@ -783,7 +715,7 @@ func uniqueSortedRunIDs(ids []int64) []int64 {
 	return out
 }
 
-func filterKnownShiftRuns(shiftRunIDs []int64, replayRunIDs []int64) []int64 {
+func filterBroadShiftRuns(shiftRunIDs []int64, replayRunIDs []int64) []int64 {
 	if len(shiftRunIDs) == 0 || len(replayRunIDs) == 0 {
 		return nil
 	}

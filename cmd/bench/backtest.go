@@ -18,7 +18,7 @@ func backtestCmd() *cobra.Command {
 	var minPoints int
 	var baselineOffset int
 	var fdr float64
-	var minRetainedOffShiftSignal float64
+	var minRetainedAlertSignal float64
 	var nearShiftWindow int
 	var postShiftWindow int
 	var knownShiftsRaw string
@@ -31,7 +31,7 @@ func backtestCmd() *cobra.Command {
 		Long: `Replay all historical runs under a configuration grid and compute objective scorecards.
 
 Metrics include alert volume, post-shift burstiness, alert persistence/decay,
-category concentration, and fraction of alerts near known global-shift events.
+category concentration, and alerts near broad movements whose cause is unknown.
 `,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			database, cleanup, err := openDB()
@@ -47,7 +47,7 @@ category concentration, and fraction of alerts near known global-shift events.
 
 			knownShifts, err := parseCSVInt64s(knownShiftsRaw)
 			if err != nil {
-				return fmt.Errorf("parse --known-shifts: %w", err)
+				return fmt.Errorf("parse --broad-shifts: %w", err)
 			}
 
 			configs, err := backtest.BuildConfigGrid(floors)
@@ -61,10 +61,10 @@ category concentration, and fraction of alerts near known global-shift events.
 			opts.MinPoints = minPoints
 			opts.BaselineOffset = baselineOffset
 			opts.FDR = fdr
-			opts.MinRetainedOffShiftSignal = minRetainedOffShiftSignal
+			opts.MinRetainedAlertSignal = minRetainedAlertSignal
 			opts.NearShiftWindow = nearShiftWindow
 			opts.PostShiftWindow = postShiftWindow
-			opts.KnownShiftRunIDs = knownShifts
+			opts.BroadShiftRunIDs = knownShifts
 
 			report, err := backtest.Run(database, opts, configs)
 			if err != nil {
@@ -93,10 +93,10 @@ category concentration, and fraction of alerts near known global-shift events.
 	cmd.Flags().IntVar(&minPoints, "min-points", 5, "minimum baseline points (at least 2)")
 	cmd.Flags().IntVar(&baselineOffset, "baseline-offset", 3, "runs skipped before baseline construction")
 	cmd.Flags().Float64Var(&fdr, "fdr", 0.01, "Benjamini-Hochberg FDR threshold")
-	cmd.Flags().Float64Var(&minRetainedOffShiftSignal, "min-retained-off-shift-signal", 0.25, "minimum retained off-shift signal ratio (0-1) required for recommendation eligibility")
+	cmd.Flags().Float64Var(&minRetainedAlertSignal, "min-retained-alert-signal", 0.25, "minimum retained alert ratio (0-1) required for recommendation eligibility")
 	cmd.Flags().IntVar(&nearShiftWindow, "near-shift-window", 20, "runs after a shift counted as near-shift")
 	cmd.Flags().IntVar(&postShiftWindow, "post-shift-window", 25, "runs after a shift used for burst/decay metrics")
-	cmd.Flags().StringVar(&knownShiftsRaw, "known-shifts", "", "optional comma-separated shift run IDs (default: auto-detect)")
+	cmd.Flags().StringVar(&knownShiftsRaw, "broad-shifts", "", "optional comma-separated broad-movement run IDs (default: auto-detect; cause unclassified)")
 	cmd.Flags().StringVar(&floorsRaw, "absolute-floors", "0,1000,5000", "comma-separated absolute floors in ns")
 	cmd.Flags().StringVar(&jsonOutput, "json", "", "optional path to write JSON output")
 
@@ -106,9 +106,9 @@ category concentration, and fraction of alerts near known global-shift events.
 func printModelCard(report *backtest.Report) {
 	fmt.Printf("Replay Backtest Model Card\n")
 	fmt.Printf("Runs: %d | Configs: %d\n", len(report.RunIDs), len(report.ConfigResults))
-	fmt.Printf("Known shift runs: %s\n", formatRunIDs(report.ShiftRunIDs))
+	fmt.Printf("Broad-movement runs (cause unclassified): %s\n", formatRunIDs(report.BroadShiftRunIDs))
 	fmt.Printf("Near-shift window: %d | Post-shift window: %d\n", report.Options.NearShiftWindow, report.Options.PostShiftWindow)
-	fmt.Printf("Min retained off-shift signal for recommendation: %.0f%%\n\n", report.Options.MinRetainedOffShiftSignal*100.0)
+	fmt.Printf("Min retained alert signal for recommendation: %.0f%%\n\n", report.Options.MinRetainedAlertSignal*100.0)
 
 	fmt.Printf("%-4s %-7s %-6s %-6s %-6s %7s %10s %8s %8s %8s %11s %12s %8s\n",
 		"Rank", "Floor", "Best", "Curr", "Elig", "Retain", "Alerts/Run", "Burst", "Decay", "CatHHI", "NearShift%", "OffShift/Run", "Score")
@@ -132,7 +132,7 @@ func printModelCard(report *backtest.Report) {
 			best,
 			curr,
 			elig,
-			result.Scorecard.RetainedOffShiftSignal*100.0,
+			result.Scorecard.RetainedAlertSignal*100.0,
 			result.Scorecard.AlertsPerRun,
 			result.Scorecard.BurstinessAfterShift,
 			result.Scorecard.PersistenceAfterShift,

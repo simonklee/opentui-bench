@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/pprof/profile"
 
+	"opentui-bench/internal/broadshift"
 	"opentui-bench/internal/db"
 	"opentui-bench/internal/stats"
 )
@@ -1200,25 +1201,25 @@ func (s *Server) ensureResultBelongsToRun(runID int64, resultID int64) error {
 
 // Default parameters for regression detection
 const (
-	defaultWindow                = 30
-	defaultMinPoints             = 5
-	defaultBaselineOffset        = 3
-	defaultFDR                   = 0.01
-	defaultMinAbsoluteNs         = 5000.0
-	regressionAlgorithmVersion   = "v5-log-avg-prediction"
-	regressionMetric             = "log(avg_ns)"
-	regressionEstimator          = "historical_log_mean_prediction"
-	regressionCohortPolicy       = "phase2_exact_identity_compatible_as_of"
-	regressionFamilyDefinition   = "one_slowdown_hypothesis_per_eligible_benchmark_complete_snapshot"
-	regressionCalibrationStatus  = "uncalibrated_regression_score"
-	regressionCalibrationCaveat  = "Under valid p-values and BH's cross-benchmark dependence assumptions, BH controls FDR within each snapshot only; it does not control accumulated false-alert rates across sequential snapshots. Scores also assume approximately stationary independent normal log run averages."
-	globalShiftMinBenchmarks     = 50
-	globalShiftMinPositiveShare  = 0.75
-	globalShiftMinGeoIncreasePct = 10.0
-	changePointMinSegment        = 5
-	changePointAlpha             = 0.05
-	changePointPerms             = 199
-	changePointMaxAgeRuns        = 2
+	defaultWindow               = 30
+	defaultMinPoints            = 5
+	defaultBaselineOffset       = 3
+	defaultFDR                  = 0.01
+	defaultMinAbsoluteNs        = 5000.0
+	regressionAlgorithmVersion  = "v6-broad-shift-incidents"
+	regressionMetric            = "log(avg_ns)"
+	regressionEstimator         = "historical_log_mean_prediction"
+	regressionCohortPolicy      = "phase2_exact_identity_compatible_as_of"
+	regressionFamilyDefinition  = "one_slowdown_hypothesis_per_eligible_benchmark_complete_snapshot"
+	regressionCalibrationStatus = "uncalibrated_regression_score"
+	regressionCalibrationCaveat = "Under valid p-values and BH's cross-benchmark dependence assumptions, BH controls FDR within each snapshot only; it does not control accumulated false-alert rates across sequential snapshots. Scores also assume approximately stationary independent normal log run averages."
+	broadShiftMinBenchmarks     = 50
+	broadShiftMinPositiveShare  = 0.75
+	broadShiftMinGeoIncreasePct = 10.0
+	changePointMinSegment       = 5
+	changePointAlpha            = 0.05
+	changePointPerms            = 199
+	changePointMaxAgeRuns       = 2
 )
 
 func (s *Server) handleDatabaseDownload(w http.ResponseWriter, r *http.Request) {
@@ -1324,6 +1325,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 					"total_benchmarks":     0,
 					"analyzed_benchmarks":  0,
 					"exclusion_counts":     map[string]int{"no_runs_for_branch": 1},
+					"broad_shift":          broadshift.Empty(),
 					"regressions":          []interface{}{},
 				})
 
@@ -1402,10 +1404,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	latestRunID := runID
-	globalShiftDetected := false
-	globalShiftPositiveShare := 0.0
-	globalShiftGeoIncreasePct := 0.0
-	globalShiftComparedBenchmarks := 0
+	broadShift := broadshift.Empty()
 	resultsCache := make(map[int64][]db.Result)
 	getResults := func(runID int64) ([]db.Result, error) {
 		if cached, ok := resultsCache[runID]; ok {
@@ -1418,69 +1417,28 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		resultsCache[runID] = fetched
 		return fetched, nil
 	}
-	type shiftMetrics struct {
-		detected      bool
-		positiveShare float64
-		geoPct        float64
-		compared      int
-	}
-	computeShift := func(newerRunID int64, olderRunID int64) (shiftMetrics, error) {
+	computeBroadShift := func(newerRunID int64, olderRunID int64) (broadshift.Incident, error) {
 		newerResults, err := getResults(newerRunID)
 		if err != nil {
-			return shiftMetrics{}, err
+			return broadshift.Incident{}, err
 		}
 		olderResults, err := getResults(olderRunID)
 		if err != nil {
-			return shiftMetrics{}, err
+			return broadshift.Incident{}, err
 		}
-
-		olderMap := make(map[db.BenchmarkKey]int64, len(olderResults))
-		for _, r := range olderResults {
-			olderMap[db.BenchmarkKey{Category: r.Category, Name: r.Name}] = r.AvgNs
-		}
-
-		positiveCount := 0
-		compared := 0
-		logSum := 0.0
-		for _, newer := range newerResults {
-			older, ok := olderMap[db.BenchmarkKey{Category: newer.Category, Name: newer.Name}]
-			if !ok || older <= 0 || newer.AvgNs <= 0 {
-				continue
-			}
-			compared++
-			if newer.AvgNs > older {
-				positiveCount++
-			}
-			logSum += math.Log(float64(newer.AvgNs) / float64(older))
-		}
-
-		if compared == 0 {
-			return shiftMetrics{}, nil
-		}
-
-		positiveShare := float64(positiveCount) / float64(compared)
-		geoPct := (math.Exp(logSum/float64(compared)) - 1.0) * 100.0
-		detected := compared >= globalShiftMinBenchmarks &&
-			positiveShare >= globalShiftMinPositiveShare &&
-			geoPct >= globalShiftMinGeoIncreasePct
-
-		return shiftMetrics{
-			detected:      detected,
-			positiveShare: positiveShare,
-			geoPct:        geoPct,
-			compared:      compared,
-		}, nil
+		return broadshift.Detect(newerResults, olderResults, broadshift.Config{
+			MinBenchmarks:    broadShiftMinBenchmarks,
+			MinPositiveShare: broadShiftMinPositiveShare,
+			MinGeometricPct:  broadShiftMinGeoIncreasePct,
+		}), nil
 	}
 	if len(runs) >= 2 {
-		metrics, err := computeShift(runs[0].ID, runs[1].ID)
+		incident, err := computeBroadShift(runs[0].ID, runs[1].ID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		globalShiftDetected = metrics.detected
-		globalShiftPositiveShare = metrics.positiveShare
-		globalShiftGeoIncreasePct = metrics.geoPct
-		globalShiftComparedBenchmarks = metrics.compared
+		broadShift = incident
 	}
 
 	type changePointDiagnostic struct {
@@ -1513,32 +1471,29 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		ChangePointDiagnostic  *changePointDiagnostic `json:"change_point_diagnostic,omitempty"`
 	}
 	type regressionsResponse struct {
-		RunID                         *int64         `json:"run_id"`
-		Branch                        string         `json:"branch"`
-		Window                        int            `json:"window"`
-		ComparedRuns                  int            `json:"compared_runs"`
-		MinPoints                     int            `json:"min_points"`
-		EffectiveMinPoints            int            `json:"effective_min_points"`
-		BaselineOffset                int            `json:"baseline_offset"`
-		AlgorithmVersion              string         `json:"algorithm_version"`
-		Metric                        string         `json:"metric"`
-		Estimator                     string         `json:"estimator"`
-		CohortPolicy                  string         `json:"cohort_policy"`
-		FamilyDefinition              string         `json:"family_definition"`
-		CalibrationStatus             string         `json:"calibration_status"`
-		CalibrationCaveat             string         `json:"calibration_caveat"`
-		FDRLevel                      float64        `json:"fdr_level"`
-		HypothesisCount               int            `json:"hypothesis_count"`
-		TotalBenchmarks               int            `json:"total_benchmarks"`
-		AnalyzedBenchmarks            int            `json:"analyzed_benchmarks"`
-		InsufficientHistory           bool           `json:"insufficient_history"`
-		InsufficientReason            string         `json:"insufficient_reason,omitempty"`
-		ExclusionCounts               map[string]int `json:"exclusion_counts,omitempty"`
-		GlobalShiftDetected           bool           `json:"global_shift_detected"`
-		GlobalShiftPositiveShare      float64        `json:"global_shift_positive_share"`
-		GlobalShiftGeoIncreasePct     float64        `json:"global_shift_geo_increase_pct"`
-		GlobalShiftComparedBenchmarks int            `json:"global_shift_compared_benchmarks"`
-		Regressions                   []regression   `json:"regressions"`
+		RunID               *int64              `json:"run_id"`
+		Branch              string              `json:"branch"`
+		Window              int                 `json:"window"`
+		ComparedRuns        int                 `json:"compared_runs"`
+		MinPoints           int                 `json:"min_points"`
+		EffectiveMinPoints  int                 `json:"effective_min_points"`
+		BaselineOffset      int                 `json:"baseline_offset"`
+		AlgorithmVersion    string              `json:"algorithm_version"`
+		Metric              string              `json:"metric"`
+		Estimator           string              `json:"estimator"`
+		CohortPolicy        string              `json:"cohort_policy"`
+		FamilyDefinition    string              `json:"family_definition"`
+		CalibrationStatus   string              `json:"calibration_status"`
+		CalibrationCaveat   string              `json:"calibration_caveat"`
+		FDRLevel            float64             `json:"fdr_level"`
+		HypothesisCount     int                 `json:"hypothesis_count"`
+		TotalBenchmarks     int                 `json:"total_benchmarks"`
+		AnalyzedBenchmarks  int                 `json:"analyzed_benchmarks"`
+		InsufficientHistory bool                `json:"insufficient_history"`
+		InsufficientReason  string              `json:"insufficient_reason,omitempty"`
+		ExclusionCounts     map[string]int      `json:"exclusion_counts,omitempty"`
+		BroadShift          broadshift.Incident `json:"broad_shift"`
+		Regressions         []regression        `json:"regressions"`
 	}
 
 	type benchResult struct {
@@ -1699,31 +1654,28 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := regressionsResponse{
-		RunID:                         &runID,
-		Branch:                        branch,
-		Window:                        window,
-		ComparedRuns:                  len(runs),
-		MinPoints:                     minPoints,
-		EffectiveMinPoints:            effectiveMinPoints,
-		BaselineOffset:                baselineOffset,
-		AlgorithmVersion:              regressionAlgorithmVersion,
-		Metric:                        regressionMetric,
-		Estimator:                     regressionEstimator,
-		CohortPolicy:                  regressionCohortPolicy,
-		FamilyDefinition:              regressionFamilyDefinition,
-		CalibrationStatus:             regressionCalibrationStatus,
-		CalibrationCaveat:             regressionCalibrationCaveat,
-		FDRLevel:                      defaultFDR,
-		HypothesisCount:               len(benchResults),
-		TotalBenchmarks:               len(benchmarkKeys),
-		AnalyzedBenchmarks:            analyzableBenchmarks,
-		InsufficientHistory:           analyzableBenchmarks == 0,
-		ExclusionCounts:               exclusionCounts,
-		GlobalShiftDetected:           globalShiftDetected,
-		GlobalShiftPositiveShare:      globalShiftPositiveShare,
-		GlobalShiftGeoIncreasePct:     globalShiftGeoIncreasePct,
-		GlobalShiftComparedBenchmarks: globalShiftComparedBenchmarks,
-		Regressions:                   regressions,
+		RunID:               &runID,
+		Branch:              branch,
+		Window:              window,
+		ComparedRuns:        len(runs),
+		MinPoints:           minPoints,
+		EffectiveMinPoints:  effectiveMinPoints,
+		BaselineOffset:      baselineOffset,
+		AlgorithmVersion:    regressionAlgorithmVersion,
+		Metric:              regressionMetric,
+		Estimator:           regressionEstimator,
+		CohortPolicy:        regressionCohortPolicy,
+		FamilyDefinition:    regressionFamilyDefinition,
+		CalibrationStatus:   regressionCalibrationStatus,
+		CalibrationCaveat:   regressionCalibrationCaveat,
+		FDRLevel:            defaultFDR,
+		HypothesisCount:     len(benchResults),
+		TotalBenchmarks:     len(benchmarkKeys),
+		AnalyzedBenchmarks:  analyzableBenchmarks,
+		InsufficientHistory: analyzableBenchmarks == 0,
+		ExclusionCounts:     exclusionCounts,
+		BroadShift:          broadShift,
+		Regressions:         regressions,
 	}
 	if analyzableBenchmarks == 0 {
 		topReason := ""

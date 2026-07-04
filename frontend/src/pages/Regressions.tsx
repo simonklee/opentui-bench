@@ -2,7 +2,7 @@ import { createResource, Show, For } from "solid-js";
 import type { Component } from "solid-js";
 import { useNavigate, useSearchParams } from "@solidjs/router";
 import { api } from "../services/api";
-import type { Regression } from "../services/api";
+import type { Regression, RegressionHistoryEntry } from "../services/api";
 import { formatNs } from "../utils/format";
 import { Check, AlertTriangle, Loader2, ArrowRight, GitBranch } from "lucide-solid";
 
@@ -153,6 +153,25 @@ const RegressionRow: Component<{ regression: RegressionWithContext }> = (props) 
   );
 };
 
+const RegressionTable: Component<{ regressions: RegressionWithContext[] }> = (props) => (
+  <table class="w-full">
+    <thead class="sticky top-0 bg-white border-b border-border">
+      <tr class="text-left text-[11px] text-text-muted uppercase tracking-wider">
+        <th class="py-3 px-4 font-medium">Latest Seen</th>
+        <th class="py-3 px-4 font-medium">Benchmark</th>
+        <th class="py-3 px-4 font-medium">Change</th>
+        <th class="py-3 px-4 font-medium">Baseline</th>
+        <th class="py-3 px-4 font-medium w-10"></th>
+      </tr>
+    </thead>
+    <tbody>
+      <For each={props.regressions}>
+        {(regression) => <RegressionRow regression={regression} />}
+      </For>
+    </tbody>
+  </table>
+);
+
 const Regressions: Component = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const [branches] = createResource(() => api.getBranches());
@@ -173,20 +192,20 @@ const Regressions: Component = () => {
     setSearchParams({ branch: next === "main" ? undefined : next });
   };
   const historyEntries = () => history()?.entries ?? [];
+  const regressionsWithContext = (entry: RegressionHistoryEntry): RegressionWithContext[] =>
+    (entry.regressions ?? []).map((regression) => ({
+      ...regression,
+      run_id: entry.run_id,
+      run_date: entry.run_date,
+      commit_hash: entry.commit_hash,
+      commit_hash_full: entry.commit_hash_full,
+      commit_message: entry.commit_message,
+      branch: entry.branch,
+    }));
   const latestRegressionEntry = () =>
     historyEntries().find((entry) => (entry.regressions?.length ?? 0) > 0);
   const allRegressions = (): RegressionWithContext[] =>
-    historyEntries().flatMap((entry) =>
-      (entry.regressions ?? []).map((regression) => ({
-        ...regression,
-        run_id: entry.run_id,
-        run_date: entry.run_date,
-        commit_hash: entry.commit_hash,
-        commit_hash_full: entry.commit_hash_full,
-        commit_message: entry.commit_message,
-        branch: entry.branch,
-      })),
-    );
+    historyEntries().flatMap(regressionsWithContext);
   const regressionEpisodes = (): RegressionWithContext[] =>
     uniqueRegressionEpisodes(allRegressions());
   const regressionCount = () => regressionEpisodes().length;
@@ -196,8 +215,13 @@ const Regressions: Component = () => {
     historyEntries().filter((entry) => (entry.regressions?.length ?? 0) > 0).length;
   const cachedRuns = () => history()?.cached_runs ?? 0;
   const computedRuns = () => history()?.computed_runs ?? 0;
-  const globalShiftRuns = () =>
-    historyEntries().filter((entry) => entry.global_shift_detected).length;
+  const broadShiftEntries = () => historyEntries().filter((entry) => entry.broad_shift.detected);
+  const ordinaryRegressions = (): RegressionWithContext[] =>
+    uniqueRegressionEpisodes(
+      historyEntries()
+        .filter((entry) => !entry.broad_shift.detected)
+        .flatMap(regressionsWithContext),
+    );
 
   return (
     <div class="flex flex-col h-full w-full">
@@ -241,13 +265,25 @@ const Regressions: Component = () => {
               <Show
                 when={hasRegressions()}
                 fallback={
-                  <div class="flex items-center gap-2 text-success">
-                    <Check size={18} strokeWidth={3} />
-                    <span class="text-[14px] font-medium">
-                      No regression episodes found across {scannedRuns()} scanned run
-                      {scannedRuns() !== 1 ? "s" : ""}
-                    </span>
-                  </div>
+                  <Show
+                    when={broadShiftEntries().length > 0}
+                    fallback={
+                      <div class="flex items-center gap-2 text-success">
+                        <Check size={18} strokeWidth={3} />
+                        <span class="text-[14px] font-medium">
+                          No regression episodes found across {scannedRuns()} scanned run
+                          {scannedRuns() !== 1 ? "s" : ""}
+                        </span>
+                      </div>
+                    }
+                  >
+                    <div class="flex items-center gap-2 text-amber-800">
+                      <AlertTriangle size={18} />
+                      <span class="text-[14px] font-medium">
+                        Broad movement detected; no individual benchmark crossed alert thresholds
+                      </span>
+                    </div>
+                  </Show>
                 }
               >
                 <div class="flex items-center gap-2 text-danger">
@@ -270,11 +306,12 @@ const Regressions: Component = () => {
                 </div>
               </Show>
 
-              <Show when={globalShiftRuns() > 0}>
+              <Show when={broadShiftEntries().length > 0}>
                 <div class="mt-2 inline-flex items-center gap-2 rounded-sm border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] font-mono text-amber-800">
                   <span>
-                    Global shift detected in {globalShiftRuns()} historical run
-                    {globalShiftRuns() !== 1 ? "s" : ""}
+                    Broad movement in {broadShiftEntries().length} historical run
+                    {broadShiftEntries().length !== 1 ? "s" : ""}; many benchmarks moved together,
+                    cause unknown
                   </span>
                 </div>
               </Show>
@@ -308,26 +345,55 @@ const Regressions: Component = () => {
 
       {/* Regressions Table */}
       <div class="flex-1 overflow-auto">
-        <Show when={hasRegressions()}>
-          <table class="w-full">
-            <thead class="sticky top-0 bg-white border-b border-border">
-              <tr class="text-left text-[11px] text-text-muted uppercase tracking-wider">
-                <th class="py-3 px-4 font-medium">Latest Seen</th>
-                <th class="py-3 px-4 font-medium">Benchmark</th>
-                <th class="py-3 px-4 font-medium">Change</th>
-                <th class="py-3 px-4 font-medium">Baseline</th>
-                <th class="py-3 px-4 font-medium w-10"></th>
-              </tr>
-            </thead>
-            <tbody>
-              <For each={regressionEpisodes()}>
-                {(regression) => <RegressionRow regression={regression} />}
-              </For>
-            </tbody>
-          </table>
+        <Show when={broadShiftEntries().length > 0}>
+          <For each={broadShiftEntries()}>
+            {(entry) => (
+              <section class="m-4 border border-amber-300 bg-amber-50/40">
+                <div class="border-b border-amber-300 bg-amber-50 px-4 py-3">
+                  <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                    <span class="text-[12px] font-bold uppercase tracking-wider text-amber-900">
+                      Broad-shift co-occurrence
+                    </span>
+                    <CommitLink hash={entry.commit_hash} hashFull={entry.commit_hash_full} />
+                    <span class="text-[11px] font-mono text-amber-800">
+                      {(entry.broad_shift.positive_share * 100).toFixed(0)}% moved slower ·
+                      geometric change +{entry.broad_shift.geometric_change_percent.toFixed(1)}% ·
+                      {entry.broad_shift.compared_benchmarks} compared
+                    </span>
+                  </div>
+                  <div class="mt-1 text-[11px] text-amber-900">
+                    Many benchmarks moved together in this run. Cause is unknown and unclassified;
+                    this grouping records co-occurrence, not causal attribution. Any individual
+                    benchmark alerts are retained below.
+                  </div>
+                </div>
+                <Show
+                  when={entry.regressions.length > 0}
+                  fallback={
+                    <div class="px-4 py-3 text-[12px] text-text-muted">
+                      No individual benchmark crossed the alert thresholds for this incident.
+                    </div>
+                  }
+                >
+                  <RegressionTable regressions={regressionsWithContext(entry)} />
+                </Show>
+              </section>
+            )}
+          </For>
         </Show>
 
-        <Show when={!history.loading && !hasRegressions() && !history.error}>
+        <Show when={ordinaryRegressions().length > 0}>
+          <RegressionTable regressions={ordinaryRegressions()} />
+        </Show>
+
+        <Show
+          when={
+            !history.loading &&
+            !hasRegressions() &&
+            broadShiftEntries().length === 0 &&
+            !history.error
+          }
+        >
           <div class="flex items-center justify-center h-full text-text-muted">
             <div class="text-center">
               <div class="text-[14px] mb-2">No historical regression episodes to show</div>

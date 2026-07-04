@@ -106,6 +106,15 @@ export interface Regression {
   };
 }
 
+export interface BroadShiftIncident {
+  detected: boolean;
+  cause: "unclassified";
+  positive_share: number;
+  geometric_change_percent: number;
+  compared_benchmarks: number;
+  meaning: "many benchmarks moved together; cause unknown";
+}
+
 export interface RegressionsResponse {
   run_id: number | null;
   branch: string;
@@ -128,10 +137,7 @@ export interface RegressionsResponse {
   insufficient_history?: boolean;
   insufficient_reason?: string;
   exclusion_counts?: Record<string, number>;
-  global_shift_detected?: boolean;
-  global_shift_positive_share?: number;
-  global_shift_geo_increase_pct?: number;
-  global_shift_compared_benchmarks?: number;
+  broad_shift: BroadShiftIncident;
   regressions: Regression[];
 }
 
@@ -153,10 +159,7 @@ export interface RegressionHistoryEntry {
   analyzed_benchmarks: number;
   insufficient_history: boolean;
   insufficient_reason?: string;
-  global_shift_detected: boolean;
-  global_shift_positive_share: number;
-  global_shift_geo_increase_pct: number;
-  global_shift_compared_benchmarks: number;
+  broad_shift: BroadShiftIncident;
   regressions: Regression[];
 }
 

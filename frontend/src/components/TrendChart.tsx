@@ -139,55 +139,6 @@ const changePointLinesPlugin = {
   },
 };
 
-const globalShiftLinesPlugin = {
-  id: "globalShiftLines",
-  afterDatasetsDraw(chart: any) {
-    const options = chart.options?.plugins?.globalShiftLines;
-    const points = options?.points as
-      | {
-          run_id: number;
-          positive_share: number;
-          geo_increase_pct: number;
-          compared_benchmarks: number;
-        }[]
-      | undefined;
-    const runIdToIndex = options?.runIdToIndex as Record<string, number> | undefined;
-    const xScale = chart.scales?.x;
-    const yScale = chart.scales?.y;
-    if (!points || points.length === 0 || !runIdToIndex || !xScale || !yScale) {
-      return;
-    }
-
-    const { ctx } = chart;
-    for (const shift of points) {
-      const idx = runIdToIndex[String(shift.run_id)];
-      if (idx === undefined) {
-        continue;
-      }
-
-      const x = xScale.getPixelForValue(idx);
-      const color = "#b45309";
-      const label = `global +${shift.geo_increase_pct.toFixed(1)}%`;
-
-      ctx.save();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      ctx.setLineDash([8, 4]);
-      ctx.beginPath();
-      ctx.moveTo(x, yScale.top);
-      ctx.lineTo(x, yScale.bottom);
-      ctx.stroke();
-
-      ctx.setLineDash([]);
-      ctx.fillStyle = color;
-      ctx.font = "10px var(--font-mono)";
-      ctx.textAlign = "left";
-      ctx.fillText(label, x + 4, yScale.top + 22);
-      ctx.restore();
-    }
-  },
-};
-
 Chart.register(
   Title,
   Tooltip,
@@ -202,7 +153,6 @@ Chart.register(
   errorBarPlugin,
   baselineBandPlugin,
   changePointLinesPlugin,
-  globalShiftLinesPlugin,
 );
 
 // Branch overlay color
@@ -211,12 +161,6 @@ const BRANCH_COLOR = "#7c3aed"; // purple-600
 interface Props {
   data: TrendPoint[];
   changePoints?: { run_id: number; magnitude_ns: number; p_value: number }[];
-  globalShifts?: {
-    run_id: number;
-    positive_share: number;
-    geo_increase_pct: number;
-    compared_benchmarks: number;
-  }[];
   overlayData?: TrendPoint[];
   overlayBranch?: string;
   range?: number;
@@ -350,20 +294,9 @@ const TrendChart: Component<Props> = (props) => {
     return (value / anchorNs) * 100;
   };
 
-  const latestGlobalShiftRunId = () => {
-    const shifts = props.globalShifts || [];
-    if (shifts.length === 0) return undefined;
-    return shifts.reduce((latest, curr) => (curr.run_id > latest.run_id ? curr : latest)).run_id;
-  };
-
   const getAnchorNs = (points: (TrendPoint | null)[]) => {
     const valid = points.filter((p): p is TrendPoint => p !== null);
     if (valid.length === 0) return null;
-    const shiftRunId = latestGlobalShiftRunId();
-    if (shiftRunId !== undefined) {
-      const shiftPoint = valid.find((p) => p.run_id === shiftRunId);
-      if (shiftPoint && shiftPoint.avg_ns > 0) return shiftPoint.avg_ns;
-    }
     const first = valid[0]!;
     return first.avg_ns > 0 ? first.avg_ns : null;
   };
@@ -728,10 +661,6 @@ const TrendChart: Component<Props> = (props) => {
         points: props.changePoints || [],
         runIdToIndex: getChangePointRunIndexMap(),
       },
-      globalShiftLines: {
-        points: props.globalShifts || [],
-        runIdToIndex: getChangePointRunIndexMap(),
-      },
       tooltip: {
         backgroundColor: "#ffffff",
         titleColor: "#111111",
@@ -852,7 +781,6 @@ const TrendChart: Component<Props> = (props) => {
   });
 
   const hasChangePoints = () => (props.changePoints?.length ?? 0) > 0;
-  const hasGlobalShifts = () => (props.globalShifts?.length ?? 0) > 0;
 
   return (
     <div class="relative w-full h-full flex flex-col">
@@ -888,18 +816,6 @@ const TrendChart: Component<Props> = (props) => {
             ></span>
             Improvement shift
           </span>
-        </Show>
-        <Show when={hasGlobalShifts()}>
-          <span class="flex items-center gap-1">
-            <span
-              class="inline-block w-3 h-0 border-t-2 border-dashed"
-              style="border-color: #b45309;"
-            ></span>
-            Global shift
-          </span>
-          <Show when={isIndexMode()}>
-            <span>Index mode (100 = epoch anchor)</span>
-          </Show>
         </Show>
       </div>
     </div>

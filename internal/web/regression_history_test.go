@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"opentui-bench/internal/broadshift"
 	"opentui-bench/internal/db"
 )
 
@@ -188,6 +189,124 @@ func TestRegressionsUsesCompleteFamilyThenFixedGates(t *testing.T) {
 	}
 	if response.AlgorithmVersion != regressionAlgorithmVersion || response.Metric != regressionMetric || response.CalibrationStatus != regressionCalibrationStatus {
 		t.Fatalf("missing score metadata: %#v", response)
+	}
+}
+
+func TestBroadShiftPreservesAlertsAndHistoryCacheMetadata(t *testing.T) {
+	database := openRegressionHistoryTestDB(t)
+	server := &Server{db: database}
+	at := time.Date(2026, 3, 2, 10, 0, 0, 0, time.UTC)
+	insertResult := func(runID int64, category string, name string, avg int64) {
+		t.Helper()
+		_, err := database.InsertResult(&db.Result{
+			RunID: runID, Category: category, Name: name,
+			MinNs: avg, AvgNs: avg, MaxNs: avg, P50Ns: avg, P95Ns: avg, P99Ns: avg,
+			TotalNs: avg, Iterations: 1, SampleCount: 1,
+		})
+		if err != nil {
+			t.Fatalf("insert result: %v", err)
+		}
+	}
+
+	for historyIndex := 0; historyIndex < 8; historyIndex++ {
+		runID := insertRegressionHistoryTestRun(t, database, "main", at.Add(time.Duration(historyIndex)*time.Hour), fmt.Sprintf("prior-%d", historyIndex))
+		for benchmarkIndex := 0; benchmarkIndex < broadShiftMinBenchmarks; benchmarkIndex++ {
+			insertResult(runID, "render", fmt.Sprintf("bench-%02d", benchmarkIndex), 100_000+int64(historyIndex*100))
+		}
+	}
+	targetID := insertRegressionHistoryTestRun(t, database, "main", at.Add(8*time.Hour), "target")
+	for benchmarkIndex := 0; benchmarkIndex < broadShiftMinBenchmarks; benchmarkIndex++ {
+		insertResult(targetID, "render", fmt.Sprintf("bench-%02d", benchmarkIndex), 130_000)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/regressions?run_id=%d&window=5&min_points=5&baseline_offset=3", targetID), nil)
+	rec := httptest.NewRecorder()
+	server.handleRegressions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%q", rec.Code, rec.Body.String())
+	}
+	var snapshot regressionSnapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.BroadShift.Detected || snapshot.BroadShift.Cause != broadshift.CauseUnclassified || snapshot.BroadShift.Meaning != broadshift.Meaning {
+		t.Fatalf("broad shift = %+v", snapshot.BroadShift)
+	}
+	if snapshot.BroadShift.ComparedBenchmarks != broadShiftMinBenchmarks || len(snapshot.Regressions) != broadShiftMinBenchmarks {
+		t.Fatalf("compared=%d regressions=%d, want all %d alerts retained", snapshot.BroadShift.ComparedBenchmarks, len(snapshot.Regressions), broadShiftMinBenchmarks)
+	}
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &shape); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := shape["broad_shift"]; !ok {
+		t.Fatal("response is missing structured broad_shift metadata")
+	}
+	if _, ok := shape["global_shift_detected"]; ok {
+		t.Fatal("legacy flat global-shift fields must not remain")
+	}
+	if snapshot.EffectiveMinPoints != 5 || snapshot.BaselineOffset != 3 || snapshot.Regressions[0].DegreesOfFreedom != 4 {
+		t.Fatalf("baseline changed during broad shift: min=%d offset=%d df=%d", snapshot.EffectiveMinPoints, snapshot.BaselineOffset, snapshot.Regressions[0].DegreesOfFreedom)
+	}
+
+	requestHistory := func() regressionHistoryResponse {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/regressions/history?branch=main&limit=1&window=5&min_points=5&baseline_offset=3", nil)
+		rec := httptest.NewRecorder()
+		server.handleRegressionsHistory(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("history status = %d; body=%q", rec.Code, rec.Body.String())
+		}
+		var response regressionHistoryResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	first := requestHistory()
+	second := requestHistory()
+	if len(first.Entries) != 1 || !first.Entries[0].BroadShift.Detected || len(first.Entries[0].Regressions) != broadShiftMinBenchmarks {
+		t.Fatalf("history lost incident or members: %+v", first.Entries)
+	}
+	if second.CachedRuns != 1 || second.ComputedRuns != 0 || second.Entries[0].BroadShift.Cause != broadshift.CauseUnclassified {
+		t.Fatalf("cached history lost incident metadata: %+v", second)
+	}
+}
+
+func TestBroadShiftComparesTargetWithImmediatePriorCompatibleRun(t *testing.T) {
+	database := openRegressionHistoryTestDB(t)
+	server := &Server{db: database}
+	at := time.Date(2026, 3, 3, 10, 0, 0, 0, time.UTC)
+	averages := []int64{120_000, 100_000, 120_000}
+	var targetID int64
+	for runIndex, avg := range averages {
+		runID := insertRegressionHistoryTestRun(t, database, "main", at.Add(time.Duration(runIndex)*time.Hour), fmt.Sprintf("run-%d", runIndex))
+		for benchmarkIndex := 0; benchmarkIndex < broadShiftMinBenchmarks; benchmarkIndex++ {
+			name := fmt.Sprintf("bench-%02d", benchmarkIndex)
+			_, err := database.InsertResult(&db.Result{
+				RunID: runID, Category: "render", Name: name,
+				MinNs: avg, AvgNs: avg, MaxNs: avg, P50Ns: avg, P95Ns: avg, P99Ns: avg,
+				TotalNs: avg, Iterations: 1, SampleCount: 1,
+			})
+			if err != nil {
+				t.Fatalf("insert %s: %v", name, err)
+			}
+		}
+		targetID = runID
+	}
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/regressions?run_id=%d&window=2&min_points=2&baseline_offset=0", targetID), nil)
+	rec := httptest.NewRecorder()
+	server.handleRegressions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%q", rec.Code, rec.Body.String())
+	}
+	var snapshot regressionSnapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.BroadShift.Detected || snapshot.BroadShift.GeometricChangePercent < 19.9 {
+		t.Fatalf("broad shift = %+v; target must be compared with immediate prior 100us run, not older 120us run", snapshot.BroadShift)
 	}
 }
 

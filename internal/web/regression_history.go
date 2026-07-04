@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"opentui-bench/internal/broadshift"
 	"opentui-bench/internal/db"
 	"opentui-bench/internal/stats"
 )
@@ -59,57 +60,51 @@ type regressionChangePointDiagnostic struct {
 }
 
 type regressionSnapshot struct {
-	RunID                         *int64                   `json:"run_id"`
-	Branch                        string                   `json:"branch"`
-	Window                        int                      `json:"window"`
-	ComparedRuns                  int                      `json:"compared_runs"`
-	MinPoints                     int                      `json:"min_points"`
-	EffectiveMinPoints            int                      `json:"effective_min_points"`
-	BaselineOffset                int                      `json:"baseline_offset"`
-	AlgorithmVersion              string                   `json:"algorithm_version"`
-	Metric                        string                   `json:"metric"`
-	Estimator                     string                   `json:"estimator"`
-	CohortPolicy                  string                   `json:"cohort_policy"`
-	FamilyDefinition              string                   `json:"family_definition"`
-	CalibrationStatus             string                   `json:"calibration_status"`
-	CalibrationCaveat             string                   `json:"calibration_caveat"`
-	FDRLevel                      float64                  `json:"fdr_level"`
-	HypothesisCount               int                      `json:"hypothesis_count"`
-	TotalBenchmarks               int                      `json:"total_benchmarks"`
-	AnalyzedBenchmarks            int                      `json:"analyzed_benchmarks"`
-	InsufficientHistory           bool                     `json:"insufficient_history"`
-	InsufficientReason            string                   `json:"insufficient_reason,omitempty"`
-	ExclusionCounts               map[string]int           `json:"exclusion_counts,omitempty"`
-	GlobalShiftDetected           bool                     `json:"global_shift_detected"`
-	GlobalShiftPositiveShare      float64                  `json:"global_shift_positive_share"`
-	GlobalShiftGeoIncreasePct     float64                  `json:"global_shift_geo_increase_pct"`
-	GlobalShiftComparedBenchmarks int                      `json:"global_shift_compared_benchmarks"`
-	Regressions                   []regressionSnapshotItem `json:"regressions"`
+	RunID               *int64                   `json:"run_id"`
+	Branch              string                   `json:"branch"`
+	Window              int                      `json:"window"`
+	ComparedRuns        int                      `json:"compared_runs"`
+	MinPoints           int                      `json:"min_points"`
+	EffectiveMinPoints  int                      `json:"effective_min_points"`
+	BaselineOffset      int                      `json:"baseline_offset"`
+	AlgorithmVersion    string                   `json:"algorithm_version"`
+	Metric              string                   `json:"metric"`
+	Estimator           string                   `json:"estimator"`
+	CohortPolicy        string                   `json:"cohort_policy"`
+	FamilyDefinition    string                   `json:"family_definition"`
+	CalibrationStatus   string                   `json:"calibration_status"`
+	CalibrationCaveat   string                   `json:"calibration_caveat"`
+	FDRLevel            float64                  `json:"fdr_level"`
+	HypothesisCount     int                      `json:"hypothesis_count"`
+	TotalBenchmarks     int                      `json:"total_benchmarks"`
+	AnalyzedBenchmarks  int                      `json:"analyzed_benchmarks"`
+	InsufficientHistory bool                     `json:"insufficient_history"`
+	InsufficientReason  string                   `json:"insufficient_reason,omitempty"`
+	ExclusionCounts     map[string]int           `json:"exclusion_counts,omitempty"`
+	BroadShift          broadshift.Incident      `json:"broad_shift"`
+	Regressions         []regressionSnapshotItem `json:"regressions"`
 }
 
 type regressionHistoryEntry struct {
-	RunID                         int64                    `json:"run_id"`
-	CommitHash                    string                   `json:"commit_hash"`
-	CommitHashFull                string                   `json:"commit_hash_full"`
-	CommitMessage                 string                   `json:"commit_message"`
-	RunDate                       string                   `json:"run_date"`
-	Branch                        string                   `json:"branch"`
-	Cached                        bool                     `json:"cached"`
-	CachedAt                      string                   `json:"cached_at,omitempty"`
-	RegressionCount               int                      `json:"regression_count"`
-	ComparedRuns                  int                      `json:"compared_runs"`
-	MinPoints                     int                      `json:"min_points"`
-	EffectiveMinPoints            int                      `json:"effective_min_points"`
-	BaselineOffset                int                      `json:"baseline_offset"`
-	TotalBenchmarks               int                      `json:"total_benchmarks"`
-	AnalyzedBenchmarks            int                      `json:"analyzed_benchmarks"`
-	InsufficientHistory           bool                     `json:"insufficient_history"`
-	InsufficientReason            string                   `json:"insufficient_reason,omitempty"`
-	GlobalShiftDetected           bool                     `json:"global_shift_detected"`
-	GlobalShiftPositiveShare      float64                  `json:"global_shift_positive_share"`
-	GlobalShiftGeoIncreasePct     float64                  `json:"global_shift_geo_increase_pct"`
-	GlobalShiftComparedBenchmarks int                      `json:"global_shift_compared_benchmarks"`
-	Regressions                   []regressionSnapshotItem `json:"regressions"`
+	RunID               int64                    `json:"run_id"`
+	CommitHash          string                   `json:"commit_hash"`
+	CommitHashFull      string                   `json:"commit_hash_full"`
+	CommitMessage       string                   `json:"commit_message"`
+	RunDate             string                   `json:"run_date"`
+	Branch              string                   `json:"branch"`
+	Cached              bool                     `json:"cached"`
+	CachedAt            string                   `json:"cached_at,omitempty"`
+	RegressionCount     int                      `json:"regression_count"`
+	ComparedRuns        int                      `json:"compared_runs"`
+	MinPoints           int                      `json:"min_points"`
+	EffectiveMinPoints  int                      `json:"effective_min_points"`
+	BaselineOffset      int                      `json:"baseline_offset"`
+	TotalBenchmarks     int                      `json:"total_benchmarks"`
+	AnalyzedBenchmarks  int                      `json:"analyzed_benchmarks"`
+	InsufficientHistory bool                     `json:"insufficient_history"`
+	InsufficientReason  string                   `json:"insufficient_reason,omitempty"`
+	BroadShift          broadshift.Incident      `json:"broad_shift"`
+	Regressions         []regressionSnapshotItem `json:"regressions"`
 }
 
 type regressionHistoryResponse struct {
@@ -275,7 +270,7 @@ func (s *Server) handleRegressionsHistory(w http.ResponseWriter, r *http.Request
 			regressions = []regressionSnapshotItem{}
 		}
 
-		if len(regressions) == 0 && !snapshot.GlobalShiftDetected {
+		if len(regressions) == 0 && !snapshot.BroadShift.Detected {
 			continue
 		}
 
@@ -285,28 +280,25 @@ func (s *Server) handleRegressionsHistory(w http.ResponseWriter, r *http.Request
 		}
 
 		entries = append(entries, regressionHistoryEntry{
-			RunID:                         run.ID,
-			CommitHash:                    run.CommitHash,
-			CommitHashFull:                run.CommitHashFull,
-			CommitMessage:                 run.CommitMessage,
-			RunDate:                       run.RunDate,
-			Branch:                        runBranch,
-			Cached:                        fromCache,
-			CachedAt:                      cachedAt,
-			RegressionCount:               len(regressions),
-			ComparedRuns:                  snapshot.ComparedRuns,
-			MinPoints:                     snapshot.MinPoints,
-			EffectiveMinPoints:            snapshot.EffectiveMinPoints,
-			BaselineOffset:                snapshot.BaselineOffset,
-			TotalBenchmarks:               snapshot.TotalBenchmarks,
-			AnalyzedBenchmarks:            snapshot.AnalyzedBenchmarks,
-			InsufficientHistory:           snapshot.InsufficientHistory,
-			InsufficientReason:            snapshot.InsufficientReason,
-			GlobalShiftDetected:           snapshot.GlobalShiftDetected,
-			GlobalShiftPositiveShare:      snapshot.GlobalShiftPositiveShare,
-			GlobalShiftGeoIncreasePct:     snapshot.GlobalShiftGeoIncreasePct,
-			GlobalShiftComparedBenchmarks: snapshot.GlobalShiftComparedBenchmarks,
-			Regressions:                   regressions,
+			RunID:               run.ID,
+			CommitHash:          run.CommitHash,
+			CommitHashFull:      run.CommitHashFull,
+			CommitMessage:       run.CommitMessage,
+			RunDate:             run.RunDate,
+			Branch:              runBranch,
+			Cached:              fromCache,
+			CachedAt:            cachedAt,
+			RegressionCount:     len(regressions),
+			ComparedRuns:        snapshot.ComparedRuns,
+			MinPoints:           snapshot.MinPoints,
+			EffectiveMinPoints:  snapshot.EffectiveMinPoints,
+			BaselineOffset:      snapshot.BaselineOffset,
+			TotalBenchmarks:     snapshot.TotalBenchmarks,
+			AnalyzedBenchmarks:  snapshot.AnalyzedBenchmarks,
+			InsufficientHistory: snapshot.InsufficientHistory,
+			InsufficientReason:  snapshot.InsufficientReason,
+			BroadShift:          snapshot.BroadShift,
+			Regressions:         regressions,
 		})
 	}
 
@@ -366,7 +358,7 @@ func (s *Server) computeRegressionsSnapshot(ctx context.Context, runID int64, br
 
 func (s *Server) regressionCacheGenerationKey(branch string, window int, minPoints int, baselineOffset int, dataFingerprint string) string {
 	cacheSeed := fmt.Sprintf(
-		"algorithm=%s|metric=%s|estimator=%s|cohort=%s|family=%s|schema=%d|sample_data=%d|summary=%d|branch=%s|window=%d|min_points=%d|baseline_offset=%d|data=%s|fdr=%g|min_relative_pct=%g|min_abs_ns=%g|global_shift=%d,%g,%g|change_point_diagnostic=%d,%g,%d,%d",
+		"algorithm=%s|metric=%s|estimator=%s|cohort=%s|family=%s|schema=%d|sample_data=%d|summary=%d|branch=%s|window=%d|min_points=%d|baseline_offset=%d|data=%s|fdr=%g|min_relative_pct=%g|min_abs_ns=%g|broad_shift=%d,%g,%g|change_point_diagnostic=%d,%g,%d,%d",
 		regressionCacheAlgorithmVersion,
 		regressionMetric,
 		regressionEstimator,
@@ -383,9 +375,9 @@ func (s *Server) regressionCacheGenerationKey(branch string, window int, minPoin
 		defaultFDR,
 		stats.MinPracticalRegressionEffectPercent,
 		defaultMinAbsoluteNs,
-		globalShiftMinBenchmarks,
-		globalShiftMinPositiveShare,
-		globalShiftMinGeoIncreasePct,
+		broadShiftMinBenchmarks,
+		broadShiftMinPositiveShare,
+		broadShiftMinGeoIncreasePct,
 		changePointMinSegment,
 		changePointAlpha,
 		changePointPerms,
