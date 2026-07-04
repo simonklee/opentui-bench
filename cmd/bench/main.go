@@ -62,6 +62,7 @@ func main() {
 	rootCmd.AddCommand(latestCommitCmd())
 	rootCmd.AddCommand(backfillCmd())
 	rootCmd.AddCommand(backtestCmd())
+	rootCmd.AddCommand(calibrateCmd())
 	rootCmd.AddCommand(flamegraphCmd())
 	rootCmd.AddCommand(workerCmd())
 	rootCmd.AddCommand(triggerCmd())

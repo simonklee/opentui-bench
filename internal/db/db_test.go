@@ -948,6 +948,58 @@ func TestOpenDropsObsoleteDFKeyedRegressionCache(t *testing.T) {
 	}
 }
 
+func TestCalibrationRolloutMigrationPurgesRegressionCacheOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-cache.db")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO runs(id, commit_hash, run_date) VALUES (1, 'old', '2026-01-01T00:00:00Z');
+		INSERT INTO regression_cache(run_id, branch, window, min_points, baseline_offset, generation_key, response_json, created_at, updated_at)
+		VALUES (1, 'main', 30, 5, 3, 'old-generation', '{}', 'now', 'now');
+		PRAGMA user_version = 4;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = database.Close() }()
+	var count, version int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM regression_cache`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 || version != CurrentSchemaVersion {
+		t.Fatalf("count=%d version=%d, want empty cache at version %d", count, version, CurrentSchemaVersion)
+	}
+	if _, err := database.Exec(`INSERT INTO regression_cache(run_id, branch, window, min_points, baseline_offset, generation_key, response_json, created_at, updated_at)
+		VALUES (1, 'main', 30, 5, 3, 'new-generation', '{}', 'now', 'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM regression_cache`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("versioned purge reran and removed current cache: count=%d", count)
+	}
+}
+
 func TestMigrationPreservesHistoricalResultsWithoutFabricatingSamples(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "production.db")
 	raw, err := sql.Open("sqlite", path)

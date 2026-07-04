@@ -36,7 +36,7 @@ make help            # Show all available commands
 ./bench list                         # List recorded runs
 ./bench show <commit>                # Show run details
 ./bench compare <commit1> <commit2>  # Compare two runs
-./bench trend "benchmark_name"       # Show performance trend
+./bench trend <result_id>              # Show performance trend
 ```
 
 ## Triggering Benchmark Runs

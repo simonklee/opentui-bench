@@ -154,4 +154,4 @@ SELECT
 FROM results r
 JOIN runs ru ON r.run_id = ru.id;
 
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;

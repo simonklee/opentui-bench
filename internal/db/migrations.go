@@ -9,12 +9,18 @@ type migration func(*sql.Tx) error
 
 // Versions are intentionally coarse milestones. generation_key contains the
 // regression algorithm, detector configuration, cohort policy, and data
-// fingerprint; version 3 replaces older cache layouts and purges their rows.
+// fingerprint; versions 3 and 5 purge incompatible detector cache rows.
 var migrations = []migration{
 	migrateLegacySchema,
 	migrateCompositeIdentity,
 	migrateRegressionCache,
 	migrateStoragePrecision,
+	purgeRegressionCacheForCalibrationRollout,
+}
+
+func purgeRegressionCacheForCalibrationRollout(tx *sql.Tx) error {
+	_, err := tx.Exec(`DELETE FROM regression_cache`)
+	return err
 }
 
 func (db *DB) migrate() error {

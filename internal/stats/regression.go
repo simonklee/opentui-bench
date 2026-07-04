@@ -113,6 +113,16 @@ func TCriticalOneSided(df int, alpha float64) float64 {
 	return (lo + hi) / 2
 }
 
+// OneSidedTPValue returns P(T > score) for a Student t distribution. It is
+// exported for versioned offline diagnostics; production scoring uses the same
+// implementation through DetectRegression.
+func OneSidedTPValue(score float64, df int) float64 {
+	if df < 1 {
+		df = 1
+	}
+	return tDistSurvival(score, df)
+}
+
 // ComputeBaseline uses valid positive averages from the already selected history.
 func ComputeBaseline(history []RunStat, minPoints int, baselineOffset int) (*BaselineStats, error) {
 	if baselineOffset < 0 {

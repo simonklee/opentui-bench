@@ -16,8 +16,9 @@ make build
 ./bench list
 ./bench show <commit>
 ./bench compare <commit1> <commit2>
-./bench trend "benchmark_name"
+./bench trend <result_id>
 ./bench backtest                         # Replay historical alerts with scorecards
+./bench calibrate --output report.json   # Frozen chronological calibration replay
 
 # Start web UI
 make serve
@@ -44,6 +45,18 @@ noise. Each run records multiple iterations to average out variability.
 
 Data is stored in a SQLite database. You can download it via the "Export" link
 in the web UI sidebar, or directly at `/api/database/download`.
+
+## Detector Calibration
+
+`bench calibrate` opens the selected database in SQLite read-only mode and runs the versioned
+Phase 6 replay in strict `(run_date, id)` order. Detector parameters are frozen;
+only the branch, deterministic injection seed, and JSON output path are flags.
+The output path must be a new file and cannot alias the database or its sidecars.
+The report labels the old median/SEM detector as a legacy diagnostic and never
+uses it for production alerts. WAL reads may touch ephemeral `-shm` lock metadata,
+but do not write persisted database or WAL content. Until every versioned criterion has adequate
+evidence and passes, API and UI results remain `uncalibrated_regression_score`
+with no formal p-value or FDR guarantee.
 
 ## Development
 

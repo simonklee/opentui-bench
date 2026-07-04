@@ -127,11 +127,11 @@ const RegressionRow: Component<{ regression: RegressionWithContext }> = (props) 
             const raw = reg().p_value;
             const title =
               raw !== undefined
-                ? `raw p=${raw.toExponential(2)} · adjusted p=${adjusted.toExponential(2)}`
-                : `adjusted p=${adjusted.toExponential(2)}`;
+                ? `raw score=${raw.toExponential(2)} · multiplicity-adjusted score=${adjusted.toExponential(2)}`
+                : `multiplicity-adjusted score=${adjusted.toExponential(2)}`;
             return (
               <div class="text-[10px] text-text-muted" title={title}>
-                adj p {adjusted.toExponential(2)}
+                adj score {adjusted.toExponential(2)}
               </div>
             );
           })()}

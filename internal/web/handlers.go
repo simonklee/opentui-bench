@@ -1206,13 +1206,13 @@ const (
 	defaultBaselineOffset       = 3
 	defaultFDR                  = 0.01
 	defaultMinAbsoluteNs        = 5000.0
-	regressionAlgorithmVersion  = "v6-broad-shift-incidents"
+	regressionAlgorithmVersion  = "v7-phase6-calibration-rollout"
 	regressionMetric            = "log(avg_ns)"
 	regressionEstimator         = "historical_log_mean_prediction"
 	regressionCohortPolicy      = "phase2_exact_identity_compatible_as_of"
 	regressionFamilyDefinition  = "one_slowdown_hypothesis_per_eligible_benchmark_complete_snapshot"
 	regressionCalibrationStatus = "uncalibrated_regression_score"
-	regressionCalibrationCaveat = "Under valid p-values and BH's cross-benchmark dependence assumptions, BH controls FDR within each snapshot only; it does not control accumulated false-alert rates across sequential snapshots. Scores also assume approximately stationary independent normal log run averages."
+	regressionCalibrationCaveat = "Uncalibrated regression scores only. No p-value calibration or FDR guarantee is claimed; the frozen Phase 6 replay lacks adequate unchanged-commit and transition evidence. Run `bench calibrate` for the current data report."
 	broadShiftMinBenchmarks     = 50
 	broadShiftMinPositiveShare  = 0.75
 	broadShiftMinGeoIncreasePct = 10.0

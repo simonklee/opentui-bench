@@ -145,7 +145,7 @@ FROM results r JOIN runs ru ON r.run_id = ru.id;
 `
 
 const (
-	CurrentSchemaVersion     = 4
+	CurrentSchemaVersion     = 5
 	CurrentSampleDataVersion = 1
 	CurrentSummaryVersion    = 2
 )
@@ -212,6 +212,31 @@ func Open(dbPath string) (*DB, error) {
 	}
 
 	return database, nil
+}
+
+// OpenReadOnly prevents persisted database and WAL writes. SQLite may still
+// touch ephemeral -shm lock-coordination metadata while reading a WAL database.
+func OpenReadOnly(dbPath string) (*DB, error) {
+	dsn := "file:" + filepath.ToSlash(dbPath) + "?mode=ro&_pragma=foreign_keys(1)&_pragma=query_only(1)"
+	sqlDB, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open read-only database: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	if err := sqlDB.Ping(); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("ping read-only database: %w", err)
+	}
+	var version int
+	if err := sqlDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		_ = sqlDB.Close()
+		return nil, err
+	}
+	if version > CurrentSchemaVersion {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("database schema version %d is newer than supported version %d", version, CurrentSchemaVersion)
+	}
+	return &DB{DB: sqlDB, path: dbPath}, nil
 }
 
 type oldFlamegraph struct {
