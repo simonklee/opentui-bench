@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,6 +33,228 @@ func openTestDB(t *testing.T) *DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+func insertProfileTestRun(t *testing.T, database *DB, runDate string, profile []byte) (int64, int64) {
+	t.Helper()
+	runID, err := database.InsertRun(&Run{
+		CommitHash:  "commit-" + runDate,
+		Branch:      "main",
+		RunDate:     runDate,
+		MachineID:   "test-machine",
+		ZigOptimize: "ReleaseFast",
+	})
+	if err != nil {
+		t.Fatalf("insert profile test run: %v", err)
+	}
+	resultID := insertTestResult(t, database, runID, "render", "profiled")
+	if _, err := database.InsertArtifact(&Artifact{
+		ResultID: resultID, Kind: "cpu.pprof", DataBlob: profile,
+		Metadata: "{}", CreatedAt: runDate,
+	}); err != nil {
+		t.Fatalf("insert profile artifact: %v", err)
+	}
+	return runID, resultID
+}
+
+func TestPruneProfileDataPreservesBenchmarkHistory(t *testing.T) {
+	database := openTestDB(t)
+	oldRunID, oldResultID := insertProfileTestRun(t, database, "2026-01-01T00:00:00Z", []byte("old!"))
+	middleRunID, middleResultID := insertProfileTestRun(t, database, "2026-01-02T00:00:00Z", []byte("mid!"))
+	newRunID, newResultID := insertProfileTestRun(t, database, "2026-01-03T00:00:00Z", []byte("new!"))
+
+	for _, artifact := range []Artifact{
+		{ResultID: oldResultID, Kind: "cpu.flamegraph.svg", DataBlob: []byte("derived flamegraph"), Metadata: "{}", CreatedAt: "2026-01-01T00:00:00Z"},
+		{ResultID: middleResultID, Kind: "cpu.callgraph.svg", DataBlob: []byte("derived callgraph"), Metadata: "{}", CreatedAt: "2026-01-02T00:00:00Z"},
+		{ResultID: oldResultID, Kind: "diagnostic.txt", DataBlob: []byte("keep unknown artifacts"), Metadata: "{}", CreatedAt: "2026-01-01T00:00:00Z"},
+	} {
+		artifact := artifact
+		if _, err := database.InsertArtifact(&artifact); err != nil {
+			t.Fatalf("insert %s: %v", artifact.Kind, err)
+		}
+	}
+	if _, err := database.Exec(`
+		INSERT INTO flamegraphs (run_id, benchmark_name, folded_stacks_gz, sampling_freq, created_at)
+		VALUES (?, 'profiled', ?, 997, ?)`, oldRunID, []byte("legacy"), "2026-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("insert legacy flamegraph: %v", err)
+	}
+
+	pruned, err := database.PruneProfileData(ProfileRetention{MaxRuns: 2, MaxBytes: 100})
+	if err != nil {
+		t.Fatalf("prune profile data: %v", err)
+	}
+	if pruned.ProfileRunsRetained != 2 || pruned.BytesRetained != 8 {
+		t.Fatalf("retained runs/bytes = %d/%d, want 2/8", pruned.ProfileRunsRetained, pruned.BytesRetained)
+	}
+
+	for _, resultID := range []int64{middleResultID, newResultID} {
+		if _, err := database.GetArtifact(resultID, "cpu.pprof"); err != nil {
+			t.Errorf("retained result %d profile: %v", resultID, err)
+		}
+	}
+	if _, err := database.GetArtifact(oldResultID, "cpu.pprof"); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("old profile error = %v, want sql.ErrNoRows", err)
+	}
+	for resultID, kind := range map[int64]string{
+		oldResultID:    "cpu.flamegraph.svg",
+		middleResultID: "cpu.callgraph.svg",
+	} {
+		if _, err := database.GetArtifact(resultID, kind); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("derived artifact %s error = %v, want sql.ErrNoRows", kind, err)
+		}
+	}
+	if _, err := database.GetArtifact(oldResultID, "diagnostic.txt"); err != nil {
+		t.Errorf("unknown artifact was not preserved: %v", err)
+	}
+
+	var runCount, resultCount, legacyCount int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM runs`).Scan(&runCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM results`).Scan(&resultCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM flamegraphs`).Scan(&legacyCount); err != nil {
+		t.Fatal(err)
+	}
+	if runCount != 3 || resultCount != 3 || legacyCount != 0 {
+		t.Errorf("runs/results/legacy = %d/%d/%d, want 3/3/0", runCount, resultCount, legacyCount)
+	}
+	for _, runID := range []int64{oldRunID, middleRunID, newRunID} {
+		if _, err := database.GetRun(runID); err != nil {
+			t.Errorf("retained run %d: %v", runID, err)
+		}
+	}
+}
+
+func TestPruneProfileDataEnforcesByteBound(t *testing.T) {
+	database := openTestDB(t)
+	oldRunID, oldResultID := insertProfileTestRun(t, database, "2026-01-01T00:00:00Z", []byte("old!"))
+	_, middleResultID := insertProfileTestRun(t, database, "2026-01-02T00:00:00Z", []byte("mid!"))
+	_, newResultID := insertProfileTestRun(t, database, "2026-01-03T00:00:00Z", []byte("new!"))
+
+	pruned, err := database.PruneProfileData(ProfileRetention{MaxRuns: 10, MaxBytes: 7})
+	if err != nil {
+		t.Fatalf("prune profile data: %v", err)
+	}
+	if pruned.ProfileRunsRetained != 1 || pruned.BytesRetained != 4 {
+		t.Fatalf("retained runs/bytes = %d/%d, want 1/4", pruned.ProfileRunsRetained, pruned.BytesRetained)
+	}
+	if _, err := database.GetArtifact(newResultID, "cpu.pprof"); err != nil {
+		t.Errorf("newest profile: %v", err)
+	}
+	for _, resultID := range []int64{oldResultID, middleResultID} {
+		if _, err := database.GetArtifact(resultID, "cpu.pprof"); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("pruned result %d profile error = %v, want sql.ErrNoRows", resultID, err)
+		}
+	}
+	if _, err := database.GetRun(oldRunID); err != nil {
+		t.Errorf("old benchmark history was deleted: %v", err)
+	}
+}
+
+func TestPruneProfileDataDropsIncompleteProfileRuns(t *testing.T) {
+	database := openTestDB(t)
+	_, completeResultID := insertProfileTestRun(t, database, "2026-01-01T00:00:00Z", []byte("complete"))
+	partialRunID, partialResultID := insertProfileTestRun(t, database, "2026-01-02T00:00:00Z", []byte("partial"))
+	insertTestResult(t, database, partialRunID, "render", "missing-profile")
+
+	pruned, err := database.PruneProfileData(ProfileRetention{MaxRuns: 1, MaxBytes: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned.ProfileRunsRetained != 1 || pruned.BytesRetained != int64(len("complete")) {
+		t.Fatalf("retained runs/bytes = %d/%d, want 1/%d", pruned.ProfileRunsRetained, pruned.BytesRetained, len("complete"))
+	}
+	if _, err := database.GetArtifact(completeResultID, "cpu.pprof"); err != nil {
+		t.Fatalf("complete profile set was pruned: %v", err)
+	}
+	if _, err := database.GetArtifact(partialResultID, "cpu.pprof"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("partial profile error = %v, want sql.ErrNoRows", err)
+	}
+	results, err := database.GetResultsForRun(partialRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("partial run result count = %d, want 2", len(results))
+	}
+}
+
+func TestFinalizeProfileDataPreservesOtherIncompleteRuns(t *testing.T) {
+	database := openTestDB(t)
+	completeRunID, completeResultID := insertProfileTestRun(t, database, "2026-01-01T00:00:00Z", []byte("complete"))
+	partialRunID, partialResultID := insertProfileTestRun(t, database, "2026-01-02T00:00:00Z", []byte("partial"))
+	insertTestResult(t, database, partialRunID, "render", "still-uploading")
+	retention := ProfileRetention{MaxRuns: 1, MaxBytes: 100}
+
+	_, complete, err := database.FinalizeProfileData(completeRunID, retention)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !complete {
+		t.Fatal("complete target reported incomplete")
+	}
+	if _, err := database.GetArtifact(completeResultID, "cpu.pprof"); err != nil {
+		t.Fatalf("complete target profile was pruned: %v", err)
+	}
+	if _, err := database.GetArtifact(partialResultID, "cpu.pprof"); err != nil {
+		t.Fatalf("concurrent partial profile was pruned: %v", err)
+	}
+
+	_, complete, err = database.FinalizeProfileData(partialRunID, retention)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if complete {
+		t.Fatal("partial target reported complete")
+	}
+	if _, err := database.GetArtifact(partialResultID, "cpu.pprof"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("finalized partial profile error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestPruneProfileDataRejectsInvalidBounds(t *testing.T) {
+	database := openTestDB(t)
+	for _, retention := range []ProfileRetention{
+		{MaxRuns: 0, MaxBytes: 1},
+		{MaxRuns: 1, MaxBytes: 0},
+	} {
+		if _, err := database.PruneProfileData(retention); err == nil {
+			t.Errorf("PruneProfileData(%+v) succeeded, want error", retention)
+		}
+	}
+}
+
+func TestVacuumReclaimsPrunedProfilePages(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = database.Close() }()
+	insertProfileTestRun(t, database, "2026-01-01T00:00:00Z", make([]byte, 2<<20))
+	if _, err := database.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.PruneProfileData(ProfileRetention{MaxRuns: 1, MaxBytes: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Vacuum(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() >= before.Size() {
+		t.Fatalf("database size after vacuum = %d, want less than %d", after.Size(), before.Size())
+	}
 }
 
 func TestInsertAndGetJob(t *testing.T) {

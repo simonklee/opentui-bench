@@ -10,21 +10,28 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 type SVGCache struct {
 	cacheDir string
 	maxRuns  int
+	mu       sync.Mutex
 }
 
 func NewSVGCache(cacheDir string, maxRuns int) (*SVGCache, error) {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
-	return &SVGCache{
+	cache := &SVGCache{
 		cacheDir: cacheDir,
 		maxRuns:  maxRuns,
-	}, nil
+	}
+	if err := cache.pruneRecentRuns(); err != nil {
+		return nil, err
+	}
+	return cache, nil
 }
 
 func (c *SVGCache) runDir(runID int64) string {
@@ -38,15 +45,23 @@ func (c *SVGCache) svgPath(runID int64, benchmarkName string) string {
 }
 
 func (c *SVGCache) Get(runID int64, benchmarkName string) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	path := c.svgPath(runID, benchmarkName)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, false
 	}
+	now := time.Now()
+	_ = os.Chtimes(c.runDir(runID), now, now)
 	return data, true
 }
 
 func (c *SVGCache) Put(runID int64, benchmarkName string, svg []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	dir := c.runDir(runID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create run cache dir: %w", err)
@@ -79,7 +94,9 @@ func (c *SVGCache) Put(runID int64, benchmarkName string, svg []byte) error {
 			return fmt.Errorf("rename svg: %w", err)
 		}
 	}
-	return nil
+	now := time.Now()
+	_ = os.Chtimes(dir, now, now)
+	return c.pruneRecentRuns()
 }
 
 func (c *SVGCache) GetOrGenerate(runID int64, benchmarkName string, foldedStacks string) ([]byte, error) {
@@ -108,7 +125,11 @@ func GenerateSVG(foldedStacks, title string) ([]byte, error) {
 }
 
 func (c *SVGCache) PruneOldRuns(keepRunIDs []int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.maxRuns > 0 && len(keepRunIDs) > c.maxRuns {
+		keepRunIDs = append([]int64(nil), keepRunIDs...)
 		sort.Slice(keepRunIDs, func(i, j int) bool {
 			return keepRunIDs[i] > keepRunIDs[j]
 		})
@@ -151,6 +172,9 @@ func (c *SVGCache) PruneOldRuns(keepRunIDs []int64) error {
 }
 
 func (c *SVGCache) DeleteRun(runID int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	dir := c.runDir(runID)
 	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove run cache: %w", err)
@@ -160,4 +184,57 @@ func (c *SVGCache) DeleteRun(runID int64) error {
 
 func (c *SVGCache) CacheDir() string {
 	return c.cacheDir
+}
+
+type cachedRun struct {
+	path    string
+	runID   int64
+	modTime time.Time
+}
+
+// pruneRecentRuns enforces maxRuns as an LRU bound. The caller must hold mu
+// after cache construction has completed.
+func (c *SVGCache) pruneRecentRuns() error {
+	if c.maxRuns <= 0 {
+		return nil
+	}
+	entries, err := os.ReadDir(c.cacheDir)
+	if err != nil {
+		return fmt.Errorf("read cache dir: %w", err)
+	}
+
+	runs := make([]cachedRun, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "run-") {
+			continue
+		}
+		runID, err := strconv.ParseInt(strings.TrimPrefix(entry.Name(), "run-"), 10, 64)
+		if err != nil {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("stat cache run %d: %w", runID, err)
+		}
+		runs = append(runs, cachedRun{
+			path:    filepath.Join(c.cacheDir, entry.Name()),
+			runID:   runID,
+			modTime: info.ModTime(),
+		})
+	}
+	if len(runs) <= c.maxRuns {
+		return nil
+	}
+	sort.Slice(runs, func(i, j int) bool {
+		if runs[i].modTime.Equal(runs[j].modTime) {
+			return runs[i].runID > runs[j].runID
+		}
+		return runs[i].modTime.After(runs[j].modTime)
+	})
+	for _, run := range runs[c.maxRuns:] {
+		if err := os.RemoveAll(run.path); err != nil {
+			return fmt.Errorf("remove run-%d cache: %w", run.runID, err)
+		}
+	}
+	return nil
 }

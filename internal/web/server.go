@@ -26,6 +26,7 @@ type Server struct {
 	addr                string
 	apiKey              string
 	svgCache            *cache.SVGCache
+	profileRetention    db.ProfileRetention
 	flamegraphSem       chan struct{}
 	databaseDownloadSem chan struct{}
 	pprofManager        *PProfManager
@@ -55,20 +56,48 @@ func NewServer(database *db.DB, addr string) (*Server, error) {
 		}
 	}
 
+	profileRunsMax, err := positiveIntEnv("PROFILE_RETENTION_RUNS", db.DefaultProfileRunsMax)
+	if err != nil {
+		return nil, err
+	}
+	profileMiBMax, err := positiveIntEnv("PROFILE_RETENTION_MIB", int(db.DefaultProfileBytesMax>>20))
+	if err != nil {
+		return nil, err
+	}
+	if profileMiBMax > 1<<20 {
+		return nil, fmt.Errorf("PROFILE_RETENTION_MIB must not exceed %d", 1<<20)
+	}
+
 	svgCache, err := cache.NewSVGCache(cacheDir, maxRuns)
 	if err != nil {
 		return nil, fmt.Errorf("initialize SVG cache: %w", err)
 	}
 
 	return &Server{
-		db:                  database,
-		addr:                addr,
-		apiKey:              os.Getenv("BENCH_API_KEY"),
-		svgCache:            svgCache,
+		db:       database,
+		addr:     addr,
+		apiKey:   os.Getenv("BENCH_API_KEY"),
+		svgCache: svgCache,
+		profileRetention: db.ProfileRetention{
+			MaxRuns:  profileRunsMax,
+			MaxBytes: int64(profileMiBMax) << 20,
+		},
 		flamegraphSem:       make(chan struct{}, maxConcurrency),
 		databaseDownloadSem: make(chan struct{}, 1),
 		pprofManager:        NewPProfManager(),
 	}, nil
+}
+
+func positiveIntEnv(name string, fallback int) (int, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return n, nil
 }
 
 // requireAuth wraps a handler to require bearer token authentication.
@@ -89,6 +118,15 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) Start(openBrowser bool) error {
+	pruned, err := s.pruneProfileData()
+	if err != nil {
+		return fmt.Errorf("prune profile data: %w", err)
+	}
+	if pruned.BlobsDeleted > 0 {
+		fmt.Printf("Pruned %d profile blobs (%.1f MiB)\n",
+			pruned.BlobsDeleted, float64(pruned.BytesDeleted)/(1<<20))
+	}
+
 	mux := http.NewServeMux()
 
 	appFS, err := fs.Sub(staticFiles, "static/app")
@@ -118,6 +156,21 @@ func (s *Server) Start(openBrowser bool) error {
 
 	fmt.Printf("Starting server at http://localhost%s\n", s.addr)
 	return http.ListenAndServe(s.addr, mux)
+}
+
+func (s *Server) pruneProfileData() (db.ProfileRetentionResult, error) {
+	return s.db.PruneProfileData(s.profileRetentionConfig())
+}
+
+func (s *Server) profileRetentionConfig() db.ProfileRetention {
+	retention := s.profileRetention
+	if retention.MaxRuns == 0 {
+		retention.MaxRuns = db.DefaultProfileRunsMax
+	}
+	if retention.MaxBytes == 0 {
+		retention.MaxBytes = db.DefaultProfileBytesMax
+	}
+	return retention
 }
 
 func openURL(url string) {
@@ -192,6 +245,8 @@ func (s *Server) routeRunsAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleCallgraphSVG(w, r)
 	case strings.HasSuffix(path, "/categories"):
 		s.handleCategories(w, r)
+	case strings.HasSuffix(path, "/artifacts/finalize") && r.Method == http.MethodPost:
+		s.requireAuth(s.handleFinalizeArtifacts)(w, r)
 	case strings.Contains(path, "/results/") && strings.HasSuffix(path, "/artifacts") && r.Method == http.MethodPost:
 		s.requireAuth(s.handleUploadArtifact)(w, r)
 	case strings.HasSuffix(path, "/artifacts"):

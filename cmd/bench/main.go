@@ -57,6 +57,7 @@ func main() {
 	rootCmd.AddCommand(compareCmd())
 	rootCmd.AddCommand(trendCmd())
 	rootCmd.AddCommand(deleteCmd())
+	rootCmd.AddCommand(pruneCmd())
 	rootCmd.AddCommand(serveCmd())
 	rootCmd.AddCommand(hasCommitCmd())
 	rootCmd.AddCommand(latestCommitCmd())
@@ -190,8 +191,13 @@ func recordRemote(ctx context.Context, cfg runner.RunConfig, apiURL, apiKey stri
 		fmt.Printf("Uploaded %d artifacts\n", uploaded)
 	}
 
+	if len(artifacts) > 0 {
+		if err := remote.FinalizeArtifacts(runID); err != nil {
+			uploadErrors = append(uploadErrors, err.Error())
+		}
+	}
 	if len(uploadErrors) > 0 {
-		return fmt.Errorf("artifact upload errors (%d/%d failed): %s", len(uploadErrors), len(artifacts), strings.Join(uploadErrors, "; "))
+		return fmt.Errorf("artifact upload errors or finalization errors (%d): %s", len(uploadErrors), strings.Join(uploadErrors, "; "))
 	}
 
 	return nil
@@ -536,6 +542,63 @@ func deleteCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&before, "before", "", "delete runs before date (YYYY-MM-DD)")
 
+	return cmd
+}
+
+func pruneCmd() *cobra.Command {
+	var profileRunsMax int
+	var profileMiBMax int64
+	var compact bool
+
+	cmd := &cobra.Command{
+		Use:   "prune",
+		Short: "Prune bulky profile data while preserving benchmark history",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if profileMiBMax <= 0 || profileMiBMax > 1<<20 {
+				return fmt.Errorf("profile-mib must be between 1 and %d", 1<<20)
+			}
+			database, cleanup, err := openDB()
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			result, err := database.PruneProfileData(db.ProfileRetention{
+				MaxRuns:  profileRunsMax,
+				MaxBytes: profileMiBMax << 20,
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Deleted %d profile blobs (%.1f MiB); retained %d runs (%.1f MiB)\n",
+				result.BlobsDeleted,
+				float64(result.BytesDeleted)/(1<<20),
+				result.ProfileRunsRetained,
+				float64(result.BytesRetained)/(1<<20))
+
+			if !compact {
+				return nil
+			}
+			before, err := os.Stat(database.Path())
+			if err != nil {
+				return fmt.Errorf("stat database before compacting: %w", err)
+			}
+			if err := database.Vacuum(); err != nil {
+				return err
+			}
+			after, err := os.Stat(database.Path())
+			if err != nil {
+				return fmt.Errorf("stat database after compacting: %w", err)
+			}
+			fmt.Printf("Compacted database from %.1f MiB to %.1f MiB\n",
+				float64(before.Size())/(1<<20), float64(after.Size())/(1<<20))
+			return nil
+		},
+	}
+
+	cmd.Flags().IntVar(&profileRunsMax, "profile-runs", db.DefaultProfileRunsMax, "maximum runs retaining source profiles")
+	cmd.Flags().Int64Var(&profileMiBMax, "profile-mib", db.DefaultProfileBytesMax>>20, "maximum source profile storage in MiB")
+	cmd.Flags().BoolVar(&compact, "compact", false, "vacuum SQLite after pruning to shrink the file")
 	return cmd
 }
 
@@ -1272,8 +1335,13 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 			uploadErrors = append(uploadErrors, fmt.Sprintf("upload %s/%s: %v", art.Benchmark.Category, art.Benchmark.Name, err))
 		}
 	}
+	if len(artifacts) > 0 {
+		if err := remote.FinalizeArtifacts(runID); err != nil {
+			uploadErrors = append(uploadErrors, err.Error())
+		}
+	}
 	if len(uploadErrors) > 0 {
-		return fmt.Errorf("artifact upload errors (%d/%d failed): %s", len(uploadErrors), len(artifacts), strings.Join(uploadErrors, "; "))
+		return fmt.Errorf("artifact upload errors or finalization errors (%d): %s", len(uploadErrors), strings.Join(uploadErrors, "; "))
 	}
 
 	// Mark job completed

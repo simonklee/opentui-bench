@@ -202,6 +202,12 @@ func Run(ctx context.Context, database *db.DB, cfg RunConfig) (int64, error) {
 				return runID, fmt.Errorf("store artifact for %s/%s: %w", art.Benchmark.Category, art.Benchmark.Name, err)
 			}
 		}
+		if _, err := database.PruneProfileData(db.ProfileRetention{
+			MaxRuns:  db.DefaultProfileRunsMax,
+			MaxBytes: db.DefaultProfileBytesMax,
+		}); err != nil {
+			return runID, fmt.Errorf("prune profile data: %w", err)
+		}
 	}
 
 	return runID, nil

@@ -848,17 +848,6 @@ func (s *Server) handleFlamegraphSVG(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "flamegraph too large", http.StatusRequestEntityTooLarge)
 				return
 			}
-			if err := s.db.InsertArtifactIfMissing(&db.Artifact{
-				ResultID:  result.ID,
-				Kind:      flamegraphSVGKind,
-				DataBlob:  svg,
-				Metadata:  "{}",
-				CreatedAt: time.Now().UTC().Format(time.RFC3339),
-			}); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
 			if s.svgCache != nil {
 				_ = s.svgCache.Put(runID, cacheKey, svg)
 			}
@@ -897,17 +886,6 @@ func (s *Server) handleFlamegraphSVG(w http.ResponseWriter, r *http.Request) {
 
 	if len(svg) > maxFlamegraphSize {
 		http.Error(w, "flamegraph too large", http.StatusRequestEntityTooLarge)
-		return
-	}
-
-	if err := s.db.InsertArtifactIfMissing(&db.Artifact{
-		ResultID:  result.ID,
-		Kind:      flamegraphSVGKind,
-		DataBlob:  svg,
-		Metadata:  "{}",
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -1024,17 +1002,6 @@ func (s *Server) handleCallgraphSVG(w http.ResponseWriter, r *http.Request) {
 
 	if len(svg) > maxFlamegraphSize {
 		http.Error(w, "callgraph too large", http.StatusRequestEntityTooLarge)
-		return
-	}
-
-	if err := s.db.InsertArtifactIfMissing(&db.Artifact{
-		ResultID:  result.ID,
-		Kind:      callgraphSVGKind,
-		DataBlob:  svg,
-		Metadata:  "{}",
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -2198,16 +2165,25 @@ func (s *Server) handleUploadArtifact(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, "kind query parameter required", http.StatusBadRequest)
 		return
 	}
+	if kind != cpuProfileKind {
+		writeJSONError(w, "unsupported artifact kind", http.StatusBadRequest)
+		return
+	}
 
 	metadata := r.URL.Query().Get("metadata")
 	if metadata == "" {
 		metadata = "{}"
 	}
 
-	// Read body with size limit
-	body := io.LimitReader(r.Body, maxProfileSize)
-	data, err := io.ReadAll(body)
+	// Reject oversized profiles instead of silently storing a truncated body.
+	r.Body = http.MaxBytesReader(w, r.Body, maxProfileSize)
+	data, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			writeJSONError(w, "profile too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		writeJSONError(w, "read body: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -2233,6 +2209,39 @@ func (s *Server) handleUploadArtifact(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"kind": kind,
 		"size": len(data),
+	})
+}
+
+// handleFinalizeArtifacts applies retention after all artifacts for a run have
+// been uploaded, so profile sets are retained or discarded as a complete run.
+func (s *Server) handleFinalizeArtifacts(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/runs/")
+	path = strings.TrimSuffix(path, "/artifacts/finalize")
+	runID, err := strconv.ParseInt(path, 10, 64)
+	if err != nil {
+		writeJSONError(w, "invalid run id", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.db.GetRun(runID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSONError(w, "run not found", http.StatusNotFound)
+			return
+		}
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	pruned, complete, err := s.db.FinalizeProfileData(runID, s.profileRetentionConfig())
+	if err != nil {
+		writeJSONError(w, "prune profiles: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"complete":       complete,
+		"deleted":        pruned.BlobsDeleted,
+		"bytes_deleted":  pruned.BytesDeleted,
+		"retained_runs":  pruned.ProfileRunsRetained,
+		"bytes_retained": pruned.BytesRetained,
 	})
 }
 

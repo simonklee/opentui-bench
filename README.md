@@ -46,6 +46,18 @@ noise. Each run records multiple iterations to average out variability.
 Data is stored in a SQLite database. You can download it via the "Export" link
 in the web UI sidebar, or directly at `/api/database/download`.
 
+Aggregate benchmark history is retained indefinitely. Bulky CPU profiles are
+limited to 256 complete recent runs and 256 MiB by default, whichever limit is
+reached first; generated SVGs use a five-run filesystem cache instead of SQLite.
+Override the server limits with `PROFILE_RETENTION_RUNS`,
+`PROFILE_RETENTION_MIB`, and `SVG_CACHE_MAX_RUNS`.
+
+Prune an existing database and optionally return free pages to the filesystem:
+
+```bash
+./bench --db /path/to/bench.db prune --compact
+```
+
 ## Detector Calibration
 
 `bench calibrate` opens the selected database in SQLite read-only mode and runs the versioned

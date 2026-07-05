@@ -149,6 +149,8 @@ const (
 	CurrentSchemaVersion     = 5
 	CurrentSampleDataVersion = 1
 	CurrentSummaryVersion    = 2
+	DefaultProfileRunsMax    = 256
+	DefaultProfileBytesMax   = int64(256 << 20)
 )
 
 type DB struct {
@@ -200,6 +202,19 @@ func (db *DB) Backup(ctx context.Context, destination string) error {
 			}
 		}
 	})
+}
+
+// Vacuum rewrites the database to return free pages to the filesystem. Profile
+// pruning does not need this for steady-state bounds because SQLite reuses free
+// pages, but an explicit vacuum shrinks an already oversized database.
+func (db *DB) Vacuum() error {
+	if _, err := db.Exec(`VACUUM`); err != nil {
+		return fmt.Errorf("vacuum database: %w", err)
+	}
+	if _, err := db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return fmt.Errorf("truncate WAL after vacuum: %w", err)
+	}
+	return nil
 }
 
 func Open(dbPath string) (*DB, error) {
@@ -1401,6 +1416,189 @@ type Artifact struct {
 	DataSize  int64
 	Metadata  string
 	CreatedAt string
+}
+
+type ProfileRetention struct {
+	MaxRuns  int
+	MaxBytes int64
+}
+
+type ProfileRetentionResult struct {
+	BlobsDeleted        int64
+	BytesDeleted        int64
+	ProfileRunsRetained int
+	BytesRetained       int64
+}
+
+type profileStorageQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func profileStorageStats(q profileStorageQuerier) (blobs int64, bytes int64, err error) {
+	err = q.QueryRow(`
+		SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)
+		FROM (
+			SELECT length(data_blob) AS size_bytes
+			FROM artifacts
+			WHERE kind IN ('cpu.pprof', 'cpu.flamegraph.svg', 'cpu.callgraph.svg')
+			UNION ALL
+			SELECT length(folded_stacks_gz) AS size_bytes FROM flamegraphs
+		)`).Scan(&blobs, &bytes)
+	return blobs, bytes, err
+}
+
+func retainedProfileRunIDs(tx *sql.Tx, retention ProfileRetention) ([]int64, int64, error) {
+	rows, err := tx.Query(`
+		SELECT r.run_id, SUM(length(a.data_blob)) AS size_bytes
+		FROM artifacts a
+		JOIN results r ON r.id = a.result_id
+		JOIN runs ON runs.id = r.run_id
+		WHERE a.kind = 'cpu.pprof'
+		GROUP BY r.run_id
+		HAVING COUNT(*) = (SELECT COUNT(*) FROM results expected WHERE expected.run_id = r.run_id)
+		ORDER BY julianday(runs.run_date) DESC, r.run_id DESC`)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids := make([]int64, 0, retention.MaxRuns)
+	var retainedBytes int64
+	for rows.Next() {
+		var runID, sizeBytes int64
+		if err := rows.Scan(&runID, &sizeBytes); err != nil {
+			return nil, 0, err
+		}
+		if len(ids) >= retention.MaxRuns || sizeBytes > retention.MaxBytes-retainedBytes {
+			break
+		}
+		ids = append(ids, runID)
+		retainedBytes += sizeBytes
+	}
+	return ids, retainedBytes, rows.Err()
+}
+
+func deleteUnretainedProfiles(tx *sql.Tx, retainedRunIDs []int64, preserveIncomplete bool) error {
+	if _, err := tx.Exec(`DELETE FROM flamegraphs`); err != nil {
+		return err
+	}
+
+	runFilter := ""
+	args := make([]any, len(retainedRunIDs))
+	if len(retainedRunIDs) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(retainedRunIDs)), ",")
+		runFilter = " AND run_id NOT IN (" + placeholders + ")"
+		for i, runID := range retainedRunIDs {
+			args[i] = runID
+		}
+	}
+	if preserveIncomplete {
+		runFilter += ` AND run_id IN (
+			SELECT expected.run_id
+			FROM results expected
+			LEFT JOIN artifacts profile
+			  ON profile.result_id = expected.id AND profile.kind = 'cpu.pprof'
+			GROUP BY expected.run_id
+			HAVING COUNT(profile.id) = COUNT(*)
+		)`
+	}
+	if _, err := tx.Exec(`
+		DELETE FROM artifacts
+		WHERE kind = 'cpu.pprof'
+		  AND result_id IN (
+			SELECT id FROM results WHERE 1 = 1`+runFilter+`
+		  )`, args...); err != nil {
+		return err
+	}
+	return nil
+}
+
+func finalizeProfileRun(tx *sql.Tx, runID int64) (bool, error) {
+	var resultCount, profileCount int64
+	if err := tx.QueryRow(`
+		SELECT COUNT(*), COUNT(profile.id)
+		FROM results result
+		LEFT JOIN artifacts profile
+		  ON profile.result_id = result.id AND profile.kind = 'cpu.pprof'
+		WHERE result.run_id = ?`, runID).Scan(&resultCount, &profileCount); err != nil {
+		return false, err
+	}
+	if resultCount == 0 {
+		return false, fmt.Errorf("run %d has no results", runID)
+	}
+	if profileCount == resultCount {
+		return true, nil
+	}
+	_, err := tx.Exec(`
+		DELETE FROM artifacts
+		WHERE kind = 'cpu.pprof'
+		  AND result_id IN (SELECT id FROM results WHERE run_id = ?)`, runID)
+	return false, err
+}
+
+// PruneProfileData preserves compact benchmark summaries while bounding bulky
+// source profiles. Derived SVG artifacts are always removed because they can be
+// regenerated into the bounded filesystem cache.
+func (db *DB) pruneProfileData(retention ProfileRetention, finalizeRunID int64) (ProfileRetentionResult, bool, error) {
+	if retention.MaxRuns <= 0 {
+		return ProfileRetentionResult{}, false, fmt.Errorf("profile retention max runs must be positive")
+	}
+	if retention.MaxBytes <= 0 {
+		return ProfileRetentionResult{}, false, fmt.Errorf("profile retention max bytes must be positive")
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return ProfileRetentionResult{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	beforeBlobs, beforeBytes, err := profileStorageStats(tx)
+	if err != nil {
+		return ProfileRetentionResult{}, false, err
+	}
+	complete := true
+	if finalizeRunID != 0 {
+		complete, err = finalizeProfileRun(tx, finalizeRunID)
+		if err != nil {
+			return ProfileRetentionResult{}, false, err
+		}
+	}
+	retainedRunIDs, _, err := retainedProfileRunIDs(tx, retention)
+	if err != nil {
+		return ProfileRetentionResult{}, false, err
+	}
+	if _, err := tx.Exec(`DELETE FROM artifacts WHERE kind IN ('cpu.flamegraph.svg', 'cpu.callgraph.svg')`); err != nil {
+		return ProfileRetentionResult{}, false, err
+	}
+	if err := deleteUnretainedProfiles(tx, retainedRunIDs, finalizeRunID != 0); err != nil {
+		return ProfileRetentionResult{}, false, err
+	}
+	afterBlobs, afterBytes, err := profileStorageStats(tx)
+	if err != nil {
+		return ProfileRetentionResult{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ProfileRetentionResult{}, false, err
+	}
+	return ProfileRetentionResult{
+		BlobsDeleted:        beforeBlobs - afterBlobs,
+		BytesDeleted:        beforeBytes - afterBytes,
+		ProfileRunsRetained: len(retainedRunIDs),
+		BytesRetained:       afterBytes,
+	}, complete, nil
+}
+
+func (db *DB) PruneProfileData(retention ProfileRetention) (ProfileRetentionResult, error) {
+	result, _, err := db.pruneProfileData(retention, 0)
+	return result, err
+}
+
+// FinalizeProfileData applies retention after a run's uploads. Other incomplete
+// runs are preserved because they may still be uploading concurrently. An
+// incomplete target run is discarded as a unit.
+func (db *DB) FinalizeProfileData(runID int64, retention ProfileRetention) (ProfileRetentionResult, bool, error) {
+	return db.pruneProfileData(retention, runID)
 }
 
 func (db *DB) InsertArtifact(a *Artifact) (int64, error) {

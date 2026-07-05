@@ -58,3 +58,21 @@ func TestRecordRunRejectsAmbiguousLegacyResultKeys(t *testing.T) {
 		t.Fatalf("RecordRun error = %v, want ambiguous legacy key error", err)
 	}
 }
+
+func TestFinalizeArtifactsUsesAuthenticatedRunEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/runs/7/artifacts/finalize" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Errorf("authorization = %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	recorder := &RemoteRecorder{BaseURL: server.URL, APIKey: "secret"}
+	if err := recorder.FinalizeArtifacts(7); err != nil {
+		t.Fatal(err)
+	}
+}

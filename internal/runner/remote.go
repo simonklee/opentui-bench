@@ -199,6 +199,26 @@ func (r *RemoteRecorder) UploadArtifact(runID, resultID int64, artifact Collecte
 	return nil
 }
 
+// FinalizeArtifacts applies server-side retention after a run's complete
+// profile set has been uploaded.
+func (r *RemoteRecorder) FinalizeArtifacts(runID int64) error {
+	u := fmt.Sprintf("%s/api/runs/%d/artifacts/finalize", r.BaseURL, runID)
+	req, err := http.NewRequest(http.MethodPost, u, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	resp, err := r.doRequest(req)
+	if err != nil {
+		return fmt.Errorf("finalize artifacts: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("finalize artifacts: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
 // HasCommit checks whether a commit has already been recorded.
 func (r *RemoteRecorder) HasCommit(commitHashFull string) (bool, error) {
 	req, err := http.NewRequest(http.MethodGet, r.BaseURL+"/api/has-commit/"+commitHashFull, nil)
