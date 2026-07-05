@@ -1228,26 +1228,52 @@ func (s *Server) handleDatabaseDownload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	dbPath := s.db.Path()
+	if s.databaseDownloadSem != nil {
+		select {
+		case s.databaseDownloadSem <- struct{}{}:
+			defer func() { <-s.databaseDownloadSem }()
+		default:
+			http.Error(w, "A database export is already in progress", http.StatusTooManyRequests)
+			return
+		}
+	}
 
-	// Checkpoint WAL for consistency
-	_, _ = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
-
-	f, err := os.Open(dbPath)
+	tmp, err := os.CreateTemp("", "opentui-bench-export-*.db")
 	if err != nil {
-		http.Error(w, "Failed to open database", http.StatusInternalServerError)
+		http.Error(w, "Failed to prepare database export", http.StatusInternalServerError)
+		return
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		http.Error(w, "Failed to prepare database export", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	if err := s.db.Backup(r.Context(), tmpPath); err != nil {
+		if r.Context().Err() == nil {
+			http.Error(w, "Failed to snapshot database", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		http.Error(w, "Failed to open database export", http.StatusInternalServerError)
 		return
 	}
 	defer func() { _ = f.Close() }()
 
 	stat, err := f.Stat()
 	if err != nil {
-		http.Error(w, "Failed to stat database", http.StatusInternalServerError)
+		http.Error(w, "Failed to stat database export", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/x-sqlite3")
 	w.Header().Set("Content-Disposition", `attachment; filename="bench.db"`)
+	w.Header().Set("Cache-Control", "no-store")
 	http.ServeContent(w, r, "bench.db", stat.ModTime(), f)
 }
 

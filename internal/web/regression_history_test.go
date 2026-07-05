@@ -106,6 +106,43 @@ func TestRegressionHistoryCacheIgnoresFutureMainRuns(t *testing.T) {
 	}
 }
 
+func TestRegressionHistoryBatchFingerprintPreservesWarmCacheBehavior(t *testing.T) {
+	database := openRegressionHistoryTestDB(t)
+	server := &Server{db: database}
+	at := time.Date(2026, 2, 20, 10, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		runID := insertRegressionHistoryTestRun(t, database, "main", at.Add(time.Duration(i)*time.Hour), fmt.Sprintf("run-%d", i))
+		insertRegressionHistoryTestResult(t, database, runID, 100_000+int64(i)*100_000)
+	}
+
+	requestHistory := func() regressionHistoryResponse {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/regressions/history?branch=main&limit=3&min_points=2&baseline_offset=0", nil)
+		rec := httptest.NewRecorder()
+		server.handleRegressionsHistory(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d; body=%q", rec.Code, rec.Body.String())
+		}
+		var response regressionHistoryResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		return response
+	}
+
+	first := requestHistory()
+	second := requestHistory()
+	if first.ComputedRuns != 3 || first.CachedRuns != 0 {
+		t.Fatalf("cold history computed=%d cached=%d, want 3/0", first.ComputedRuns, first.CachedRuns)
+	}
+	if second.ComputedRuns != 0 || second.CachedRuns != 3 {
+		t.Fatalf("warm history computed=%d cached=%d, want 0/3", second.ComputedRuns, second.CachedRuns)
+	}
+	if second.ScannedRuns != first.ScannedRuns || second.EntryCount != first.EntryCount {
+		t.Fatalf("warm history changed behavior: first=%+v second=%+v", first, second)
+	}
+}
+
 func TestRegressionsBackfillsSparseBenchmarkHistory(t *testing.T) {
 	database := openRegressionHistoryTestDB(t)
 	server := &Server{db: database}

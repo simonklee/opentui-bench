@@ -139,23 +139,23 @@ const Sidebar: Component = () => {
             <GitBranch size={12} />
             <span>Source</span>
           </a>
-          <button
-            type="button"
-            class="cursor-pointer border-0 bg-transparent p-0 hover:text-black hover:underline"
-            onClick={() => {
-              if (confirm("Download the full SQLite database (~350 MB)?")) {
-                const form = document.createElement("form");
-                form.method = "POST";
-                form.action = "/api/database/download";
-                document.body.appendChild(form);
-                form.submit();
-                form.remove();
+          <form
+            method="post"
+            action="/api/database/download"
+            onSubmit={(event) => {
+              if (!confirm("Download the full SQLite database (currently over 1 GB)?")) {
+                event.preventDefault();
               }
             }}
-            title="Download SQLite database"
           >
-            Export
-          </button>
+            <button
+              type="submit"
+              class="cursor-pointer border-0 bg-transparent p-0 hover:text-black hover:underline"
+              title="Download SQLite database"
+            >
+              Export
+            </button>
+          </form>
           <button
             type="button"
             class="cursor-pointer border-0 bg-transparent p-0 hover:text-black hover:underline"

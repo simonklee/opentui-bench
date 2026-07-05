@@ -182,6 +182,15 @@ func (s *Server) handleRegressionsHistory(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	runIDs := make([]int64, len(runs))
+	for i, run := range runs {
+		runIDs[i] = run.ID
+	}
+	dataFingerprints, err := s.db.RegressionDataFingerprints(runIDs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	generationKey := s.regressionCacheGenerationKey(branch, window, minPoints, baselineOffset, "target-specific")
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -199,11 +208,7 @@ func (s *Server) handleRegressionsHistory(w http.ResponseWriter, r *http.Request
 			BaselineOffset: baselineOffset,
 		}
 
-		dataFingerprint, err := s.db.RegressionDataFingerprint(run.ID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		dataFingerprint := dataFingerprints[run.ID]
 		targetGenerationKey := s.regressionCacheGenerationKey(branch, window, minPoints, baselineOffset, dataFingerprint)
 		cacheEntry, err := s.db.GetRegressionCache(cacheKey, targetGenerationKey)
 		if err != nil {

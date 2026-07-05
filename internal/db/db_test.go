@@ -889,6 +889,49 @@ func TestDeletingBaselineRunInvalidatesRegressionCache(t *testing.T) {
 	}
 }
 
+func TestRegressionDataFingerprintsMatchIndividualFingerprints(t *testing.T) {
+	database := openTestDB(t)
+	runDates := []string{
+		"2026-01-01T00:00:00Z",
+		"2026-01-02T00:00:00Z",
+		"2026-01-02T00:00:00Z",
+		"2026-01-03T00:00:00Z",
+	}
+	runIDs := make([]int64, 0, len(runDates))
+	for i, runDate := range runDates {
+		runID, err := database.InsertRun(&Run{
+			CommitHash: fmt.Sprintf("commit-%d", i),
+			Branch:     "main",
+			RunDate:    runDate,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runIDs = append(runIDs, runID)
+		if i != 1 {
+			insertTestResult(t, database, runID, "render", fmt.Sprintf("frame-%d", i))
+		}
+	}
+
+	targets := []int64{runIDs[3], runIDs[0], runIDs[2], runIDs[2], runIDs[1]}
+	batched, err := database.RegressionDataFingerprints(targets)
+	if err != nil {
+		t.Fatalf("batch fingerprints: %v", err)
+	}
+	if len(batched) != len(runIDs) {
+		t.Fatalf("batch returned %d fingerprints, want %d", len(batched), len(runIDs))
+	}
+	for _, runID := range runIDs {
+		individual, err := database.RegressionDataFingerprint(runID)
+		if err != nil {
+			t.Fatalf("individual fingerprint for run %d: %v", runID, err)
+		}
+		if batched[runID] != individual {
+			t.Errorf("run %d batch fingerprint = %q, want %q", runID, batched[runID], individual)
+		}
+	}
+}
+
 func TestOpenDropsObsoleteDFKeyedRegressionCache(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old-cache.db")
 	raw, err := sql.Open("sqlite", path)

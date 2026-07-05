@@ -3,6 +3,7 @@ package db
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -14,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 )
 
 func timeNow() string {
@@ -157,6 +158,48 @@ type DB struct {
 
 func (db *DB) Path() string {
 	return db.path
+}
+
+// Backup writes a consistent online backup without buffering the database in
+// memory. A separate read connection keeps normal API traffic responsive.
+func (db *DB) Backup(ctx context.Context, destination string) error {
+	source, err := sql.Open("sqlite", "file:"+filepath.ToSlash(db.path)+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return fmt.Errorf("open backup source: %w", err)
+	}
+	defer func() { _ = source.Close() }()
+
+	conn, err := source.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire backup connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	type backuper interface {
+		NewBackup(string) (*sqlite.Backup, error)
+	}
+	return conn.Raw(func(driverConn any) error {
+		driverBackuper, ok := driverConn.(backuper)
+		if !ok {
+			return errors.New("sqlite driver does not support online backup")
+		}
+		backup, err := driverBackuper.NewBackup(destination)
+		if err != nil {
+			return fmt.Errorf("start online backup: %w", err)
+		}
+		for {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(err, backup.Finish())
+			}
+			more, err := backup.Step(1024)
+			if err != nil {
+				return errors.Join(fmt.Errorf("copy online backup: %w", err), backup.Finish())
+			}
+			if !more {
+				return backup.Finish()
+			}
+		}
+	})
 }
 
 func Open(dbPath string) (*DB, error) {
@@ -1141,6 +1184,129 @@ func (db *DB) RegressionDataFingerprint(runID int64) (fingerprint string, err er
 		return "", err
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// RegressionDataFingerprints computes target-specific fingerprints with one
+// causally ordered scan of the run history.
+func (db *DB) RegressionDataFingerprints(runIDs []int64) (fingerprints map[int64]string, err error) {
+	fingerprints = make(map[int64]string, len(runIDs))
+	if len(runIDs) == 0 {
+		return fingerprints, nil
+	}
+
+	uniqueIDs := make([]int64, 0, len(runIDs))
+	seen := make(map[int64]struct{}, len(runIDs))
+	for _, runID := range runIDs {
+		if _, ok := seen[runID]; ok {
+			continue
+		}
+		seen[runID] = struct{}{}
+		uniqueIDs = append(uniqueIDs, runID)
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(uniqueIDs)), ",")
+	args := make([]any, len(uniqueIDs))
+	for i, runID := range uniqueIDs {
+		args[i] = runID
+	}
+	targetRows, err := db.Query(`
+		SELECT id, run_date, julianday(run_date) IS NOT NULL
+		FROM runs
+		WHERE id IN (`+placeholders+`)
+		ORDER BY julianday(run_date), id`, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	targets := make(map[int64]struct{}, len(uniqueIDs))
+	emptyHash := sha256.Sum256(nil)
+	var maxRunID int64
+	var maxRunDate string
+	for targetRows.Next() {
+		var runID int64
+		var runDate string
+		var validDate bool
+		if err := targetRows.Scan(&runID, &runDate, &validDate); err != nil {
+			_ = targetRows.Close()
+			return nil, err
+		}
+		targets[runID] = struct{}{}
+		if !validDate {
+			fingerprints[runID] = hex.EncodeToString(emptyHash[:])
+			continue
+		}
+		maxRunID = runID
+		maxRunDate = runDate
+	}
+	if err := targetRows.Err(); err != nil {
+		_ = targetRows.Close()
+		return nil, err
+	}
+	if err := targetRows.Close(); err != nil {
+		return nil, err
+	}
+	if len(targets) != len(uniqueIDs) {
+		return nil, sql.ErrNoRows
+	}
+	if maxRunDate == "" {
+		return fingerprints, nil
+	}
+
+	rows, err := db.Query(`
+		SELECT ru.id, ru.commit_hash, COALESCE(ru.commit_hash_full, ''),
+		       COALESCE(ru.commit_message, ''), COALESCE(ru.commit_date, ''),
+		       COALESCE(ru.branch, ''), ru.run_date, COALESCE(ru.machine_id, ''),
+		       COALESCE(ru.notes, ''), COALESCE(ru.zig_optimize, ''),
+		       r.id, r.category, r.name, r.avg_ns, r.std_dev_ns, r.sample_count
+		FROM runs ru
+		LEFT JOIN results r ON r.run_id = ru.id
+		WHERE julianday(ru.run_date) < julianday(?)
+		   OR (julianday(ru.run_date) = julianday(?) AND ru.id <= ?)
+		ORDER BY julianday(ru.run_date), ru.id, r.category, r.name, r.id`,
+		maxRunDate, maxRunDate, maxRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	hash := sha256.New()
+	var previousRunID int64
+	for rows.Next() {
+		var sourceRunID int64
+		var commitHash, commitHashFull, commitMessage, commitDate, branch, runDate, machineID, notes, zigOptimize string
+		var resultID, avgNs, stdDevNs, sampleCount sql.NullInt64
+		var category, name sql.NullString
+		if err := rows.Scan(
+			&sourceRunID, &commitHash, &commitHashFull, &commitMessage, &commitDate,
+			&branch, &runDate, &machineID, &notes, &zigOptimize,
+			&resultID, &category, &name, &avgNs, &stdDevNs, &sampleCount,
+		); err != nil {
+			return nil, err
+		}
+		if previousRunID != 0 && sourceRunID != previousRunID {
+			if _, ok := targets[previousRunID]; ok {
+				fingerprints[previousRunID] = hex.EncodeToString(hash.Sum(nil))
+			}
+		}
+		_, _ = fmt.Fprintf(hash, "%d:%q:%q:%q:%q:%q:%q:%q:%q:%q:%d:%q:%q:%d:%d:%d\n",
+			sourceRunID, commitHash, commitHashFull, commitMessage, commitDate, branch, runDate, machineID, notes, zigOptimize,
+			resultID.Int64, category.String, name.String, avgNs.Int64, stdDevNs.Int64, sampleCount.Int64)
+		previousRunID = sourceRunID
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if _, ok := targets[previousRunID]; ok {
+		fingerprints[previousRunID] = hex.EncodeToString(hash.Sum(nil))
+	}
+	if len(fingerprints) != len(uniqueIDs) {
+		return nil, fmt.Errorf("fingerprint scan resolved %d of %d target runs", len(fingerprints), len(uniqueIDs))
+	}
+	return fingerprints, nil
 }
 
 func (db *DB) InsertFlamegraph(fg *Flamegraph) error {

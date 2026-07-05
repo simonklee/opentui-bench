@@ -22,12 +22,13 @@ import (
 var staticFiles embed.FS
 
 type Server struct {
-	db            *db.DB
-	addr          string
-	apiKey        string
-	svgCache      *cache.SVGCache
-	flamegraphSem chan struct{}
-	pprofManager  *PProfManager
+	db                  *db.DB
+	addr                string
+	apiKey              string
+	svgCache            *cache.SVGCache
+	flamegraphSem       chan struct{}
+	databaseDownloadSem chan struct{}
+	pprofManager        *PProfManager
 }
 
 func NewServer(database *db.DB, addr string) (*Server, error) {
@@ -60,12 +61,13 @@ func NewServer(database *db.DB, addr string) (*Server, error) {
 	}
 
 	return &Server{
-		db:            database,
-		addr:          addr,
-		apiKey:        os.Getenv("BENCH_API_KEY"),
-		svgCache:      svgCache,
-		flamegraphSem: make(chan struct{}, maxConcurrency),
-		pprofManager:  NewPProfManager(),
+		db:                  database,
+		addr:                addr,
+		apiKey:              os.Getenv("BENCH_API_KEY"),
+		svgCache:            svgCache,
+		flamegraphSem:       make(chan struct{}, maxConcurrency),
+		databaseDownloadSem: make(chan struct{}, 1),
+		pprofManager:        NewPProfManager(),
 	}, nil
 }
 
