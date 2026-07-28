@@ -250,8 +250,11 @@ run_benchmarks() {
 	git fetch origin
 
 	# Ask the API for the latest recorded commit
-	local latest_recorded
-	latest_recorded=$(curl -s "$API_URL/api/latest-commit?branch=main" | jq -r '.commit_hash_full // empty | select(. != "null")')
+	local latest_response latest_recorded
+	latest_response=$(curl --fail --silent --show-error --max-time 120 \
+		"$API_URL/api/latest-commit?branch=main")
+	latest_recorded=$(jq -er 'if has("commit_hash_full") then (.commit_hash_full // "") else error("missing commit_hash_full") end' \
+		<<<"$latest_response")
 
 	local commits
 	if [[ -n "$latest_recorded" ]] && git cat-file -e "$latest_recorded" 2>/dev/null; then
