@@ -207,7 +207,11 @@ func (r *RemoteRecorder) FinalizeArtifacts(runID int64) error {
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
-	resp, err := r.doRequest(req)
+	finalizer := *r
+	if finalizer.Client == nil {
+		finalizer.Client = &http.Client{Timeout: 5 * time.Minute}
+	}
+	resp, err := finalizer.doRequest(req)
 	if err != nil {
 		return fmt.Errorf("finalize artifacts: %w", err)
 	}
