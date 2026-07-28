@@ -15,5 +15,11 @@ jobs:
           key: ${{ secrets.BENCH_SSH_KEY }}
           script: |
             systemctl --user restart opentui-bench-worker.service
+            sleep 15
+            if ! systemctl --user is-active --quiet opentui-bench-worker.service; then
+              systemctl --user --no-pager --full status opentui-bench-worker.service
+              journalctl --user -u opentui-bench-worker.service --no-pager -n 100
+              exit 1
+            fi
             systemctl --user --no-pager --full status opentui-bench-worker.service
           timeout: 30s

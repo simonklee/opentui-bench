@@ -259,6 +259,27 @@ func aggregateSamples(category, name string, sampleList []sample) *db.Result {
 		}
 	}
 
+	untimed := true
+	for _, s := range sampleList {
+		if s.minNs != 0 || s.avgNs != 0 || s.maxNs != 0 || s.totalNs != 0 {
+			untimed = false
+			break
+		}
+	}
+	if untimed {
+		var iterations int64
+		for _, s := range sampleList {
+			iterations += s.iterations
+		}
+		return &db.Result{
+			Category:       category,
+			Name:           name,
+			Iterations:     iterations,
+			SampleCount:    int64(n),
+			SummaryVersion: db.CurrentSummaryVersion,
+		}
+	}
+
 	if n == 1 {
 		s := sampleList[0]
 		return &db.Result{

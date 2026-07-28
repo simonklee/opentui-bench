@@ -5,7 +5,7 @@
   "module": "index.ts",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && bun --bun vite build",
     "serve": "vite preview",
     "fmt": "oxfmt --write .",
     "fmt:check": "oxfmt --check .",

@@ -43,3 +43,17 @@ func TestSampleVariancePreservesFractionalPrecision(t *testing.T) {
 		t.Fatalf("stddev/variance = %d/%v", result.StdDevNs, result.SampleAvgVarianceNs2)
 	}
 }
+
+func TestAggregateSamplesDoesNotStoreUntimedRawSamples(t *testing.T) {
+	result := aggregateSamples("cat", "memory only", []sample{
+		{iterations: 10},
+		{index: 1, iterations: 10},
+		{index: 2, iterations: 10},
+	})
+	if result.AvgNs != 0 || result.Iterations != 30 || result.SampleCount != 3 {
+		t.Fatalf("untimed summary = %+v", result)
+	}
+	if result.SampleDataVersion != 0 || len(result.Samples) != 0 {
+		t.Fatalf("untimed raw samples = version %d, samples %+v", result.SampleDataVersion, result.Samples)
+	}
+}
