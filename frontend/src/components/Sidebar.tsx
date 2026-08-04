@@ -1,8 +1,9 @@
-import { createResource } from "solid-js";
+import { createResource, Show } from "solid-js";
 import type { Component } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 import { api } from "../services/api";
-import { lastViewedRunId, isSidebarExpanded, setIsSidebarExpanded } from "../store";
+import { benchmarkKind, lastViewedRunId, isSidebarExpanded, setIsSidebarExpanded } from "../store";
+import BenchmarkKindSelector from "./BenchmarkKindSelector";
 import { toggleHelp } from "../shortcuts";
 import {
   LayoutDashboard,
@@ -18,7 +19,7 @@ import {
 const Sidebar: Component = () => {
   const location = useLocation();
   const navigate = useNavigate();
-  const [runs] = createResource(() => api.getRuns(1));
+  const [runs] = createResource(benchmarkKind, (kind) => api.getRuns(1, kind));
 
   const navItemClass =
     "nav-item flex w-full items-center border-0 bg-transparent p-3 text-left text-[13px] font-medium transition-all duration-150 cursor-pointer text-text-muted hover:text-black group border-r-2 border-transparent hover:bg-bg-hover";
@@ -31,7 +32,7 @@ const Sidebar: Component = () => {
   const handleBenchmarksClick = () => {
     const id = lastViewedRunId() || (runs() && runs()![0]?.id);
     if (id) {
-      navigate(`/benchmarks/${id}`);
+      navigate(`/benchmarks/${id}?benchmark_kind=${benchmarkKind()}`);
     }
   };
 
@@ -39,9 +40,9 @@ const Sidebar: Component = () => {
     const currentRunId = lastViewedRunId();
     if (currentRunId) {
       // Pre-select the current run as "current" in compare
-      navigate(`/compare?curr=${currentRunId}`);
+      navigate(`/compare?benchmark_kind=${benchmarkKind()}&curr=${currentRunId}`);
     } else {
-      navigate("/compare");
+      navigate(`/compare?benchmark_kind=${benchmarkKind()}`);
     }
   };
 
@@ -53,7 +54,9 @@ const Sidebar: Component = () => {
         <button
           type="button"
           class={`border-0 bg-transparent p-0 text-left font-mono font-bold text-black text-[14px] flex items-center cursor-pointer overflow-hidden whitespace-nowrap transition-all duration-300 ${isSidebarExpanded() ? "max-w-[200px] opacity-100" : "max-w-0 opacity-0"}`}
-          onClick={() => navigate("/")}
+          onClick={() =>
+            navigate(benchmarkKind() === "zig" ? "/" : `/runs?benchmark_kind=${benchmarkKind()}`)
+          }
         >
           <Activity size={20} class="flex-shrink-0 mr-2" />
           <span class="tracking-widest text-[12px]">OpenTUI Bench</span>
@@ -68,24 +71,28 @@ const Sidebar: Component = () => {
         </button>
       </div>
 
+      <BenchmarkKindSelector />
+
       <div class="py-4 flex flex-col gap-1 flex-1">
-        <button
-          type="button"
-          class={`${navItemClass} ${isSidebarExpanded() ? "" : "justify-center"} ${location.pathname === "/" ? activeClass + " active" : ""}`}
-          onClick={() => navigate("/")}
-          title={!isSidebarExpanded() ? "Regressions" : ""}
-        >
-          <Activity
-            size={18}
-            strokeWidth={2}
-            class="opacity-70 group-[.active]:opacity-100 flex-shrink-0"
-          />
-          <span class={labelClass()}>REGRESSIONS</span>
-        </button>
+        <Show when={benchmarkKind() === "zig"}>
+          <button
+            type="button"
+            class={`${navItemClass} ${isSidebarExpanded() ? "" : "justify-center"} ${location.pathname === "/" ? activeClass + " active" : ""}`}
+            onClick={() => navigate("/")}
+            title={!isSidebarExpanded() ? "Regressions" : ""}
+          >
+            <Activity
+              size={18}
+              strokeWidth={2}
+              class="opacity-70 group-[.active]:opacity-100 flex-shrink-0"
+            />
+            <span class={labelClass()}>REGRESSIONS</span>
+          </button>
+        </Show>
         <button
           type="button"
           class={`${navItemClass} ${isSidebarExpanded() ? "" : "justify-center"} ${location.pathname === "/runs" ? activeClass + " active" : ""}`}
-          onClick={() => navigate("/runs")}
+          onClick={() => navigate(`/runs?benchmark_kind=${benchmarkKind()}`)}
           title={!isSidebarExpanded() ? "Runs" : ""}
         >
           <List

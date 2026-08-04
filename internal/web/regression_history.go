@@ -129,6 +129,10 @@ type regressionHistoryResponse struct {
 }
 
 func (s *Server) handleRegressionsHistory(w http.ResponseWriter, r *http.Request) {
+	if kind := r.URL.Query().Get("benchmark_kind"); kind != "" && kind != "zig" {
+		http.Error(w, "regression analysis is available only for Zig benchmarks", http.StatusBadRequest)
+		return
+	}
 	if raw := r.URL.Query().Get("method"); raw != "" {
 		http.Error(w, "method parameter is no longer supported", http.StatusBadRequest)
 		return
@@ -177,7 +181,7 @@ func (s *Server) handleRegressionsHistory(w http.ResponseWriter, r *http.Request
 		limit = maxRegressionHistoryLimit
 	}
 
-	runs, err := s.db.ListRunsForBranch(branch, limit)
+	runs, err := s.db.ListRunsForBranchFiltered(branch, limit, db.RunFilter{BenchmarkKind: "zig"})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

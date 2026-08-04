@@ -174,7 +174,7 @@ const RegressionTable: Component<{ regressions: RegressionWithContext[] }> = (pr
 
 const Regressions: Component = () => {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [branches] = createResource(() => api.getBranches());
+  const [branches] = createResource(() => api.getBranches("zig"));
   const branch = (): string => {
     const b = searchParams.branch;
     if (Array.isArray(b)) return b[0] || "main";

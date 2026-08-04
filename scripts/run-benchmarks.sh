@@ -45,6 +45,9 @@ readonly BENCH_REPO="$REPOS_DIR/opentui-bench"
 readonly OPENTUI_REPO="$REPOS_DIR/opentui"
 readonly LOG_FILE="$HOME/benchmark.log"
 readonly ALERT_STATE_FILE="$HOME/.cache/opentui-bench/last-alert"
+readonly JS_BENCHMARK_SUITE="core-default"
+readonly JS_PROTOCOL_VERSION=1
+readonly JS_MANIFEST_HASH="sha256:0fa487783682b1227bfd4bf735fe1a969ea03f045bb8a68f87c1e41174cb3794"
 
 # API configuration - set these as environment variables
 : "${API_URL:=https://opentui-bench.fly.dev}"
@@ -310,6 +313,82 @@ run_benchmarks() {
 	log "Benchmark run complete for ${next_commit:0:7}"
 }
 
+schedule_javascript_main_job() {
+	cd "$OPENTUI_REPO"
+
+	local jobs_response automatic_jobs
+	jobs_response=$(curl --fail --silent --show-error --max-time 120 \
+		"$API_URL/api/jobs?branch=main&limit=1000000")
+	automatic_jobs=$(jq -ce --arg suite "$JS_BENCHMARK_SUITE" --arg manifest "$JS_MANIFEST_HASH" \
+		--argjson protocol "$JS_PROTOCOL_VERSION" '
+		[.[] | select(
+			.requested_by == "automatic" and
+			.benchmark_kind == "js" and
+			.benchmark_suite == $suite and
+			.protocol_version == $protocol and
+			.manifest_hash == $manifest
+		)]' <<<"$jobs_response")
+
+	# Do not queue ahead of an existing attempt or create a duplicate for it.
+	if jq -e 'any(.[]; .status != "completed" and .status != "failed")' <<<"$automatic_jobs" >/dev/null; then
+		info "Automatic JavaScript benchmark job is already outstanding"
+		return 0
+	fi
+
+	local terminal_commits latest_attempt="" next_commit=""
+	terminal_commits=$(jq -r '.[] | select(.status == "completed" or .status == "failed") | .commit_hash | select(length > 0)' \
+		<<<"$automatic_jobs")
+	if [[ -n "$terminal_commits" ]]; then
+		while IFS= read -r commit; do
+			if grep -Fxq "$commit" <<<"$terminal_commits"; then
+				latest_attempt="$commit"
+				break
+			fi
+		done < <(git rev-list origin/main)
+	fi
+
+	if [[ -n "$latest_attempt" ]]; then
+		next_commit=$(git rev-list --reverse "${latest_attempt}..origin/main" | sed -n '1p')
+	else
+		next_commit=$(git rev-parse origin/main)
+	fi
+	if [[ -z "$next_commit" ]]; then
+		info "JavaScript main history is caught up"
+		return 0
+	fi
+
+	did_work=true
+	if $dry_run; then
+		log "Dry run: would queue automatic JavaScript benchmark for ${next_commit:0:7}"
+		return 0
+	fi
+
+	local payload
+	payload=$(jq -cn \
+		--arg branch main \
+		--arg commit_hash "$next_commit" \
+		--arg suite "$JS_BENCHMARK_SUITE" \
+		--arg manifest "$JS_MANIFEST_HASH" \
+		--argjson protocol "$JS_PROTOCOL_VERSION" '
+		{
+			branch: $branch,
+			commit_hash: $commit_hash,
+			benchmark_kind: "js",
+			benchmark_suite: $suite,
+			protocol_version: $protocol,
+			manifest_hash: $manifest,
+			samples: 3,
+			profile: "none",
+			requested_by: "automatic"
+		}')
+	curl --fail --silent --show-error --max-time 120 \
+		-X POST "$API_URL/api/jobs" \
+		-H "Authorization: Bearer $API_KEY" \
+		-H 'Content-Type: application/json' \
+		--data "$payload" >/dev/null
+	log "Queued automatic JavaScript benchmark for ${next_commit:0:7}"
+}
+
 run_queued_jobs() {
 	log "Checking for queued jobs..."
 	cd "$BENCH_REPO"
@@ -413,6 +492,7 @@ main() {
 	while true; do
 		did_work=false
 		run_benchmarks
+		schedule_javascript_main_job
 		run_queued_jobs
 
 		if ! $daemon_mode; then

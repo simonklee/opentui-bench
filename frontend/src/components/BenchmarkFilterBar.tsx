@@ -1,13 +1,17 @@
 import { For, Show } from "solid-js";
 import type { Component } from "solid-js";
 import { Button } from "./Button";
+import RunIdentity from "./RunIdentity";
+import type { RunIdentity as RunIdentityData } from "../services/api";
 
 interface BenchmarkFilterBarProps {
-  run?: {
-    commit_hash: string;
-    commit_message: string;
-    branch?: string;
-  } | null;
+  run?:
+    | (RunIdentityData & {
+        commit_hash: string;
+        commit_message: string;
+        branch?: string;
+      })
+    | null;
   filter: string;
   setFilter: (v: string) => void;
   category: string;
@@ -51,8 +55,11 @@ const BenchmarkFilterBar: Component<BenchmarkFilterBarProps> = (props) => {
           )}
         </h2>
         {showRunInfo() && props.run && (
-          <div class="text-[11px] text-text-muted font-mono truncate hidden md:block max-w-[400px]">
-            {props.run.commit_message}
+          <div class="hidden md:flex flex-col gap-1 max-w-[720px]">
+            <div class="text-[11px] text-text-muted font-mono truncate max-w-[400px]">
+              {props.run.commit_message}
+            </div>
+            <RunIdentity identity={props.run} compact />
           </div>
         )}
       </div>

@@ -12,12 +12,22 @@ CREATE TABLE IF NOT EXISTS runs (
     run_date TEXT NOT NULL,
     machine_id TEXT,
     notes TEXT,
-    zig_optimize TEXT DEFAULT 'ReleaseFast'
+    zig_optimize TEXT DEFAULT 'ReleaseFast',
+    benchmark_kind TEXT NOT NULL DEFAULT 'zig',
+    benchmark_suite TEXT NOT NULL DEFAULT 'core-default',
+    protocol_version INTEGER NOT NULL DEFAULT 1,
+    bun_version TEXT NOT NULL DEFAULT '',
+    zig_version TEXT NOT NULL DEFAULT '',
+    manifest_hash TEXT NOT NULL DEFAULT '',
+    manifest_json TEXT NOT NULL DEFAULT '',
+    idempotency_key TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_commit ON runs(commit_hash);
 CREATE INDEX IF NOT EXISTS idx_runs_date ON runs(run_date);
 CREATE INDEX IF NOT EXISTS idx_runs_branch ON runs(branch);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idempotency_key ON runs(idempotency_key)
+    WHERE idempotency_key IS NOT NULL AND idempotency_key <> '';
 
 -- Individual benchmark results within a run
 -- When sample_count > 1, statistics are computed from multiple benchmark invocations
@@ -61,7 +71,19 @@ CREATE TABLE IF NOT EXISTS result_samples (
     result_id INTEGER NOT NULL REFERENCES results(id) ON DELETE CASCADE,
     sample_index INTEGER NOT NULL,
     avg_ns INTEGER NOT NULL CHECK (avg_ns > 0),
+    inner_rsd_ppm INTEGER CHECK (inner_rsd_ppm >= 0),
     PRIMARY KEY (result_id, sample_index)
+);
+
+CREATE TABLE IF NOT EXISTS result_sample_batches (
+    result_id INTEGER NOT NULL,
+    sample_index INTEGER NOT NULL,
+    batch_index INTEGER NOT NULL,
+    elapsed_ns INTEGER NOT NULL CHECK (elapsed_ns > 0),
+    iterations INTEGER NOT NULL CHECK (iterations > 0),
+    PRIMARY KEY (result_id, sample_index, batch_index),
+    FOREIGN KEY (result_id, sample_index)
+        REFERENCES result_samples(result_id, sample_index) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS flamegraphs (
@@ -100,7 +122,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     completed_at TEXT,
     error TEXT,
     run_id INTEGER REFERENCES runs(id),
-    requested_by TEXT
+    requested_by TEXT,
+    benchmark_kind TEXT NOT NULL DEFAULT 'zig',
+    benchmark_suite TEXT NOT NULL DEFAULT 'core-default',
+    protocol_version INTEGER NOT NULL DEFAULT 1,
+    manifest_hash TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
@@ -150,8 +176,16 @@ SELECT
     ru.branch,
     ru.run_date,
     ru.machine_id,
-    ru.notes
+    ru.notes,
+    ru.zig_optimize,
+    ru.benchmark_kind,
+    ru.benchmark_suite,
+    ru.protocol_version,
+    ru.bun_version,
+    ru.zig_version,
+    ru.manifest_hash,
+    ru.manifest_json
 FROM results r
 JOIN runs ru ON r.run_id = ru.id;
 
-PRAGMA user_version = 5;
+PRAGMA user_version = 6;

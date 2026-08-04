@@ -40,6 +40,29 @@ func TestCreateRunOldClientStoresLegacyProvenance(t *testing.T) {
 	}
 }
 
+func TestCreateZigRunValidatesTimedOrUntimedShape(t *testing.T) {
+	server, _ := newAPIStorageServer(t)
+	for _, test := range []struct {
+		name   string
+		result string
+		want   int
+	}{
+		{"timed", `{"category":"cat","name":"timed","min_ns":1,"avg_ns":2,"max_ns":3,"total_ns":2,"iterations":1,"sample_count":1}`, http.StatusCreated},
+		{"untimed", `{"category":"cat","name":"untimed","iterations":10,"sample_count":3}`, http.StatusCreated},
+		{"mixed", `{"category":"cat","name":"mixed","avg_ns":2,"iterations":1,"sample_count":1}`, http.StatusBadRequest},
+		{"negative", `{"category":"cat","name":"negative","iterations":-1}`, http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			body := `{"commit_hash":"` + test.name + `","results":[` + test.result + `]}`
+			server.handleCreateRun(recorder, httptest.NewRequest(http.MethodPost, "/api/runs", strings.NewReader(body)))
+			if recorder.Code != test.want {
+				t.Fatalf("status = %d, want %d: %s", recorder.Code, test.want, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestCreateRunRollsBackCompleteRequest(t *testing.T) {
 	database, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

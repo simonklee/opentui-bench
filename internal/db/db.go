@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"modernc.org/sqlite"
 )
@@ -33,11 +34,21 @@ CREATE TABLE IF NOT EXISTS runs (
     run_date TEXT NOT NULL,
     machine_id TEXT,
     notes TEXT,
-    zig_optimize TEXT DEFAULT 'ReleaseFast'
+    zig_optimize TEXT DEFAULT 'ReleaseFast',
+    benchmark_kind TEXT NOT NULL DEFAULT 'zig',
+    benchmark_suite TEXT NOT NULL DEFAULT 'core-default',
+    protocol_version INTEGER NOT NULL DEFAULT 1,
+    bun_version TEXT NOT NULL DEFAULT '',
+    zig_version TEXT NOT NULL DEFAULT '',
+    manifest_hash TEXT NOT NULL DEFAULT '',
+    manifest_json TEXT NOT NULL DEFAULT '',
+    idempotency_key TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_commit ON runs(commit_hash);
 CREATE INDEX IF NOT EXISTS idx_runs_date ON runs(run_date);
 CREATE INDEX IF NOT EXISTS idx_runs_branch ON runs(branch);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idempotency_key ON runs(idempotency_key)
+    WHERE idempotency_key IS NOT NULL AND idempotency_key <> '';
 
 CREATE TABLE IF NOT EXISTS results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,7 +87,19 @@ CREATE TABLE IF NOT EXISTS result_samples (
     result_id INTEGER NOT NULL REFERENCES results(id) ON DELETE CASCADE,
     sample_index INTEGER NOT NULL,
     avg_ns INTEGER NOT NULL CHECK (avg_ns > 0),
+    inner_rsd_ppm INTEGER CHECK (inner_rsd_ppm >= 0),
     PRIMARY KEY (result_id, sample_index)
+);
+
+CREATE TABLE IF NOT EXISTS result_sample_batches (
+    result_id INTEGER NOT NULL,
+    sample_index INTEGER NOT NULL,
+    batch_index INTEGER NOT NULL,
+    elapsed_ns INTEGER NOT NULL CHECK (elapsed_ns > 0),
+    iterations INTEGER NOT NULL CHECK (iterations > 0),
+    PRIMARY KEY (result_id, sample_index, batch_index),
+    FOREIGN KEY (result_id, sample_index)
+        REFERENCES result_samples(result_id, sample_index) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS flamegraphs (
@@ -115,7 +138,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     completed_at  TEXT,
     error         TEXT,
     run_id        INTEGER REFERENCES runs(id),
-    requested_by  TEXT
+    requested_by  TEXT,
+    benchmark_kind TEXT NOT NULL DEFAULT 'zig',
+    benchmark_suite TEXT NOT NULL DEFAULT 'core-default',
+    protocol_version INTEGER NOT NULL DEFAULT 1,
+    manifest_hash TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
@@ -141,12 +168,14 @@ SELECT r.id AS result_id, r.category, r.name, r.min_ns, r.avg_ns, r.max_ns,
        r.std_dev_ns, r.p50_ns, r.p95_ns, r.p99_ns, r.total_ns, r.iterations,
        r.sample_count, r.sample_avg_variance_ns2, r.sample_data_version,
        r.summary_version, ru.id AS run_id, ru.commit_hash, ru.commit_hash_full,
-       ru.commit_message, ru.commit_date, ru.branch, ru.run_date, ru.machine_id, ru.notes
+       ru.commit_message, ru.commit_date, ru.branch, ru.run_date, ru.machine_id, ru.notes,
+       ru.zig_optimize, ru.benchmark_kind, ru.benchmark_suite, ru.protocol_version,
+       ru.bun_version, ru.zig_version, ru.manifest_hash, ru.manifest_json
 FROM results r JOIN runs ru ON r.run_id = ru.id;
 `
 
 const (
-	CurrentSchemaVersion     = 5
+	CurrentSchemaVersion     = 6
 	CurrentSampleDataVersion = 1
 	CurrentSummaryVersion    = 2
 	DefaultProfileRunsMax    = 256
@@ -307,16 +336,86 @@ type oldFlamegraph struct {
 }
 
 type Run struct {
-	ID             int64
-	CommitHash     string
-	CommitHashFull string
-	CommitMessage  string
-	CommitDate     string
-	Branch         string
-	RunDate        string
-	MachineID      string
-	Notes          string
-	ZigOptimize    string
+	ID              int64
+	CommitHash      string
+	CommitHashFull  string
+	CommitMessage   string
+	CommitDate      string
+	Branch          string
+	RunDate         string
+	MachineID       string
+	Notes           string
+	ZigOptimize     string
+	BenchmarkKind   string
+	BenchmarkSuite  string
+	ProtocolVersion int64
+	BunVersion      string
+	ZigVersion      string
+	ManifestHash    string
+	ManifestJSON    string
+}
+
+// RunFilter selects one benchmark cohort. Empty fields are unconstrained.
+type RunFilter struct {
+	BenchmarkKind   string
+	BenchmarkSuite  string
+	ProtocolVersion int64
+	BunVersion      string
+	ZigVersion      string
+	ManifestHash    string
+	MachineID       string
+	ZigOptimize     string
+}
+
+func appendRunFilter(query string, args []interface{}, alias string, filter RunFilter) (string, []interface{}) {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	fields := []struct {
+		name  string
+		value string
+	}{
+		{"benchmark_kind", filter.BenchmarkKind},
+		{"benchmark_suite", filter.BenchmarkSuite},
+		{"bun_version", filter.BunVersion},
+		{"zig_version", filter.ZigVersion},
+		{"manifest_hash", filter.ManifestHash},
+		{"machine_id", filter.MachineID},
+		{"zig_optimize", filter.ZigOptimize},
+	}
+	for _, field := range fields {
+		if field.value != "" {
+			query += " AND " + prefix + field.name + " = ?"
+			args = append(args, field.value)
+		}
+	}
+	if filter.ProtocolVersion > 0 {
+		query += " AND " + prefix + "protocol_version = ?"
+		args = append(args, filter.ProtocolVersion)
+	}
+	return query, args
+}
+
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRun(s scanner, run *Run) error {
+	var commitHashFull, commitMessage, commitDate, branch, machineID, notes, zigOptimize sql.NullString
+	if err := s.Scan(&run.ID, &run.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branch,
+		&run.RunDate, &machineID, &notes, &zigOptimize, &run.BenchmarkKind, &run.BenchmarkSuite,
+		&run.ProtocolVersion, &run.BunVersion, &run.ZigVersion, &run.ManifestHash, &run.ManifestJSON); err != nil {
+		return err
+	}
+	run.CommitHashFull = commitHashFull.String
+	run.CommitMessage = commitMessage.String
+	run.CommitDate = commitDate.String
+	run.Branch = branch.String
+	run.MachineID = machineID.String
+	run.Notes = notes.String
+	run.ZigOptimize = zigOptimize.String
+	return nil
 }
 
 type BenchmarkKey struct {
@@ -363,9 +462,19 @@ type Result struct {
 }
 
 type ResultSample struct {
+	ResultID    int64               `json:"-"`
+	SampleIndex int64               `json:"sample_index"`
+	AvgNs       int64               `json:"avg_ns"`
+	InnerRSDPPM *int64              `json:"inner_rsd_ppm,omitempty"`
+	Batches     []ResultSampleBatch `json:"batches,omitempty"`
+}
+
+type ResultSampleBatch struct {
 	ResultID    int64 `json:"-"`
-	SampleIndex int64 `json:"sample_index"`
-	AvgNs       int64 `json:"avg_ns"`
+	SampleIndex int64 `json:"-"`
+	BatchIndex  int64 `json:"batch_index"`
+	ElapsedNs   int64 `json:"elapsed_ns"`
+	Iterations  int64 `json:"iterations"`
 }
 
 type MemStat struct {
@@ -407,15 +516,34 @@ func gzipDecompress(data []byte) ([]byte, error) {
 }
 
 func (db *DB) InsertRun(run *Run) (int64, error) {
+	normalizeRunIdentity(run)
 	res, err := db.Exec(`
-		INSERT INTO runs (commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO runs (commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
+			benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.CommitHash, run.CommitHashFull, run.CommitMessage, run.CommitDate,
-		run.Branch, run.RunDate, run.MachineID, run.Notes, run.ZigOptimize)
+		run.Branch, run.RunDate, run.MachineID, run.Notes, run.ZigOptimize,
+		run.BenchmarkKind, run.BenchmarkSuite, run.ProtocolVersion, run.BunVersion,
+		run.ZigVersion, run.ManifestHash, run.ManifestJSON)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+func normalizeRunIdentity(run *Run) {
+	if run.ZigOptimize == "" {
+		run.ZigOptimize = "ReleaseFast"
+	}
+	if run.BenchmarkKind == "" {
+		run.BenchmarkKind = "zig"
+	}
+	if run.BenchmarkSuite == "" {
+		run.BenchmarkSuite = "core-default"
+	}
+	if run.ProtocolVersion == 0 {
+		run.ProtocolVersion = 1
+	}
 }
 
 func (db *DB) InsertResult(result *Result) (int64, error) {
@@ -444,13 +572,14 @@ func normalizedSummaryVersion(version int64) int64 {
 // returned IDs use the structured benchmark identity and are only visible after
 // run, result, memory-stat, and raw-sample insertion all succeed.
 func (db *DB) InsertRunWithResults(run *Run, results []Result) (int64, map[BenchmarkKey]int64, error) {
+	normalizeRunIdentity(run)
 	tx, err := db.Begin()
 	if err != nil {
 		return 0, nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	runID, ids, err := insertRunWithResultsTx(tx, run, results)
+	runID, ids, _, err := insertRunWithResultsTx(tx, run, results, "")
 	if err != nil {
 		return 0, nil, err
 	}
@@ -460,35 +589,34 @@ func (db *DB) InsertRunWithResults(run *Run, results []Result) (int64, map[Bench
 	return runID, ids, nil
 }
 
-// InsertRunWithResultsIfAbsent serializes the remote idempotency check and
-// insertion in one transaction. Empty commit hashes are never deduplicated.
+// InsertRunWithResultsIfAbsent atomically persists a remote measurement once.
+// Empty commit hashes are never deduplicated.
 func (db *DB) InsertRunWithResultsIfAbsent(run *Run, results []Result) (*Run, map[BenchmarkKey]int64, bool, error) {
+	normalizeRunIdentity(run)
+	idempotencyKey := ""
+	if run.CommitHashFull != "" {
+		idempotencyKey = measurementIdempotencyKey(run)
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, nil, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if run.CommitHashFull != "" {
-		existing, err := getRunByMeasurementIdentityTx(tx, run.CommitHashFull, run.MachineID, run.ZigOptimize)
-		if err == nil {
-			ids, err := resultIDsForRunTx(tx, existing.ID)
-			if err != nil {
-				return nil, nil, false, err
-			}
-			if err := tx.Commit(); err != nil {
-				return nil, nil, false, err
-			}
-			return existing, ids, false, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return nil, nil, false, err
-		}
-	}
-
-	runID, ids, err := insertRunWithResultsTx(tx, run, results)
+	runID, ids, created, err := insertRunWithResultsTx(tx, run, results, idempotencyKey)
 	if err != nil {
 		return nil, nil, false, err
+	}
+	if !created {
+		existing, err := getRunByIdempotencyKeyTx(tx, idempotencyKey)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		ids, err := resultIDsForRunTx(tx, existing.ID)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		return existing, ids, false, tx.Commit()
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, nil, false, err
@@ -498,16 +626,26 @@ func (db *DB) InsertRunWithResultsIfAbsent(run *Run, results []Result) (*Run, ma
 	return &stored, ids, true, nil
 }
 
-func insertRunWithResultsTx(tx *sql.Tx, run *Run, results []Result) (int64, map[BenchmarkKey]int64, error) {
-	res, err := tx.Exec(`INSERT INTO runs (commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, run.CommitHash, run.CommitHashFull, run.CommitMessage,
-		run.CommitDate, run.Branch, run.RunDate, run.MachineID, run.Notes, run.ZigOptimize)
+func insertRunWithResultsTx(tx *sql.Tx, run *Run, results []Result, idempotencyKey string) (int64, map[BenchmarkKey]int64, bool, error) {
+	res, err := tx.Exec(`INSERT INTO runs (commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
+		benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json, idempotency_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+		ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key <> '' DO NOTHING`, run.CommitHash, run.CommitHashFull, run.CommitMessage,
+		run.CommitDate, run.Branch, run.RunDate, run.MachineID, run.Notes, run.ZigOptimize,
+		run.BenchmarkKind, run.BenchmarkSuite, run.ProtocolVersion, run.BunVersion, run.ZigVersion, run.ManifestHash, run.ManifestJSON, idempotencyKey)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return 0, nil, false, err
+	}
+	if rows == 0 {
+		return 0, nil, false, nil
 	}
 	runID, err := res.LastInsertId()
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, false, err
 	}
 	ids := make(map[BenchmarkKey]int64, len(results))
 	for i := range results {
@@ -518,35 +656,58 @@ func insertRunWithResultsTx(tx *sql.Tx, run *Run, results []Result) (int64, map[
 			result.P99Ns, result.TotalNs, result.Iterations, result.SampleCount,
 			result.SampleAvgVarianceNs2, result.SampleDataVersion, normalizedSummaryVersion(result.SummaryVersion))
 		if err != nil {
-			return 0, nil, err
+			return 0, nil, false, err
 		}
 		resultID, err := res.LastInsertId()
 		if err != nil {
-			return 0, nil, err
+			return 0, nil, false, err
 		}
 		ids[BenchmarkKey{Category: result.Category, Name: result.Name}] = resultID
 		for _, stat := range result.MemStats {
 			if _, err := tx.Exec(`INSERT INTO mem_stats(result_id, stat_name, bytes) VALUES (?, ?, ?)`, resultID, stat.StatName, stat.Bytes); err != nil {
-				return 0, nil, err
+				return 0, nil, false, err
 			}
 		}
 		for _, sample := range result.Samples {
-			if _, err := tx.Exec(`INSERT INTO result_samples(result_id, sample_index, avg_ns) VALUES (?, ?, ?)`, resultID, sample.SampleIndex, sample.AvgNs); err != nil {
-				return 0, nil, err
+			if _, err := tx.Exec(`INSERT INTO result_samples(result_id, sample_index, avg_ns, inner_rsd_ppm) VALUES (?, ?, ?, ?)`, resultID, sample.SampleIndex, sample.AvgNs, sample.InnerRSDPPM); err != nil {
+				return 0, nil, false, err
+			}
+			for _, batch := range sample.Batches {
+				if _, err := tx.Exec(`INSERT INTO result_sample_batches(result_id, sample_index, batch_index, elapsed_ns, iterations) VALUES (?, ?, ?, ?, ?)`,
+					resultID, sample.SampleIndex, batch.BatchIndex, batch.ElapsedNs, batch.Iterations); err != nil {
+					return 0, nil, false, err
+				}
 			}
 		}
 	}
-	return runID, ids, nil
+	return runID, ids, true, nil
 }
 
-func getRunByMeasurementIdentityTx(tx *sql.Tx, commitHashFull, machineID, zigOptimize string) (*Run, error) {
+func measurementIdempotencyKey(run *Run) string {
+	hash := sha256.New()
+	branch := run.Branch
+	if branch == "" || branch == "main" {
+		branch = "main"
+	}
+	for _, value := range []string{
+		"measurement-v1", run.CommitHashFull, branch, run.MachineID, run.BenchmarkKind,
+		run.BenchmarkSuite, fmt.Sprint(run.ProtocolVersion), run.BunVersion, run.ZigVersion,
+		run.ManifestHash, relevantOptimize(run),
+	} {
+		_, _ = fmt.Fprintf(hash, "%d:%s", len(value), value)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func getRunByIdempotencyKeyTx(tx *sql.Tx, idempotencyKey string) (*Run, error) {
 	var run Run
 	var commitHashFullN, commitMessage, commitDate, branch, machineIDN, notes, zigOptimizeN sql.NullString
 	err := tx.QueryRow(`
-		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
-		FROM runs WHERE commit_hash_full = ? AND machine_id = ? AND zig_optimize = ?
-		ORDER BY julianday(run_date) DESC, id DESC LIMIT 1`, commitHashFull, machineID, zigOptimize).Scan(
-		&run.ID, &run.CommitHash, &commitHashFullN, &commitMessage, &commitDate, &branch, &run.RunDate, &machineIDN, &notes, &zigOptimizeN)
+		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
+		FROM runs WHERE idempotency_key = ?`, idempotencyKey).Scan(
+		&run.ID, &run.CommitHash, &commitHashFullN, &commitMessage, &commitDate, &branch, &run.RunDate, &machineIDN, &notes, &zigOptimizeN,
+		&run.BenchmarkKind, &run.BenchmarkSuite, &run.ProtocolVersion, &run.BunVersion, &run.ZigVersion, &run.ManifestHash, &run.ManifestJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -558,6 +719,13 @@ func getRunByMeasurementIdentityTx(tx *sql.Tx, commitHashFull, machineID, zigOpt
 	run.Notes = notes.String
 	run.ZigOptimize = zigOptimizeN.String
 	return &run, nil
+}
+
+func relevantOptimize(run *Run) string {
+	if run.BenchmarkKind == "zig" {
+		return run.ZigOptimize
+	}
+	return ""
 }
 
 func resultIDsForRunTx(tx *sql.Tx, runID int64) (map[BenchmarkKey]int64, error) {
@@ -587,7 +755,12 @@ func (db *DB) InsertMemStat(stat *MemStat) error {
 }
 
 func (db *DB) ListRuns(limit int, branch string, since string) ([]Run, error) {
-	query := `SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize FROM runs WHERE 1=1`
+	return db.ListRunsFiltered(limit, branch, since, RunFilter{})
+}
+
+func (db *DB) ListRunsFiltered(limit int, branch string, since string, filter RunFilter) ([]Run, error) {
+	query := `SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
+		benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json FROM runs WHERE 1=1`
 	args := []interface{}{}
 
 	if branch != "" {
@@ -598,6 +771,7 @@ func (db *DB) ListRuns(limit int, branch string, since string) ([]Run, error) {
 		query += " AND run_date >= ?"
 		args = append(args, since)
 	}
+	query, args = appendRunFilter(query, args, "", filter)
 
 	query += " ORDER BY run_date DESC"
 	if limit > 0 {
@@ -618,17 +792,9 @@ func (db *DB) ListRuns(limit int, branch string, since string) ([]Run, error) {
 	var runs []Run
 	for rows.Next() {
 		var r Run
-		var commitHashFull, commitMessage, commitDate, branch, machineID, notes, zigOptimize sql.NullString
-		if err := rows.Scan(&r.ID, &r.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branch, &r.RunDate, &machineID, &notes, &zigOptimize); err != nil {
+		if err := scanRun(rows, &r); err != nil {
 			return nil, err
 		}
-		r.CommitHashFull = commitHashFull.String
-		r.CommitMessage = commitMessage.String
-		r.CommitDate = commitDate.String
-		r.Branch = branch.String
-		r.MachineID = machineID.String
-		r.Notes = notes.String
-		r.ZigOptimize = zigOptimize.String
 		runs = append(runs, r)
 	}
 	return runs, rows.Err()
@@ -636,61 +802,59 @@ func (db *DB) ListRuns(limit int, branch string, since string) ([]Run, error) {
 
 func (db *DB) GetRun(id int64) (*Run, error) {
 	var r Run
-	var commitHashFull, commitMessage, commitDate, branch, machineID, notes, zigOptimize sql.NullString
-	err := db.QueryRow(`
-		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
-		FROM runs WHERE id = ?`, id).Scan(
-		&r.ID, &r.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branch, &r.RunDate, &machineID, &notes, &zigOptimize)
+	err := scanRun(db.QueryRow(`
+		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
+		FROM runs WHERE id = ?`, id), &r)
 	if err != nil {
 		return nil, err
 	}
-	r.CommitHashFull = commitHashFull.String
-	r.CommitMessage = commitMessage.String
-	r.CommitDate = commitDate.String
-	r.Branch = branch.String
-	r.MachineID = machineID.String
-	r.Notes = notes.String
-	r.ZigOptimize = zigOptimize.String
 	return &r, nil
 }
 
 func (db *DB) GetRunByCommit(commitHash string) (*Run, error) {
+	return db.GetRunByCommitFiltered(commitHash, RunFilter{})
+}
+
+func (db *DB) GetRunByCommitFiltered(commitHash string, filter RunFilter) (*Run, error) {
 	var r Run
-	var commitHashFull, commitMessage, commitDate, branch, machineID, notes, zigOptimize sql.NullString
-	err := db.QueryRow(`
-		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
-		FROM runs WHERE commit_hash = ? OR commit_hash_full = ? ORDER BY run_date DESC LIMIT 1`, commitHash, commitHash).Scan(
-		&r.ID, &r.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branch, &r.RunDate, &machineID, &notes, &zigOptimize)
+	query := `
+		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
+		FROM runs WHERE (commit_hash = ? OR commit_hash_full = ?)`
+	args := []interface{}{commitHash, commitHash}
+	query, args = appendRunFilter(query, args, "", filter)
+	query += " ORDER BY run_date DESC, id DESC LIMIT 1"
+	err := scanRun(db.QueryRow(query, args...), &r)
 	if err != nil {
 		return nil, err
 	}
-	r.CommitHashFull = commitHashFull.String
-	r.CommitMessage = commitMessage.String
-	r.CommitDate = commitDate.String
-	r.Branch = branch.String
-	r.MachineID = machineID.String
-	r.Notes = notes.String
-	r.ZigOptimize = zigOptimize.String
 	return &r, nil
 }
 
 func (db *DB) GetLatestRun() (*Run, error) {
+	return db.GetLatestRunFiltered("", RunFilter{})
+}
+
+func (db *DB) GetLatestRunFiltered(branch string, filter RunFilter) (*Run, error) {
 	var r Run
-	var commitHashFull, commitMessage, commitDate, branch, machineID, notes, zigOptimize sql.NullString
-	err := db.QueryRow(`
-		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
-		FROM runs ORDER BY run_date DESC LIMIT 1`).Scan(
-		&r.ID, &r.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branch, &r.RunDate, &machineID, &notes, &zigOptimize)
+	query := `
+		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
+		FROM runs WHERE 1=1`
+	args := []interface{}{}
+	if branch == "main" {
+		query += " AND (branch = 'main' OR branch IS NULL OR branch = '')"
+	} else if branch != "" {
+		query += " AND branch = ?"
+		args = append(args, branch)
+	}
+	query, args = appendRunFilter(query, args, "", filter)
+	query += " ORDER BY julianday(run_date) DESC, id DESC LIMIT 1"
+	err := scanRun(db.QueryRow(query, args...), &r)
 	if err != nil {
 		return nil, err
 	}
-	r.CommitHashFull = commitHashFull.String
-	r.CommitMessage = commitMessage.String
-	r.CommitDate = commitDate.String
-	r.Branch = branch.String
-	r.MachineID = machineID.String
-	r.Notes = notes.String
-	r.ZigOptimize = zigOptimize.String
 	return &r, nil
 }
 
@@ -701,13 +865,15 @@ func (db *DB) GetLatestRunForBranch(branch string) (*Run, error) {
 	var args []interface{}
 	if branch == "main" || branch == "" {
 		query = `
-			SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
+			SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
+			       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
 			FROM runs
 			WHERE branch = 'main' OR branch IS NULL OR branch = ''
 			ORDER BY julianday(run_date) DESC, id DESC LIMIT 1`
 	} else {
 		query = `
-			SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
+			SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
+			       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
 			FROM runs
 			WHERE branch = ?
 			ORDER BY julianday(run_date) DESC, id DESC LIMIT 1`
@@ -715,27 +881,23 @@ func (db *DB) GetLatestRunForBranch(branch string) (*Run, error) {
 	}
 
 	var r Run
-	var commitHashFull, commitMessage, commitDate, branchVal, machineID, notes, zigOptimize sql.NullString
-	err := db.QueryRow(query, args...).Scan(
-		&r.ID, &r.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branchVal, &r.RunDate, &machineID, &notes, &zigOptimize)
+	err := scanRun(db.QueryRow(query, args...), &r)
 	if err != nil {
 		return nil, err
 	}
-	r.CommitHashFull = commitHashFull.String
-	r.CommitMessage = commitMessage.String
-	r.CommitDate = commitDate.String
-	r.Branch = branchVal.String
-	r.MachineID = machineID.String
-	r.Notes = notes.String
-	r.ZigOptimize = zigOptimize.String
 	return &r, nil
 }
 
 // ListRunsForBranch returns runs for the requested branch ordered by newest first.
 // "main" includes legacy NULL/empty branch values.
 func (db *DB) ListRunsForBranch(branch string, limit int) ([]Run, error) {
+	return db.ListRunsForBranchFiltered(branch, limit, RunFilter{})
+}
+
+func (db *DB) ListRunsForBranchFiltered(branch string, limit int, filter RunFilter) ([]Run, error) {
 	query := `
-		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
+		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
 		FROM runs
 		WHERE `
 	args := []interface{}{}
@@ -746,6 +908,7 @@ func (db *DB) ListRunsForBranch(branch string, limit int) ([]Run, error) {
 		query += `branch = ?`
 		args = append(args, branch)
 	}
+	query, args = appendRunFilter(query, args, "", filter)
 
 	query += ` ORDER BY julianday(run_date) DESC, id DESC`
 	if limit > 0 {
@@ -766,17 +929,9 @@ func (db *DB) ListRunsForBranch(branch string, limit int) ([]Run, error) {
 	var runs []Run
 	for rows.Next() {
 		var r Run
-		var commitHashFull, commitMessage, commitDate, branchVal, machineID, notes, zigOptimize sql.NullString
-		if err := rows.Scan(&r.ID, &r.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branchVal, &r.RunDate, &machineID, &notes, &zigOptimize); err != nil {
+		if err := scanRun(rows, &r); err != nil {
 			return nil, err
 		}
-		r.CommitHashFull = commitHashFull.String
-		r.CommitMessage = commitMessage.String
-		r.CommitDate = commitDate.String
-		r.Branch = branchVal.String
-		r.MachineID = machineID.String
-		r.Notes = notes.String
-		r.ZigOptimize = zigOptimize.String
 		runs = append(runs, r)
 	}
 
@@ -787,15 +942,23 @@ func (db *DB) ListRunsForBranch(branch string, limit int) ([]Run, error) {
 // ordered with "main" first, then alphabetically. Legacy NULL/empty branches
 // are normalized to "main".
 func (db *DB) GetBranchesWithRuns() (branches []string, err error) {
-	rows, err := db.Query(`
+	return db.GetBranchesWithRunsFiltered(RunFilter{})
+}
+
+func (db *DB) GetBranchesWithRunsFiltered(filter RunFilter) (branches []string, err error) {
+	query := `
 		SELECT DISTINCT CASE
 			WHEN branch IS NULL OR branch = '' THEN 'main'
 			ELSE branch
 		END AS normalized_branch
-		FROM runs
+		FROM runs WHERE 1=1`
+	args := []interface{}{}
+	query, args = appendRunFilter(query, args, "", filter)
+	query += `
 		ORDER BY
 			CASE WHEN normalized_branch = 'main' THEN 0 ELSE 1 END,
-			normalized_branch`)
+			normalized_branch`
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -820,8 +983,15 @@ func (db *DB) GetBranchesWithRuns() (branches []string, err error) {
 }
 
 func (db *DB) HasCommit(commitHashFull string) (bool, error) {
+	return db.HasCommitFiltered(commitHashFull, RunFilter{})
+}
+
+func (db *DB) HasCommitFiltered(commitHashFull string, filter RunFilter) (bool, error) {
 	var count int
-	err := db.QueryRow(`SELECT COUNT(*) FROM runs WHERE commit_hash_full = ?`, commitHashFull).Scan(&count)
+	query := `SELECT COUNT(*) FROM runs WHERE commit_hash_full = ?`
+	args := []interface{}{commitHashFull}
+	query, args = appendRunFilter(query, args, "", filter)
+	err := db.QueryRow(query, args...).Scan(&count)
 	if err != nil {
 		return false, err
 	}
@@ -904,7 +1074,7 @@ func (db *DB) GetResult(resultID int64) (*Result, error) {
 }
 
 func (db *DB) GetResultSamples(resultID int64) ([]ResultSample, error) {
-	rows, err := db.Query(`SELECT result_id, sample_index, avg_ns FROM result_samples WHERE result_id = ? ORDER BY sample_index`, resultID)
+	rows, err := db.Query(`SELECT result_id, sample_index, avg_ns, inner_rsd_ppm FROM result_samples WHERE result_id = ? ORDER BY sample_index`, resultID)
 	if err != nil {
 		return nil, err
 	}
@@ -912,12 +1082,48 @@ func (db *DB) GetResultSamples(resultID int64) ([]ResultSample, error) {
 	samples := []ResultSample{}
 	for rows.Next() {
 		var sample ResultSample
-		if err := rows.Scan(&sample.ResultID, &sample.SampleIndex, &sample.AvgNs); err != nil {
+		var rsd sql.NullInt64
+		if err := rows.Scan(&sample.ResultID, &sample.SampleIndex, &sample.AvgNs, &rsd); err != nil {
 			return nil, err
+		}
+		if rsd.Valid {
+			value := rsd.Int64
+			sample.InnerRSDPPM = &value
 		}
 		samples = append(samples, sample)
 	}
-	return samples, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range samples {
+		batches, err := db.GetResultSampleBatches(resultID, samples[i].SampleIndex)
+		if err != nil {
+			return nil, err
+		}
+		samples[i].Batches = batches
+	}
+	return samples, nil
+}
+
+func (db *DB) GetResultSampleBatches(resultID, sampleIndex int64) ([]ResultSampleBatch, error) {
+	rows, err := db.Query(`SELECT result_id, sample_index, batch_index, elapsed_ns, iterations
+		FROM result_sample_batches WHERE result_id = ? AND sample_index = ? ORDER BY batch_index`, resultID, sampleIndex)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	batches := []ResultSampleBatch{}
+	for rows.Next() {
+		var batch ResultSampleBatch
+		if err := rows.Scan(&batch.ResultID, &batch.SampleIndex, &batch.BatchIndex, &batch.ElapsedNs, &batch.Iterations); err != nil {
+			return nil, err
+		}
+		batches = append(batches, batch)
+	}
+	return batches, rows.Err()
 }
 
 type ProfiledResult struct {
@@ -1035,6 +1241,7 @@ func (db *DB) GetTrend(resultID int64, limit int) ([]struct {
 	query := `
 		SELECT 
 			ru.id, ru.commit_hash, ru.commit_hash_full, ru.commit_message, ru.commit_date, ru.branch, ru.run_date, ru.machine_id, ru.notes, ru.zig_optimize,
+			ru.benchmark_kind, ru.benchmark_suite, ru.protocol_version, ru.bun_version, ru.zig_version, ru.manifest_hash, ru.manifest_json,
 			r.id, r.run_id, r.category, r.name, r.min_ns, r.avg_ns, r.max_ns, 
 			COALESCE(r.std_dev_ns, 0), COALESCE(r.p50_ns, 0), COALESCE(r.p95_ns, 0), COALESCE(r.p99_ns, 0),
 			r.total_ns, r.iterations, COALESCE(r.sample_count, 1)
@@ -1043,12 +1250,15 @@ func (db *DB) GetTrend(resultID int64, limit int) ([]struct {
 		WHERE r.category = ? AND r.name = ?`
 
 	args := []interface{}{refResult.Category, refResult.Name}
-	if refRun.MachineID == "" || refRun.ZigOptimize == "" {
+	if !hasCompleteCohortIdentity(refRun) {
 		query += " AND ru.id = ?"
 		args = append(args, refRun.ID)
 	} else {
-		query += " AND ru.machine_id = ? AND ru.zig_optimize = ?"
-		args = append(args, refRun.MachineID, refRun.ZigOptimize)
+		query += ` AND ru.machine_id = ? AND ru.benchmark_kind = ? AND ru.benchmark_suite = ?
+			AND ru.protocol_version = ? AND ru.bun_version = ? AND ru.zig_version = ? AND ru.manifest_hash = ?
+			AND (ru.benchmark_kind <> 'zig' OR ru.zig_optimize = ?)`
+		args = append(args, refRun.MachineID, refRun.BenchmarkKind, refRun.BenchmarkSuite,
+			refRun.ProtocolVersion, refRun.BunVersion, refRun.ZigVersion, refRun.ManifestHash, refRun.ZigOptimize)
 		if refRun.Branch == "" || refRun.Branch == "main" {
 			query += " AND (ru.branch = 'main' OR ru.branch IS NULL OR ru.branch = '')"
 		} else {
@@ -1086,6 +1296,7 @@ func (db *DB) GetTrend(resultID int64, limit int) ([]struct {
 
 		if err := rows.Scan(
 			&run.ID, &run.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branch, &run.RunDate, &machineID, &notes, &zigOptimize,
+			&run.BenchmarkKind, &run.BenchmarkSuite, &run.ProtocolVersion, &run.BunVersion, &run.ZigVersion, &run.ManifestHash, &run.ManifestJSON,
 			&result.ID, &result.RunID, &result.Category, &result.Name, &result.MinNs, &result.AvgNs, &result.MaxNs,
 			&result.StdDevNs, &result.P50Ns, &result.P95Ns, &result.P99Ns,
 			&result.TotalNs, &result.Iterations, &result.SampleCount,
@@ -1108,6 +1319,16 @@ func (db *DB) GetTrend(resultID int64, limit int) ([]struct {
 	}
 
 	return results, rows.Err()
+}
+
+func hasCompleteCohortIdentity(run *Run) bool {
+	if run.MachineID == "" || run.BenchmarkKind == "" || run.BenchmarkSuite == "" || run.ProtocolVersion <= 0 {
+		return false
+	}
+	if run.BenchmarkKind == "zig" {
+		return run.ZigOptimize != ""
+	}
+	return run.BunVersion != "" && run.ZigVersion != "" && run.ManifestHash != ""
 }
 
 func (db *DB) DeleteRun(id int64) error {
@@ -1162,6 +1383,8 @@ func (db *DB) RegressionDataFingerprint(runID int64) (fingerprint string, err er
 		       COALESCE(ru.commit_message, ''), COALESCE(ru.commit_date, ''),
 		       COALESCE(ru.branch, ''), ru.run_date, COALESCE(ru.machine_id, ''),
 		       COALESCE(ru.notes, ''), COALESCE(ru.zig_optimize, ''),
+		       ru.benchmark_kind, ru.benchmark_suite, ru.protocol_version,
+		       ru.bun_version, ru.zig_version, ru.manifest_hash, ru.manifest_json,
 		       r.id, r.category, r.name, r.avg_ns, r.std_dev_ns, r.sample_count
 		FROM runs ru
 		LEFT JOIN results r ON r.run_id = ru.id
@@ -1182,17 +1405,21 @@ func (db *DB) RegressionDataFingerprint(runID int64) (fingerprint string, err er
 	for rows.Next() {
 		var sourceRunID int64
 		var commitHash, commitHashFull, commitMessage, commitDate, branch, runDate, machineID, notes, zigOptimize string
+		var benchmarkKind, benchmarkSuite, bunVersion, zigVersion, manifestHash, manifestJSON string
+		var protocolVersion int64
 		var resultID, avgNs, stdDevNs, sampleCount sql.NullInt64
 		var category, name sql.NullString
 		if err := rows.Scan(
 			&sourceRunID, &commitHash, &commitHashFull, &commitMessage, &commitDate,
 			&branch, &runDate, &machineID, &notes, &zigOptimize,
+			&benchmarkKind, &benchmarkSuite, &protocolVersion, &bunVersion, &zigVersion, &manifestHash, &manifestJSON,
 			&resultID, &category, &name, &avgNs, &stdDevNs, &sampleCount,
 		); err != nil {
 			return "", err
 		}
-		_, _ = fmt.Fprintf(hash, "%d:%q:%q:%q:%q:%q:%q:%q:%q:%q:%d:%q:%q:%d:%d:%d\n",
+		_, _ = fmt.Fprintf(hash, "%d:%q:%q:%q:%q:%q:%q:%q:%q:%q:%q:%q:%d:%q:%q:%q:%q:%d:%q:%q:%d:%d:%d\n",
 			sourceRunID, commitHash, commitHashFull, commitMessage, commitDate, branch, runDate, machineID, notes, zigOptimize,
+			benchmarkKind, benchmarkSuite, protocolVersion, bunVersion, zigVersion, manifestHash, manifestJSON,
 			resultID.Int64, category.String, name.String, avgNs.Int64, stdDevNs.Int64, sampleCount.Int64)
 	}
 	if err := rows.Err(); err != nil {
@@ -1272,6 +1499,8 @@ func (db *DB) RegressionDataFingerprints(runIDs []int64) (fingerprints map[int64
 		       COALESCE(ru.commit_message, ''), COALESCE(ru.commit_date, ''),
 		       COALESCE(ru.branch, ''), ru.run_date, COALESCE(ru.machine_id, ''),
 		       COALESCE(ru.notes, ''), COALESCE(ru.zig_optimize, ''),
+		       ru.benchmark_kind, ru.benchmark_suite, ru.protocol_version,
+		       ru.bun_version, ru.zig_version, ru.manifest_hash, ru.manifest_json,
 		       r.id, r.category, r.name, r.avg_ns, r.std_dev_ns, r.sample_count
 		FROM runs ru
 		LEFT JOIN results r ON r.run_id = ru.id
@@ -1293,11 +1522,14 @@ func (db *DB) RegressionDataFingerprints(runIDs []int64) (fingerprints map[int64
 	for rows.Next() {
 		var sourceRunID int64
 		var commitHash, commitHashFull, commitMessage, commitDate, branch, runDate, machineID, notes, zigOptimize string
+		var benchmarkKind, benchmarkSuite, bunVersion, zigVersion, manifestHash, manifestJSON string
+		var protocolVersion int64
 		var resultID, avgNs, stdDevNs, sampleCount sql.NullInt64
 		var category, name sql.NullString
 		if err := rows.Scan(
 			&sourceRunID, &commitHash, &commitHashFull, &commitMessage, &commitDate,
 			&branch, &runDate, &machineID, &notes, &zigOptimize,
+			&benchmarkKind, &benchmarkSuite, &protocolVersion, &bunVersion, &zigVersion, &manifestHash, &manifestJSON,
 			&resultID, &category, &name, &avgNs, &stdDevNs, &sampleCount,
 		); err != nil {
 			return nil, err
@@ -1307,8 +1539,9 @@ func (db *DB) RegressionDataFingerprints(runIDs []int64) (fingerprints map[int64
 				fingerprints[previousRunID] = hex.EncodeToString(hash.Sum(nil))
 			}
 		}
-		_, _ = fmt.Fprintf(hash, "%d:%q:%q:%q:%q:%q:%q:%q:%q:%q:%d:%q:%q:%d:%d:%d\n",
+		_, _ = fmt.Fprintf(hash, "%d:%q:%q:%q:%q:%q:%q:%q:%q:%q:%q:%q:%d:%q:%q:%q:%q:%d:%q:%q:%d:%d:%d\n",
 			sourceRunID, commitHash, commitHashFull, commitMessage, commitDate, branch, runDate, machineID, notes, zigOptimize,
+			benchmarkKind, benchmarkSuite, protocolVersion, bunVersion, zigVersion, manifestHash, manifestJSON,
 			resultID.Int64, category.String, name.String, avgNs.Int64, stdDevNs.Int64, sampleCount.Int64)
 		previousRunID = sourceRunID
 	}
@@ -1668,7 +1901,8 @@ func (db *DB) GetComparableRunsWindow(runID int64, window int) ([]Run, error) {
 	}
 
 	query := `
-		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
+		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
 		FROM runs
 		WHERE `
 	args := []interface{}{}
@@ -1681,12 +1915,15 @@ func (db *DB) GetComparableRunsWindow(runID int64, window int) ([]Run, error) {
 		args = append(args, refRun.Branch)
 	}
 
-	if refRun.MachineID == "" || refRun.ZigOptimize == "" {
+	if !hasCompleteCohortIdentity(refRun) {
 		query += ` AND id = ?`
 		args = append(args, refRun.ID)
 	} else {
-		query += ` AND machine_id = ? AND zig_optimize = ?`
-		args = append(args, refRun.MachineID, refRun.ZigOptimize)
+		query += ` AND machine_id = ? AND benchmark_kind = ? AND benchmark_suite = ?
+			AND protocol_version = ? AND bun_version = ? AND zig_version = ? AND manifest_hash = ?
+			AND (benchmark_kind <> 'zig' OR zig_optimize = ?)`
+		args = append(args, refRun.MachineID, refRun.BenchmarkKind, refRun.BenchmarkSuite,
+			refRun.ProtocolVersion, refRun.BunVersion, refRun.ZigVersion, refRun.ManifestHash, refRun.ZigOptimize)
 	}
 	query += `
 		  AND (julianday(run_date) < julianday(?) OR (julianday(run_date) = julianday(?) AND id <= ?))
@@ -1707,17 +1944,9 @@ func (db *DB) GetComparableRunsWindow(runID int64, window int) ([]Run, error) {
 	var runs []Run
 	for rows.Next() {
 		var r Run
-		var commitHashFull, commitMessage, commitDate, branch, machineID, notes, zigOptimize sql.NullString
-		if err := rows.Scan(&r.ID, &r.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branch, &r.RunDate, &machineID, &notes, &zigOptimize); err != nil {
+		if err := scanRun(rows, &r); err != nil {
 			return nil, err
 		}
-		r.CommitHashFull = commitHashFull.String
-		r.CommitMessage = commitMessage.String
-		r.CommitDate = commitDate.String
-		r.Branch = branch.String
-		r.MachineID = machineID.String
-		r.Notes = notes.String
-		r.ZigOptimize = zigOptimize.String
 		runs = append(runs, r)
 	}
 	return runs, rows.Err()
@@ -1730,18 +1959,23 @@ func (db *DB) GetComparableMainRunsWindow(runID int64, window int) ([]Run, error
 	if err != nil {
 		return nil, err
 	}
-	if refRun.MachineID == "" || refRun.ZigOptimize == "" {
+	if !hasCompleteCohortIdentity(refRun) {
 		return []Run{}, nil
 	}
 
 	rows, err := db.Query(`
-		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize
+		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
 		FROM runs
 		WHERE (branch = 'main' OR branch IS NULL OR branch = '')
-		  AND machine_id = ? AND zig_optimize = ?
+		  AND machine_id = ? AND benchmark_kind = ? AND benchmark_suite = ? AND protocol_version = ?
+		  AND bun_version = ? AND zig_version = ? AND manifest_hash = ?
+		  AND (benchmark_kind <> 'zig' OR zig_optimize = ?)
 		  AND (julianday(run_date) < julianday(?) OR (julianday(run_date) = julianday(?) AND id <= ?))
 		ORDER BY julianday(run_date) DESC, id DESC
-		LIMIT ?`, refRun.MachineID, refRun.ZigOptimize, refRun.RunDate, refRun.RunDate, refRun.ID, window)
+		LIMIT ?`, refRun.MachineID, refRun.BenchmarkKind, refRun.BenchmarkSuite, refRun.ProtocolVersion,
+		refRun.BunVersion, refRun.ZigVersion, refRun.ManifestHash, refRun.ZigOptimize,
+		refRun.RunDate, refRun.RunDate, refRun.ID, window)
 	if err != nil {
 		return nil, err
 	}
@@ -1750,17 +1984,9 @@ func (db *DB) GetComparableMainRunsWindow(runID int64, window int) ([]Run, error
 	var runs []Run
 	for rows.Next() {
 		var r Run
-		var commitHashFull, commitMessage, commitDate, branch, machineID, notes, zigOptimize sql.NullString
-		if err := rows.Scan(&r.ID, &r.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branch, &r.RunDate, &machineID, &notes, &zigOptimize); err != nil {
+		if err := scanRun(rows, &r); err != nil {
 			return nil, err
 		}
-		r.CommitHashFull = commitHashFull.String
-		r.CommitMessage = commitMessage.String
-		r.CommitDate = commitDate.String
-		r.Branch = branch.String
-		r.MachineID = machineID.String
-		r.Notes = notes.String
-		r.ZigOptimize = zigOptimize.String
 		runs = append(runs, r)
 	}
 	return runs, rows.Err()
@@ -1815,24 +2041,45 @@ func (db *DB) GetResultsForBenchmarkInRuns(key BenchmarkKey, runIDs []int64) (ma
 
 // Job represents a queued benchmark job.
 type Job struct {
-	ID          int64
-	Status      string // pending, running, completed, failed, cancelled
-	Kind        string // benchmark
-	Branch      string
-	CommitHash  string // optional: specific commit, empty = branch HEAD
-	RepoURL     string // git remote name or URL
-	Samples     int
-	Profile     string // none, cpu
-	Notes       string
-	CreatedAt   string
-	StartedAt   string
-	CompletedAt string
-	Error       string
-	RunID       *int64 // links to resulting benchmark run
-	RequestedBy string
+	ID              int64
+	Status          string // pending, running, completed, failed, cancelled
+	Kind            string // benchmark
+	Branch          string
+	CommitHash      string // optional: specific commit, empty = branch HEAD
+	RepoURL         string // git remote name or URL
+	Samples         int
+	Profile         string // none, cpu
+	Notes           string
+	CreatedAt       string
+	StartedAt       string
+	CompletedAt     string
+	Error           string
+	RunID           *int64 // links to resulting benchmark run
+	RequestedBy     string
+	BenchmarkKind   string
+	BenchmarkSuite  string
+	ProtocolVersion int64
+	ManifestHash    string
 }
 
 func (db *DB) InsertJob(job *Job) (int64, error) {
+	if job.BenchmarkKind == "" {
+		job.BenchmarkKind = "zig"
+	}
+	if job.BenchmarkSuite == "" {
+		job.BenchmarkSuite = "core-default"
+	}
+	if job.ProtocolVersion == 0 {
+		job.ProtocolVersion = 1
+	}
+	if job.BenchmarkKind != "zig" && job.BenchmarkKind != "js" {
+		return 0, fmt.Errorf("benchmark kind must be zig or js")
+	}
+	if job.BenchmarkKind == "js" && (job.BenchmarkSuite != "core-default" || job.ProtocolVersion != 1 ||
+		job.ManifestHash != "sha256:0fa487783682b1227bfd4bf735fe1a969ea03f045bb8a68f87c1e41174cb3794" ||
+		job.Samples != 3 || job.Profile != "none") {
+		return 0, fmt.Errorf("JavaScript jobs require canonical suite, protocol, manifest, three samples, and no profile")
+	}
 	var commitHash, notes, requestedBy *string
 	if job.CommitHash != "" {
 		commitHash = &job.CommitHash
@@ -1845,10 +2092,12 @@ func (db *DB) InsertJob(job *Job) (int64, error) {
 	}
 
 	res, err := db.Exec(`
-		INSERT INTO jobs (status, kind, branch, commit_hash, repo_url, samples, profile, notes, created_at, requested_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO jobs (status, kind, branch, commit_hash, repo_url, samples, profile, notes, created_at, requested_by,
+			benchmark_kind, benchmark_suite, protocol_version, manifest_hash)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.Status, job.Kind, job.Branch, commitHash, job.RepoURL,
-		job.Samples, job.Profile, notes, job.CreatedAt, requestedBy)
+		job.Samples, job.Profile, notes, job.CreatedAt, requestedBy,
+		job.BenchmarkKind, job.BenchmarkSuite, job.ProtocolVersion, job.ManifestHash)
 	if err != nil {
 		return 0, err
 	}
@@ -1862,11 +2111,13 @@ func (db *DB) GetJob(id int64) (*Job, error) {
 
 	err := db.QueryRow(`
 		SELECT id, status, kind, branch, commit_hash, repo_url, samples, profile, notes,
-		       created_at, started_at, completed_at, error, run_id, requested_by
+		       created_at, started_at, completed_at, error, run_id, requested_by,
+		       benchmark_kind, benchmark_suite, protocol_version, manifest_hash
 		FROM jobs WHERE id = ?`, id).Scan(
 		&j.ID, &j.Status, &j.Kind, &j.Branch, &commitHash, &j.RepoURL,
 		&j.Samples, &j.Profile, &notes,
-		&j.CreatedAt, &startedAt, &completedAt, &jobError, &runID, &requestedBy)
+		&j.CreatedAt, &startedAt, &completedAt, &jobError, &runID, &requestedBy,
+		&j.BenchmarkKind, &j.BenchmarkSuite, &j.ProtocolVersion, &j.ManifestHash)
 	if err != nil {
 		return nil, err
 	}
@@ -1884,8 +2135,15 @@ func (db *DB) GetJob(id int64) (*Job, error) {
 }
 
 func (db *DB) ListJobs(limit int, status string, branch string) ([]Job, error) {
+	return db.ListJobsFiltered(limit, status, branch, "", "", "", 0, "")
+}
+
+func (db *DB) ListJobsFiltered(limit int, status string, branch string, benchmarkKind string, requestedBy string,
+	benchmarkSuite string, protocolVersion int64, manifestHash string,
+) ([]Job, error) {
 	query := `SELECT id, status, kind, branch, commit_hash, repo_url, samples, profile, notes,
-	                 created_at, started_at, completed_at, error, run_id, requested_by
+	                 created_at, started_at, completed_at, error, run_id, requested_by,
+	                 benchmark_kind, benchmark_suite, protocol_version, manifest_hash
 	          FROM jobs WHERE 1=1`
 	args := []interface{}{}
 
@@ -1896,6 +2154,26 @@ func (db *DB) ListJobs(limit int, status string, branch string) ([]Job, error) {
 	if branch != "" {
 		query += " AND branch = ?"
 		args = append(args, branch)
+	}
+	if benchmarkKind != "" {
+		query += " AND benchmark_kind = ?"
+		args = append(args, benchmarkKind)
+	}
+	if requestedBy != "" {
+		query += " AND requested_by = ?"
+		args = append(args, requestedBy)
+	}
+	if benchmarkSuite != "" {
+		query += " AND benchmark_suite = ?"
+		args = append(args, benchmarkSuite)
+	}
+	if protocolVersion > 0 {
+		query += " AND protocol_version = ?"
+		args = append(args, protocolVersion)
+	}
+	if manifestHash != "" {
+		query += " AND manifest_hash = ?"
+		args = append(args, manifestHash)
 	}
 
 	query += " ORDER BY created_at DESC"
@@ -1924,6 +2202,7 @@ func (db *DB) ListJobs(limit int, status string, branch string) ([]Job, error) {
 			&j.ID, &j.Status, &j.Kind, &j.Branch, &commitHash, &j.RepoURL,
 			&j.Samples, &j.Profile, &notes,
 			&j.CreatedAt, &startedAt, &completedAt, &jobError, &runID, &requestedBy,
+			&j.BenchmarkKind, &j.BenchmarkSuite, &j.ProtocolVersion, &j.ManifestHash,
 		); err != nil {
 			return nil, err
 		}
@@ -1985,6 +2264,13 @@ func (db *DB) CompleteJob(jobID int64, runID int64) error {
 
 // FailJob marks a job as failed with an error message.
 func (db *DB) FailJob(jobID int64, errMsg string) error {
+	const maxJobErrorBytes = 4096
+	if len(errMsg) > maxJobErrorBytes {
+		errMsg = errMsg[:maxJobErrorBytes]
+		for !utf8.ValidString(errMsg) {
+			errMsg = errMsg[:len(errMsg)-1]
+		}
+	}
 	now := timeNow()
 	_, err := db.Exec(`
 		UPDATE jobs SET status = 'failed', completed_at = ?, error = ? WHERE id = ?`,

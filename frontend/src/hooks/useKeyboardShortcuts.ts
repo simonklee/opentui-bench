@@ -1,7 +1,7 @@
 import { onCleanup, onMount } from "solid-js";
 import { useNavigate, useLocation } from "@solidjs/router";
 import { isHelpOpen, toggleHelp, triggerCopy } from "../shortcuts";
-import { lastViewedRunId } from "../store";
+import { benchmarkKind, lastViewedRunId } from "../store";
 import { api } from "../services/api";
 
 export const useKeyboardShortcuts = () => {
@@ -67,21 +67,21 @@ export const useKeyboardShortcuts = () => {
     }
 
     // View Switching
-    if (e.key === "1") navigate("/runs");
+    if (e.key === "1") navigate(`/runs?benchmark_kind=${benchmarkKind()}`);
     if (e.key === "2") {
       // Navigate to last viewed or fetch latest
       let id = lastViewedRunId();
       if (!id) {
         try {
-          const runs = await api.getRuns(1);
+          const runs = await api.getRuns(1, benchmarkKind());
           if (runs && runs.length > 0 && runs[0]) id = runs[0].id;
         } catch (error) {
           console.error("Failed to fetch runs for shortcut", error);
         }
       }
-      if (id) navigate(`/benchmarks/${id}`);
+      if (id) navigate(`/benchmarks/${id}?benchmark_kind=${benchmarkKind()}`);
     }
-    if (e.key === "3") navigate("/compare");
+    if (e.key === "3") navigate(`/compare?benchmark_kind=${benchmarkKind()}`);
   };
 
   onMount(() => window.addEventListener("keydown", handleKeyDown));

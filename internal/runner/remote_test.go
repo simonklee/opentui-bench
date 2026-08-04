@@ -23,11 +23,17 @@ func TestRecordRunSendsPrecisionFieldsToLegacyCompatibleServer(t *testing.T) {
 	}))
 	defer server.Close()
 	variance := 0.5
+	rsd := int64(1000)
 	recorder := &RemoteRecorder{BaseURL: server.URL}
-	_, ids, err := recorder.RecordRun(&record.ParsedRun{Results: []record.ParsedResult{{
+	_, ids, err := recorder.RecordRun(&record.ParsedRun{Meta: record.RunMetadata{
+		BenchmarkKind: "js", BenchmarkSuite: JavaScriptSuite, ProtocolVersion: JavaScriptProtocol,
+		BunVersion: JavaScriptBunVersion, ZigVersion: JavaScriptZigVersion,
+		ManifestHash: JavaScriptManifestHash, ManifestJSON: `{"hash":"test"}`,
+	}, Results: []record.ParsedResult{{
 		Category: "cat", Name: "bench", AvgNs: 1, SampleCount: 2,
 		SampleAvgVarianceNs2: &variance, SampleDataVersion: 1, SummaryVersion: 2,
-		Samples: []db.ResultSample{{SampleIndex: 0, AvgNs: 1}, {SampleIndex: 2, AvgNs: 2}},
+		Samples: []db.ResultSample{{SampleIndex: 0, AvgNs: 1, InnerRSDPPM: &rsd,
+			Batches: []db.ResultSampleBatch{{BatchIndex: 0, ElapsedNs: 10, Iterations: 10}}}, {SampleIndex: 2, AvgNs: 2}},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +42,11 @@ func TestRecordRunSendsPrecisionFieldsToLegacyCompatibleServer(t *testing.T) {
 		t.Fatalf("legacy result IDs = %+v", ids)
 	}
 	got := request.Results[0]
-	if got.SampleAvgVarianceNs2 == nil || *got.SampleAvgVarianceNs2 != 0.5 || got.SampleDataVersion != 1 || got.SummaryVersion != 2 || len(got.Samples) != 2 {
+	if request.BenchmarkKind != "js" || request.BunVersion != JavaScriptBunVersion || request.ManifestHash != JavaScriptManifestHash {
+		t.Fatalf("run identity = %+v", request)
+	}
+	if got.SampleAvgVarianceNs2 == nil || *got.SampleAvgVarianceNs2 != 0.5 || got.SampleDataVersion != 1 || got.SummaryVersion != 2 ||
+		len(got.Samples) != 2 || got.Samples[0].InnerRSDPPM == nil || len(got.Samples[0].Batches) != 1 {
 		t.Fatalf("precision payload = %+v", got)
 	}
 }

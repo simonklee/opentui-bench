@@ -36,15 +36,22 @@ func (r *RemoteRecorder) doRequest(req *http.Request) (*http.Response, error) {
 
 // createRunRequest is the JSON body for POST /api/runs.
 type createRunRequest struct {
-	CommitHash     string               `json:"commit_hash"`
-	CommitHashFull string               `json:"commit_hash_full"`
-	CommitMessage  string               `json:"commit_message"`
-	CommitDate     string               `json:"commit_date"`
-	Branch         string               `json:"branch"`
-	MachineID      string               `json:"machine_id"`
-	Notes          string               `json:"notes"`
-	ZigOptimize    string               `json:"zig_optimize"`
-	Results        []createRunResultReq `json:"results"`
+	CommitHash      string               `json:"commit_hash"`
+	CommitHashFull  string               `json:"commit_hash_full"`
+	CommitMessage   string               `json:"commit_message"`
+	CommitDate      string               `json:"commit_date"`
+	Branch          string               `json:"branch"`
+	MachineID       string               `json:"machine_id"`
+	Notes           string               `json:"notes"`
+	ZigOptimize     string               `json:"zig_optimize"`
+	BenchmarkKind   string               `json:"benchmark_kind"`
+	BenchmarkSuite  string               `json:"benchmark_suite"`
+	ProtocolVersion int64                `json:"protocol_version"`
+	BunVersion      string               `json:"bun_version"`
+	ZigVersion      string               `json:"zig_version"`
+	ManifestHash    string               `json:"manifest_hash"`
+	ManifestJSON    string               `json:"manifest_json"`
+	Results         []createRunResultReq `json:"results"`
 }
 
 type createRunResultReq struct {
@@ -87,14 +94,21 @@ type createdResult struct {
 // Returns the run ID and a map of "category/name" -> result ID.
 func (r *RemoteRecorder) RecordRun(parsed *record.ParsedRun) (int64, map[db.BenchmarkKey]int64, error) {
 	reqBody := createRunRequest{
-		CommitHash:     parsed.Meta.CommitHash,
-		CommitHashFull: parsed.Meta.CommitHashFull,
-		CommitMessage:  parsed.Meta.CommitMessage,
-		CommitDate:     parsed.Meta.CommitDate,
-		Branch:         parsed.Meta.Branch,
-		MachineID:      parsed.Meta.MachineID,
-		Notes:          parsed.Meta.Notes,
-		ZigOptimize:    parsed.Meta.ZigOptimize,
+		CommitHash:      parsed.Meta.CommitHash,
+		CommitHashFull:  parsed.Meta.CommitHashFull,
+		CommitMessage:   parsed.Meta.CommitMessage,
+		CommitDate:      parsed.Meta.CommitDate,
+		Branch:          parsed.Meta.Branch,
+		MachineID:       parsed.Meta.MachineID,
+		Notes:           parsed.Meta.Notes,
+		ZigOptimize:     parsed.Meta.ZigOptimize,
+		BenchmarkKind:   parsed.Meta.BenchmarkKind,
+		BenchmarkSuite:  parsed.Meta.BenchmarkSuite,
+		ProtocolVersion: parsed.Meta.ProtocolVersion,
+		BunVersion:      parsed.Meta.BunVersion,
+		ZigVersion:      parsed.Meta.ZigVersion,
+		ManifestHash:    parsed.Meta.ManifestHash,
+		ManifestJSON:    parsed.Meta.ManifestJSON,
 	}
 
 	for _, pr := range parsed.Results {
@@ -322,15 +336,19 @@ func (r *RemoteRecorder) ClaimJob() (*JobClaimResponse, error) {
 
 // JobClaimResponse matches the job JSON response from the API.
 type JobClaimResponse struct {
-	ID         int64  `json:"id"`
-	Status     string `json:"status"`
-	Kind       string `json:"kind"`
-	Branch     string `json:"branch"`
-	CommitHash string `json:"commit_hash"`
-	RepoURL    string `json:"repo_url"`
-	Samples    int    `json:"samples"`
-	Profile    string `json:"profile"`
-	Notes      string `json:"notes"`
+	ID              int64  `json:"id"`
+	Status          string `json:"status"`
+	Kind            string `json:"kind"`
+	Branch          string `json:"branch"`
+	CommitHash      string `json:"commit_hash"`
+	RepoURL         string `json:"repo_url"`
+	Samples         int    `json:"samples"`
+	Profile         string `json:"profile"`
+	Notes           string `json:"notes"`
+	BenchmarkKind   string `json:"benchmark_kind"`
+	BenchmarkSuite  string `json:"benchmark_suite"`
+	ProtocolVersion int64  `json:"protocol_version"`
+	ManifestHash    string `json:"manifest_hash"`
 }
 
 // UpdateJob sends PATCH /api/jobs/{id} to update job status/commit/run_id.

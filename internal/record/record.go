@@ -34,15 +34,22 @@ type MemStatJSON struct {
 }
 
 type RunMetadata struct {
-	CommitHash     string
-	CommitHashFull string
-	CommitMessage  string
-	CommitDate     string
-	Branch         string
-	MachineID      string
-	Notes          string
-	ZigOptimize    string
-	SampleCount    int
+	CommitHash      string
+	CommitHashFull  string
+	CommitMessage   string
+	CommitDate      string
+	Branch          string
+	MachineID       string
+	Notes           string
+	ZigOptimize     string
+	SampleCount     int
+	BenchmarkKind   string
+	BenchmarkSuite  string
+	ProtocolVersion int64
+	BunVersion      string
+	ZigVersion      string
+	ManifestHash    string
+	ManifestJSON    string
 }
 
 // ParsedRun contains a fully parsed and aggregated benchmark run, ready for
@@ -74,13 +81,15 @@ type ParsedResult struct {
 }
 
 type sample struct {
-	index      int64
-	minNs      int64
-	avgNs      int64
-	maxNs      int64
-	totalNs    int64
-	iterations int64
-	memStats   []MemStatJSON
+	index       int64
+	minNs       int64
+	avgNs       int64
+	maxNs       int64
+	totalNs     int64
+	iterations  int64
+	memStats    []MemStatJSON
+	innerRSDPPM *int64
+	batches     []db.ResultSampleBatch
 }
 
 // Parse reads benchmark JSON output and aggregates samples into a ParsedRun.
@@ -188,15 +197,22 @@ func parseInvocation(reader io.Reader) (map[db.BenchmarkKey]sample, []db.Benchma
 // Store writes a ParsedRun to the database. Returns the run ID and result count.
 func Store(database *db.DB, parsed *ParsedRun) (int64, int, error) {
 	run := &db.Run{
-		CommitHash:     parsed.Meta.CommitHash,
-		CommitHashFull: parsed.Meta.CommitHashFull,
-		CommitMessage:  parsed.Meta.CommitMessage,
-		CommitDate:     parsed.Meta.CommitDate,
-		Branch:         parsed.Meta.Branch,
-		RunDate:        time.Now().UTC().Format(time.RFC3339),
-		MachineID:      parsed.Meta.MachineID,
-		Notes:          parsed.Meta.Notes,
-		ZigOptimize:    parsed.Meta.ZigOptimize,
+		CommitHash:      parsed.Meta.CommitHash,
+		CommitHashFull:  parsed.Meta.CommitHashFull,
+		CommitMessage:   parsed.Meta.CommitMessage,
+		CommitDate:      parsed.Meta.CommitDate,
+		Branch:          parsed.Meta.Branch,
+		RunDate:         time.Now().UTC().Format(time.RFC3339),
+		MachineID:       parsed.Meta.MachineID,
+		Notes:           parsed.Meta.Notes,
+		ZigOptimize:     parsed.Meta.ZigOptimize,
+		BenchmarkKind:   parsed.Meta.BenchmarkKind,
+		BenchmarkSuite:  parsed.Meta.BenchmarkSuite,
+		ProtocolVersion: parsed.Meta.ProtocolVersion,
+		BunVersion:      parsed.Meta.BunVersion,
+		ZigVersion:      parsed.Meta.ZigVersion,
+		ManifestHash:    parsed.Meta.ManifestHash,
+		ManifestJSON:    parsed.Meta.ManifestJSON,
 	}
 
 	if run.ZigOptimize == "" {
@@ -297,7 +313,7 @@ func aggregateSamples(category, name string, sampleList []sample) *db.Result {
 			SampleCount:       1,
 			SampleDataVersion: db.CurrentSampleDataVersion,
 			SummaryVersion:    db.CurrentSummaryVersion,
-			Samples:           []db.ResultSample{{SampleIndex: s.index, AvgNs: s.avgNs}},
+			Samples:           []db.ResultSample{{SampleIndex: s.index, AvgNs: s.avgNs, InnerRSDPPM: s.innerRSDPPM, Batches: s.batches}},
 		}
 	}
 
@@ -344,7 +360,7 @@ func aggregateSamples(category, name string, sampleList []sample) *db.Result {
 		SummaryVersion:       db.CurrentSummaryVersion,
 	}
 	for _, s := range sampleList {
-		result.Samples = append(result.Samples, db.ResultSample{SampleIndex: s.index, AvgNs: s.avgNs})
+		result.Samples = append(result.Samples, db.ResultSample{SampleIndex: s.index, AvgNs: s.avgNs, InnerRSDPPM: s.innerRSDPPM, Batches: s.batches})
 	}
 	return result
 }

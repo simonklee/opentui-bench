@@ -13,6 +13,7 @@ import {
   lastViewedRunId,
   setGlobalCategory,
   setGlobalFilter,
+  benchmarkKind,
 } from "../store";
 import { useFilteredBenchmarks } from "../hooks/useFilteredBenchmarks";
 import { useFilterParams } from "../hooks/useFilterParams";
@@ -41,11 +42,37 @@ function formatRunOption(r: Run): string {
   return `#${r.commit_hash.substring(0, 7)} · ${r.commit_message?.substring(0, 50)}${r.commit_message?.length > 50 ? "..." : ""}`;
 }
 
+function hasSameIdentity(a: Run, b: Run): boolean {
+  return (
+    a.benchmark_kind === b.benchmark_kind &&
+    a.machine_id === b.machine_id &&
+    a.benchmark_suite === b.benchmark_suite &&
+    a.protocol_version === b.protocol_version &&
+    a.bun_version === b.bun_version &&
+    a.zig_version === b.zig_version &&
+    a.manifest_hash === b.manifest_hash &&
+    (a.benchmark_kind !== "zig" || a.zig_optimize === b.zig_optimize)
+  );
+}
+
+function findDefaultPair(runs: Run[], preferredRunId: number | null) {
+  const preferred = runs.find((run) => run.id === preferredRunId);
+  const candidates = preferred ? [preferred, ...runs.filter((run) => run !== preferred)] : runs;
+
+  for (const current of candidates) {
+    const currentIndex = runs.indexOf(current);
+    const baseline = runs.slice(currentIndex + 1).find((run) => hasSameIdentity(run, current));
+    if (baseline) return { baseline: baseline.id, current: current.id };
+  }
+
+  return null;
+}
+
 const Compare: Component = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   useFilterParams(searchParams, setSearchParams);
-  const [runs] = createResource(() => api.getRuns(100));
+  const [runs] = createResource(benchmarkKind, (kind) => api.getRuns(100, kind));
   const [copyToast, setCopyToast] = createSignal(false);
 
   // Group runs by branch for <optgroup> display
@@ -57,6 +84,15 @@ const Compare: Component = () => {
   const hasMultipleBranches = createMemo(() => grouped().length > 1);
 
   const [didAutoSelect, setDidAutoSelect] = createSignal(false);
+  let previousKind = benchmarkKind();
+
+  createEffect(() => {
+    const kind = benchmarkKind();
+    if (kind === previousKind) return;
+    previousKind = kind;
+    setDidAutoSelect(false);
+    setSearchParams({ benchmark_kind: kind, base: null, curr: null }, { replace: true });
+  });
 
   // Auto-select runs only on first load with no URL params.
   // Use the router's searchParams (not window.location.search) so that
@@ -70,24 +106,14 @@ const Compare: Component = () => {
     if (r && r.length > 0) {
       setDidAutoSelect(true);
 
-      // Use lastViewedRunId as "current" if available, otherwise use latest run
-      const contextRunId = lastViewedRunId();
-      const current = contextRunId ?? r[0]!.id;
-
-      // Find the previous run relative to "current" for baseline
-      const currentIndex = r.findIndex((run) => run.id === current);
-      const baseline =
-        currentIndex >= 0 && currentIndex < r.length - 1
-          ? r[currentIndex + 1]!.id // previous run in chronological order
-          : r.length > 1
-            ? r[1]!.id
-            : current;
+      const pair = findDefaultPair(r, lastViewedRunId());
+      if (!pair) return;
 
       setSearchParams(
         {
           ...searchParams,
-          base: baseline,
-          curr: current,
+          base: pair.baseline,
+          curr: pair.current,
         },
         { replace: true },
       );
@@ -104,14 +130,42 @@ const Compare: Component = () => {
     return typeof val === "string" ? val : "";
   });
 
+  // Discard bookmarked selections that do not belong to the active kind before
+  // the normal auto-selection effect chooses a compatible pair.
+  createEffect(() => {
+    const list = runs();
+    const base = Number(baseId());
+    const current = Number(currId());
+    if (!list || (!base && !current)) return;
+    if (
+      (base && !list.some((run) => run.id === base)) ||
+      (current && !list.some((run) => run.id === current))
+    ) {
+      setDidAutoSelect(false);
+      setSearchParams(
+        { benchmark_kind: benchmarkKind(), base: null, curr: null },
+        { replace: true },
+      );
+    }
+  });
+
   const [compareData] = createResource(
     () => {
       const b = baseId();
       const c = currId();
-      if (b && c) return { baseId: parseInt(b), currId: parseInt(c) };
-      return null;
+      const list = runs();
+      if (!b || !c || !list) return null;
+      const baseIdValue = parseInt(b);
+      const currIdValue = parseInt(c);
+      if (
+        !list.some((run) => run.id === baseIdValue) ||
+        !list.some((run) => run.id === currIdValue)
+      ) {
+        return null;
+      }
+      return { baseId: baseIdValue, currId: currIdValue, kind: benchmarkKind() };
     },
-    ({ baseId, currId }) => api.getCompare(baseId, currId),
+    ({ baseId, currId, kind }) => api.getCompare(baseId, currId, kind),
   );
   const { filteredResults: filteredComparisons, categories } = useFilteredBenchmarks(
     () => compareData()?.comparisons ?? [],
@@ -175,6 +229,7 @@ const Compare: Component = () => {
     if (curr) {
       const params = new URLSearchParams();
       params.set("bench_id", String(resultId));
+      params.set("benchmark_kind", benchmarkKind());
       params.set("from", "compare");
       if (base) params.set("compare_base", String(base));
       params.set("compare_base_result", String(baselineResultId));

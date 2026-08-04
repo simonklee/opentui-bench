@@ -121,6 +121,7 @@ const BenchmarkDetail: Component = () => {
           runId={run()!.id}
           commitHash={run()!.commit_hash}
           branch={runBranch()}
+          runIdentity={run()!}
           trendData={trendData()}
           branchTrendData={isOnBranch() ? branchTrendData() : undefined}
           flamegraphView={flamegraphView()}

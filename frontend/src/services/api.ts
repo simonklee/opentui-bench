@@ -1,4 +1,18 @@
-export interface Run {
+export type BenchmarkKind = "zig" | "js";
+
+export interface RunIdentity {
+  benchmark_kind: BenchmarkKind;
+  benchmark_suite: string;
+  protocol_version: number;
+  bun_version: string;
+  zig_version: string;
+  manifest_hash: string;
+  manifest_json?: string;
+  machine_id: string;
+  zig_optimize: string;
+}
+
+export interface Run extends RunIdentity {
   id: number;
   commit_hash: string;
   commit_message: string;
@@ -21,7 +35,12 @@ export interface BenchmarkResult {
   sample_avg_variance_ns2: number | null;
   sample_data_version: number;
   summary_version: number;
-  samples: { sample_index: number; avg_ns: number }[];
+  samples: {
+    sample_index: number;
+    avg_ns: number;
+    inner_rsd_ppm?: number;
+    batches?: { batch_index: number; iterations: number; elapsed_ns: number }[];
+  }[];
   iterations: number;
   mem_stats?: { name: string; bytes: number }[];
 }
@@ -30,7 +49,7 @@ export interface RunDetails extends Run {
   results: BenchmarkResult[];
 }
 
-export interface TrendPoint {
+export interface TrendPoint extends RunIdentity {
   run_id: number;
   result_id: number;
   commit_hash: string;
@@ -60,12 +79,12 @@ export interface TrendResponse {
   fdr_level: number;
   current_status: {
     run_id: number;
-    status: "scored" | "insufficient";
+    status: "scored" | "insufficient" | "disabled";
     reason?: string;
   };
 }
 
-export interface CompareResult {
+export interface CompareResult extends RunIdentity {
   comparisons: {
     name: string;
     category: string;
@@ -75,6 +94,23 @@ export interface CompareResult {
     baseline_result_id: number;
     current_result_id: number;
   }[];
+}
+
+export interface Job extends Partial<RunIdentity> {
+  id: number;
+  status: string;
+  kind: string;
+  branch: string;
+  commit_hash?: string;
+  error?: string;
+  created_at: string;
+  completed_at?: string;
+  requested_by?: string;
+}
+
+function withBenchmarkKind(path: string, kind: BenchmarkKind): string {
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}benchmark_kind=${kind}`;
 }
 
 export interface Regression {
@@ -184,26 +220,51 @@ export interface RegressionHistoryResponse {
   entries: RegressionHistoryEntry[];
 }
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) {
-    throw new Error(`API call failed: ${res.status} ${res.statusText}`);
+    throw new ApiError(`API call failed: ${res.status} ${res.statusText}`, res.status);
   }
   return (await res.json()) as T;
 }
 
 export const api = {
-  getRuns: async (limit = 100) => {
-    return fetchJson<Run[]>(`/api/runs?limit=${limit}`);
+  getRuns: async (limit = 100, kind: BenchmarkKind = "zig") => {
+    return fetchJson<Run[]>(withBenchmarkKind(`/api/runs?limit=${limit}`, kind));
   },
-  getRunDetails: async (id: number) => {
-    return fetchJson<RunDetails>(`/api/runs/${id}`);
+  getRunDetails: async (id: number, kind: BenchmarkKind = "zig") => {
+    return fetchJson<RunDetails>(withBenchmarkKind(`/api/runs/${id}`, kind));
   },
-  getCompare: async (baseId: number, currId: number) => {
-    return fetchJson<CompareResult>(`/api/compare?id_a=${baseId}&id_b=${currId}`);
+  getLatest: async (kind: BenchmarkKind = "zig", branch = "") => {
+    const params = new URLSearchParams({ benchmark_kind: kind });
+    if (branch) params.set("branch", branch);
+    return fetchJson<RunIdentity & { commit_hash: string | null; commit_hash_full: string | null }>(
+      `/api/latest-commit?${params}`,
+    );
   },
-  getTrend: async (resultId: number, limit = 100) => {
-    return fetchJson<TrendResponse>(`/api/trend?result_id=${resultId}&limit=${limit}`);
+  getCatalog: async (kind: BenchmarkKind = "zig") => {
+    return fetchJson<(RunIdentity & { category: string; name: string })[]>(
+      withBenchmarkKind("/api/benchmarks", kind),
+    );
+  },
+  getCompare: async (baseId: number, currId: number, kind: BenchmarkKind = "zig") => {
+    return fetchJson<CompareResult>(
+      withBenchmarkKind(`/api/compare?id_a=${baseId}&id_b=${currId}`, kind),
+    );
+  },
+  getTrend: async (resultId: number, limit = 100, kind: BenchmarkKind = "zig") => {
+    return fetchJson<TrendResponse>(
+      withBenchmarkKind(`/api/trend?result_id=${resultId}&limit=${limit}`, kind),
+    );
   },
   getFlamegraphs: async (runId: number) => {
     return fetchJson<{ result_id: number; type: string }[]>(`/api/runs/${runId}/flamegraphs`);
@@ -217,7 +278,7 @@ export const api = {
       branch?: string;
     },
   ) => {
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({ benchmark_kind: "zig" });
     if (runId) {
       params.set("run_id", String(runId));
     }
@@ -244,7 +305,7 @@ export const api = {
     branch?: string;
     limit?: number;
   }) => {
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({ benchmark_kind: "zig" });
     if (options?.branch) {
       params.set("branch", options.branch);
     }
@@ -264,7 +325,12 @@ export const api = {
     const url = query ? `/api/regressions/history?${query}` : "/api/regressions/history";
     return fetchJson<RegressionHistoryResponse>(url);
   },
-  getBranches: async () => {
-    return fetchJson<string[]>("/api/branches");
+  getBranches: async (kind: BenchmarkKind = "zig") => {
+    return fetchJson<string[]>(withBenchmarkKind("/api/branches", kind));
+  },
+  getJobs: async (kind: BenchmarkKind, status?: string, limit = 50) => {
+    const params = new URLSearchParams({ benchmark_kind: kind, limit: String(limit) });
+    if (status) params.set("status", status);
+    return fetchJson<Job[]>(`/api/jobs?${params}`);
   },
 };

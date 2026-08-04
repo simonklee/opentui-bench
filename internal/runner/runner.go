@@ -15,9 +15,13 @@ import (
 
 type ProfileMode string
 
+type BenchmarkKind string
+
 const (
-	ProfileNone ProfileMode = "none"
-	ProfileCPU  ProfileMode = "cpu"
+	ProfileNone  ProfileMode   = "none"
+	ProfileCPU   ProfileMode   = "cpu"
+	BenchmarkZig BenchmarkKind = "zig"
+	BenchmarkJS  BenchmarkKind = "js"
 )
 
 type RunConfig struct {
@@ -33,6 +37,12 @@ type RunConfig struct {
 	MachineID       string
 	WorkDir         string
 	Branch          string // override branch name (useful for detached HEAD)
+	BenchmarkKind   BenchmarkKind
+	BenchmarkSuite  string
+	ProtocolVersion int64
+	BunVersion      string
+	ZigVersion      string
+	ManifestHash    string
 }
 
 // CollectedArtifact holds a binary artifact (e.g., pprof profile) captured
@@ -49,6 +59,15 @@ type CollectedArtifact struct {
 // 2. If profiling is enabled, capture CPU profiles -> []CollectedArtifact
 // 3. Return both without touching any database
 func RunAndCollect(ctx context.Context, cfg RunConfig) (*record.ParsedRun, []CollectedArtifact, error) {
+	return RunAndCollectWithExecutor(ctx, cfg, OSRunner{})
+}
+
+// RunAndCollectWithExecutor exposes command injection for orchestration tests.
+func RunAndCollectWithExecutor(ctx context.Context, cfg RunConfig, executor Executor) (*record.ParsedRun, []CollectedArtifact, error) {
+	cfg = normalizeRunConfig(cfg)
+	if err := validateRunConfig(cfg); err != nil {
+		return nil, nil, err
+	}
 	if cfg.Samples < 1 {
 		return nil, nil, fmt.Errorf("samples must be >= 1")
 	}
@@ -56,9 +75,7 @@ func RunAndCollect(ctx context.Context, cfg RunConfig) (*record.ParsedRun, []Col
 		cfg.PerfFreq = 997
 	}
 
-	runner := OSRunner{}
-
-	meta, err := ReadGitMeta(ctx, cfg.RepoPath, runner)
+	meta, err := ReadGitMeta(ctx, cfg.RepoPath, executor)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read git meta: %w", err)
 	}
@@ -74,6 +91,17 @@ func RunAndCollect(ctx context.Context, cfg RunConfig) (*record.ParsedRun, []Col
 	}
 	meta.ZigOptimize = cfg.ZigOptimize
 	meta.SampleCount = cfg.Samples
+	meta.BenchmarkKind = string(cfg.BenchmarkKind)
+	meta.BenchmarkSuite = cfg.BenchmarkSuite
+	meta.ProtocolVersion = cfg.ProtocolVersion
+	meta.BunVersion = cfg.BunVersion
+	meta.ZigVersion = cfg.ZigVersion
+	meta.ManifestHash = cfg.ManifestHash
+
+	if cfg.BenchmarkKind == BenchmarkJS {
+		parsed, err := runJavaScript(ctx, cfg, meta, executor)
+		return parsed, nil, err
+	}
 
 	zigDir := ZigDir(cfg.RepoPath)
 	var args []string
@@ -84,7 +112,7 @@ func RunAndCollect(ctx context.Context, cfg RunConfig) (*record.ParsedRun, []Col
 		args = append(args, "--bench", cfg.FilterBenchmark)
 	}
 
-	err = BuildZigBench(ctx, zigDir, cfg.ZigOptimize, runner)
+	err = BuildZigBench(ctx, zigDir, cfg.ZigOptimize, executor)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build failed: %w", err)
 	}
@@ -101,7 +129,7 @@ func RunAndCollect(ctx context.Context, cfg RunConfig) (*record.ParsedRun, []Col
 
 		cmd := exec.CommandContext(ctx, benchBin, cmdArgs...)
 		cmd.Dir = zigDir
-		out, err := runner.CombinedOutput(ctx, cmd)
+		out, err := executor.CombinedOutput(ctx, cmd)
 		if err != nil {
 			return nil, nil, fmt.Errorf("sample %d failed: %w", i+1, err)
 		}
@@ -122,7 +150,7 @@ func RunAndCollect(ctx context.Context, cfg RunConfig) (*record.ParsedRun, []Col
 
 	if cfg.Profile == ProfileCPU {
 		if cfg.ZigOptimize != "ReleaseSafe" {
-			err = BuildZigBench(ctx, zigDir, "ReleaseSafe", runner)
+			err = BuildZigBench(ctx, zigDir, "ReleaseSafe", executor)
 			if err != nil {
 				return parsed, nil, fmt.Errorf("profiling build failed: %w", err)
 			}
@@ -145,7 +173,7 @@ func RunAndCollect(ctx context.Context, cfg RunConfig) (*record.ParsedRun, []Col
 				return parsed, artifacts, fmt.Errorf("profile selector for %s/%s matches %d benchmarks", benchmark.Category, benchmark.Name, matches)
 			}
 
-			pbGz, kind, err := CaptureCPUProfile(ctx, runner, benchBin, benchmark, cfg.PerfFreq)
+			pbGz, kind, err := CaptureCPUProfile(ctx, executor, benchBin, benchmark, cfg.PerfFreq)
 			if err != nil {
 				return parsed, artifacts, fmt.Errorf("profile %s/%s: %w", res.Category, res.Name, err)
 			}
@@ -160,6 +188,47 @@ func RunAndCollect(ctx context.Context, cfg RunConfig) (*record.ParsedRun, []Col
 	}
 
 	return parsed, artifacts, nil
+}
+
+func normalizeRunConfig(cfg RunConfig) RunConfig {
+	if cfg.BenchmarkKind == "" {
+		cfg.BenchmarkKind = BenchmarkZig
+	}
+	if cfg.BenchmarkSuite == "" {
+		cfg.BenchmarkSuite = JavaScriptSuite
+	}
+	if cfg.ProtocolVersion == 0 {
+		cfg.ProtocolVersion = JavaScriptProtocol
+	}
+	if cfg.BenchmarkKind == BenchmarkJS {
+		if cfg.BunVersion == "" {
+			cfg.BunVersion = JavaScriptBunVersion
+		}
+		if cfg.ZigVersion == "" {
+			cfg.ZigVersion = JavaScriptZigVersion
+		}
+		if cfg.ManifestHash == "" {
+			cfg.ManifestHash = JavaScriptManifestHash
+		}
+	}
+	return cfg
+}
+
+func validateRunConfig(cfg RunConfig) error {
+	if cfg.BenchmarkKind != BenchmarkZig && cfg.BenchmarkKind != BenchmarkJS {
+		return fmt.Errorf("benchmark kind must be zig or js")
+	}
+	if cfg.BenchmarkKind == BenchmarkJS {
+		if cfg.BenchmarkSuite != JavaScriptSuite || cfg.ProtocolVersion != JavaScriptProtocol ||
+			cfg.BunVersion != JavaScriptBunVersion || cfg.ZigVersion != JavaScriptZigVersion || cfg.ManifestHash != JavaScriptManifestHash {
+			return fmt.Errorf("JavaScript benchmark identity is not canonical")
+		}
+		if cfg.Samples != JavaScriptSamples || cfg.Profile != ProfileNone || cfg.Filter != "" ||
+			cfg.FilterBenchmark != "" || len(cfg.Benchmarks) != 0 {
+			return fmt.Errorf("JavaScript benchmarks require samples=3, profile=none, and no filters")
+		}
+	}
+	return nil
 }
 
 // Run orchestrates the full benchmark pipeline: build, run, record, profile.

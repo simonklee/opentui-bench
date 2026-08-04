@@ -16,6 +16,71 @@ var migrations = []migration{
 	migrateRegressionCache,
 	migrateStoragePrecision,
 	purgeRegressionCacheForCalibrationRollout,
+	migrateJavaScriptStorage,
+}
+
+func migrateJavaScriptStorage(tx *sql.Tx) error {
+	for table, additions := range map[string][]struct{ name, sql string }{
+		"runs": {
+			{"idempotency_key", `ALTER TABLE runs ADD COLUMN idempotency_key TEXT`},
+			{"benchmark_kind", `ALTER TABLE runs ADD COLUMN benchmark_kind TEXT NOT NULL DEFAULT 'zig'`},
+			{"benchmark_suite", `ALTER TABLE runs ADD COLUMN benchmark_suite TEXT NOT NULL DEFAULT 'core-default'`},
+			{"protocol_version", `ALTER TABLE runs ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 1`},
+			{"bun_version", `ALTER TABLE runs ADD COLUMN bun_version TEXT NOT NULL DEFAULT ''`},
+			{"zig_version", `ALTER TABLE runs ADD COLUMN zig_version TEXT NOT NULL DEFAULT ''`},
+			{"manifest_hash", `ALTER TABLE runs ADD COLUMN manifest_hash TEXT NOT NULL DEFAULT ''`},
+			{"manifest_json", `ALTER TABLE runs ADD COLUMN manifest_json TEXT NOT NULL DEFAULT ''`},
+		},
+		"result_samples": {
+			{"inner_rsd_ppm", `ALTER TABLE result_samples ADD COLUMN inner_rsd_ppm INTEGER CHECK (inner_rsd_ppm >= 0)`},
+		},
+		"jobs": {
+			{"benchmark_kind", `ALTER TABLE jobs ADD COLUMN benchmark_kind TEXT NOT NULL DEFAULT 'zig'`},
+			{"benchmark_suite", `ALTER TABLE jobs ADD COLUMN benchmark_suite TEXT NOT NULL DEFAULT 'core-default'`},
+			{"protocol_version", `ALTER TABLE jobs ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 1`},
+			{"manifest_hash", `ALTER TABLE jobs ADD COLUMN manifest_hash TEXT NOT NULL DEFAULT ''`},
+		},
+	} {
+		columns, err := tableColumns(tx, table)
+		if err != nil {
+			return err
+		}
+		for _, addition := range additions {
+			if !columns[addition.name] {
+				if _, err := tx.Exec(addition.sql); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	_, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS result_sample_batches (
+			result_id INTEGER NOT NULL,
+			sample_index INTEGER NOT NULL,
+			batch_index INTEGER NOT NULL,
+			elapsed_ns INTEGER NOT NULL CHECK (elapsed_ns > 0),
+			iterations INTEGER NOT NULL CHECK (iterations > 0),
+			PRIMARY KEY (result_id, sample_index, batch_index),
+			FOREIGN KEY (result_id, sample_index)
+				REFERENCES result_samples(result_id, sample_index) ON DELETE CASCADE
+		);
+		DROP INDEX IF EXISTS idx_runs_measurement_identity;
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idempotency_key ON runs(idempotency_key)
+			WHERE idempotency_key IS NOT NULL AND idempotency_key <> '';
+		DROP VIEW IF EXISTS results_with_run;
+		CREATE VIEW results_with_run AS
+		SELECT r.id AS result_id, r.category, r.name, r.min_ns, r.avg_ns, r.max_ns,
+		       r.std_dev_ns, r.p50_ns, r.p95_ns, r.p99_ns, r.total_ns, r.iterations,
+		       r.sample_count, r.sample_avg_variance_ns2, r.sample_data_version,
+		       r.summary_version, ru.id AS run_id, ru.commit_hash, ru.commit_hash_full,
+		       ru.commit_message, ru.commit_date, ru.branch, ru.run_date, ru.machine_id,
+		       ru.notes, ru.zig_optimize, ru.benchmark_kind, ru.benchmark_suite,
+		       ru.protocol_version, ru.bun_version, ru.zig_version, ru.manifest_hash,
+		       ru.manifest_json
+		FROM results r JOIN runs ru ON r.run_id = ru.id;
+		DELETE FROM regression_cache;
+	`)
+	return err
 }
 
 func purgeRegressionCacheForCalibrationRollout(tx *sql.Tx) error {
@@ -74,6 +139,15 @@ func (db *DB) migrate() error {
 }
 
 func migrateLegacySchema(tx *sql.Tx) error {
+	runColumns, err := tableColumns(tx, "runs")
+	if err != nil {
+		return err
+	}
+	if len(runColumns) > 0 && !runColumns["idempotency_key"] {
+		if _, err := tx.Exec(`ALTER TABLE runs ADD COLUMN idempotency_key TEXT`); err != nil {
+			return err
+		}
+	}
 	resultsExists, err := tableExists(tx, "results")
 	if err != nil {
 		return err

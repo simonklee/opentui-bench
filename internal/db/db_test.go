@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -422,6 +423,29 @@ func TestListJobs(t *testing.T) {
 			t.Errorf("expected newest first, got first=%s last=%s", jobs[0].CreatedAt, jobs[len(jobs)-1].CreatedAt)
 		}
 	})
+}
+
+func TestListJobsFiltersBeforeLimit(t *testing.T) {
+	database := openTestDB(t)
+	_, err := database.InsertJob(&Job{Status: "failed", Kind: "benchmark", Branch: "main", Samples: 3, Profile: "none",
+		CreatedAt: "2026-08-03T00:00:00Z", RequestedBy: "worker", BenchmarkKind: "js", BenchmarkSuite: "core-default",
+		ProtocolVersion: 1, ManifestHash: "sha256:0fa487783682b1227bfd4bf735fe1a969ea03f045bb8a68f87c1e41174cb3794"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.InsertJob(&Job{Status: "failed", Kind: "benchmark", Branch: "main", Samples: 3, Profile: "cpu",
+		CreatedAt: "2026-08-04T00:00:00Z", RequestedBy: "other", BenchmarkKind: "zig"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := database.ListJobsFiltered(1, "failed", "", "js", "worker", "core-default", 1,
+		"sha256:0fa487783682b1227bfd4bf735fe1a969ea03f045bb8a68f87c1e41174cb3794")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].BenchmarkKind != "js" || jobs[0].RequestedBy != "worker" {
+		t.Fatalf("jobs = %+v", jobs)
+	}
 }
 
 func TestClaimNextPendingJob(t *testing.T) {
@@ -1431,6 +1455,265 @@ func TestInsertRunWithResultsRollsBackOnSampleConstraint(t *testing.T) {
 	_ = database.QueryRow(`SELECT COUNT(*) FROM results`).Scan(&results)
 	if runs != 0 || results != 0 {
 		t.Fatalf("partial write remains: runs=%d results=%d", runs, results)
+	}
+}
+
+func TestJavaScriptRunRoundTripRetainsIdentityAndBatchEvidence(t *testing.T) {
+	database := openTestDB(t)
+	rsd := int64(1234)
+	run := &Run{
+		CommitHash: "abc", CommitHashFull: "abcdef", Branch: "main", RunDate: "2026-08-04T00:00:00Z",
+		MachineID: "runner", BenchmarkKind: "js", BenchmarkSuite: "core-default", ProtocolVersion: 1,
+		BunVersion: "1.3.14", ZigVersion: "0.15.2", ManifestHash: "sha256:test", ManifestJSON: `{"hash":"sha256:test"}`,
+	}
+	runID, ids, err := database.InsertRunWithResults(run, []Result{{
+		Category: "JS Layout", Name: "leaf", MinNs: 10, AvgNs: 11, MaxNs: 12,
+		TotalNs: 22, Iterations: 2, SampleCount: 1, Samples: []ResultSample{{
+			SampleIndex: 0, AvgNs: 11, InnerRSDPPM: &rsd,
+			Batches: []ResultSampleBatch{{BatchIndex: 0, ElapsedNs: 10, Iterations: 1}, {BatchIndex: 1, ElapsedNs: 12, Iterations: 1}},
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := database.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.BenchmarkKind != "js" || stored.BunVersion != "1.3.14" || stored.ManifestJSON != run.ManifestJSON {
+		t.Fatalf("stored run = %+v", stored)
+	}
+	result, err := database.GetResult(ids[BenchmarkKey{Category: "JS Layout", Name: "leaf"}])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Samples) != 1 || result.Samples[0].InnerRSDPPM == nil || *result.Samples[0].InnerRSDPPM != rsd || len(result.Samples[0].Batches) != 2 {
+		t.Fatalf("stored evidence = %+v", result.Samples)
+	}
+}
+
+func TestZigSampleRoundTripKeepsInnerRSDNull(t *testing.T) {
+	database := openTestDB(t)
+	runID, ids, err := database.InsertRunWithResults(&Run{CommitHash: "zig", RunDate: "2026-08-04T00:00:00Z"}, []Result{{
+		Category: "render", Name: "frame", MinNs: 1, AvgNs: 2, MaxNs: 3, TotalNs: 2,
+		Iterations: 1, SampleCount: 1, Samples: []ResultSample{{SampleIndex: 0, AvgNs: 2}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedRun, err := database.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedRun.BenchmarkKind != "zig" || storedRun.BenchmarkSuite != "core-default" || storedRun.ProtocolVersion != 1 {
+		t.Fatalf("Zig defaults = %+v", storedRun)
+	}
+	result, err := database.GetResult(ids[BenchmarkKey{Category: "render", Name: "frame"}])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Samples) != 1 || result.Samples[0].InnerRSDPPM != nil || len(result.Samples[0].Batches) != 0 {
+		t.Fatalf("Zig sample evidence = %+v", result.Samples)
+	}
+}
+
+func TestRegularRunInsertsPreserveDuplicateMeasurementIdentities(t *testing.T) {
+	database := openTestDB(t)
+	base := Run{CommitHash: "abc", CommitHashFull: "abcdef", Branch: "", RunDate: "2026-08-04T00:00:00Z", MachineID: "runner"}
+	if _, err := database.InsertRun(&base); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := base
+	duplicate.Branch = "main"
+	if _, err := database.InsertRun(&duplicate); err != nil {
+		t.Fatalf("historical/local duplicate rejected: %v", err)
+	}
+	javascript := base
+	javascript.BenchmarkKind = "js"
+	javascript.BunVersion = "1.3.14"
+	javascript.ZigVersion = "0.15.2"
+	javascript.ManifestHash = "sha256:test"
+	if _, err := database.InsertRun(&javascript); err != nil {
+		t.Fatalf("separate JavaScript identity rejected: %v", err)
+	}
+}
+
+func TestRemoteIdempotencyUsesFullMeasurementIdentity(t *testing.T) {
+	database := openTestDB(t)
+	results := []Result{{Category: "render", Name: "frame", MinNs: 1, AvgNs: 2, MaxNs: 3, TotalNs: 2, Iterations: 1, SampleCount: 1}}
+	base := Run{CommitHash: "abc", CommitHashFull: "abcdef", Branch: "main", RunDate: "2026-08-04T00:00:00Z", MachineID: "runner"}
+	zig, _, created, err := database.InsertRunWithResultsIfAbsent(&base, results)
+	if err != nil || !created || zig == nil {
+		t.Fatalf("insert Zig identity: created=%v err=%v", created, err)
+	}
+	normalizedBranch := base
+	normalizedBranch.Branch = ""
+	same, _, created, err := database.InsertRunWithResultsIfAbsent(&normalizedBranch, results)
+	if err != nil || created || same == nil || same.ID != zig.ID {
+		t.Fatalf("normalized branch identity: run=%+v created=%v err=%v", same, created, err)
+	}
+	javascript := base
+	javascript.BenchmarkKind = "js"
+	javascript.BunVersion = "1.3.14"
+	javascript.ZigVersion = "0.15.2"
+	javascript.ManifestHash = "sha256:test"
+	js, _, created, err := database.InsertRunWithResultsIfAbsent(&javascript, results)
+	if err != nil || !created || js == nil || js.ID == zig.ID {
+		t.Fatalf("insert distinct JavaScript identity: run=%+v created=%v err=%v", js, created, err)
+	}
+}
+
+func TestVersion5MigrationPreservesDuplicateRunsForRemoteIdempotency(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "version-5-duplicates.db")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+		DROP INDEX idx_runs_idempotency_key;
+		ALTER TABLE runs DROP COLUMN idempotency_key;
+		INSERT INTO runs(commit_hash, commit_hash_full, branch, run_date, machine_id)
+		VALUES ('abc', 'abcdef', 'main', '2026-08-01T00:00:00Z', 'runner'),
+		       ('abc', 'abcdef', 'main', '2026-08-02T00:00:00Z', 'runner');
+		PRAGMA user_version = 5;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = Open(path)
+	if err != nil {
+		t.Fatalf("migrate duplicate version 5 runs: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+	var historical, keyed int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM runs WHERE idempotency_key IS NULL`).Scan(&historical); err != nil {
+		t.Fatal(err)
+	}
+	if historical != 2 {
+		t.Fatalf("historical runs = %d, want 2", historical)
+	}
+
+	run := Run{CommitHash: "abc", CommitHashFull: "abcdef", Branch: "main", RunDate: "2026-08-04T00:00:00Z", MachineID: "runner"}
+	results := []Result{{Category: "render", Name: "frame", MinNs: 1, AvgNs: 2, MaxNs: 3, TotalNs: 2, Iterations: 1, SampleCount: 1}}
+	first, _, created, err := database.InsertRunWithResultsIfAbsent(&run, results)
+	if err != nil || !created {
+		t.Fatalf("first remote insertion: created=%v err=%v", created, err)
+	}
+	second, _, created, err := database.InsertRunWithResultsIfAbsent(&run, results)
+	if err != nil || created || first.ID != second.ID {
+		t.Fatalf("repeated remote insertion: first=%d second=%d created=%v err=%v", first.ID, second.ID, created, err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM runs WHERE idempotency_key IS NOT NULL`).Scan(&keyed); err != nil {
+		t.Fatal(err)
+	}
+	if keyed != 1 {
+		t.Fatalf("idempotent runs = %d, want 1", keyed)
+	}
+}
+
+func TestConcurrentIdenticalRunSubmissionsCreateOneCompleteRun(t *testing.T) {
+	database := openTestDB(t)
+	concurrent, err := Open(database.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = concurrent.Close() })
+	base := Run{CommitHash: "abc", CommitHashFull: "abcdef", Branch: "main", RunDate: "2026-08-04T00:00:00Z", MachineID: "runner"}
+	results := []Result{{Category: "render", Name: "frame", MinNs: 1, AvgNs: 2, MaxNs: 3, TotalNs: 2, Iterations: 1, SampleCount: 1}}
+	type outcome struct {
+		id      int64
+		created bool
+		err     error
+	}
+	start := make(chan struct{})
+	outcomes := make(chan outcome, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for _, connection := range []*DB{database, concurrent} {
+		go func(connection *DB) {
+			run := base
+			ready.Done()
+			<-start
+			stored, _, created, err := connection.InsertRunWithResultsIfAbsent(&run, results)
+			var id int64
+			if stored != nil {
+				id = stored.ID
+			}
+			outcomes <- outcome{id: id, created: created, err: err}
+		}(connection)
+	}
+	ready.Wait()
+	close(start)
+	first, second := <-outcomes, <-outcomes
+	if first.err != nil || second.err != nil || first.id == 0 || first.id != second.id || first.created == second.created {
+		t.Fatalf("outcomes = %+v, %+v", first, second)
+	}
+	var runs, storedResults int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM runs`).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM results`).Scan(&storedResults); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 1 || storedResults != 1 {
+		t.Fatalf("stored rows = %d runs, %d results", runs, storedResults)
+	}
+}
+
+func TestJavaScriptComparableRunsRequireCompleteIdentityMatch(t *testing.T) {
+	database := openTestDB(t)
+	insert := func(date, kind, suite, bun, zig string, protocol int64, manifest string) (int64, int64) {
+		t.Helper()
+		id, err := database.InsertRun(&Run{CommitHash: date, Branch: "main", RunDate: date, MachineID: "runner",
+			BenchmarkKind: kind, BenchmarkSuite: suite, ProtocolVersion: protocol, BunVersion: bun,
+			ZigVersion: zig, ManifestHash: manifest})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id, insertTestResult(t, database, id, "JS Layout", "leaf")
+	}
+	want, wantResult := insert("2026-08-01T00:00:00Z", "js", "core-default", "1.3.14", "0.15.2", 1, "sha256:a")
+	_, _ = insert("2026-08-01T01:00:00Z", "zig", "core-default", "", "", 1, "")
+	_, _ = insert("2026-08-02T00:00:00Z", "js", "other", "1.3.14", "0.15.2", 1, "sha256:a")
+	_, _ = insert("2026-08-02T01:00:00Z", "js", "core-default", "1.3.14", "0.15.2", 2, "sha256:a")
+	_, _ = insert("2026-08-02T02:00:00Z", "js", "core-default", "1.3.14", "0.15.3", 1, "sha256:a")
+	_, _ = insert("2026-08-02T03:00:00Z", "js", "core-default", "1.3.14", "0.15.2", 1, "sha256:b")
+	_, _ = insert("2026-08-03T00:00:00Z", "js", "core-default", "1.3.15", "0.15.2", 1, "sha256:a")
+	reference, referenceResult := insert("2026-08-04T00:00:00Z", "js", "core-default", "1.3.14", "0.15.2", 1, "sha256:a")
+	runs, err := database.GetComparableRunsWindow(reference, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 || runs[0].ID != reference || runs[1].ID != want {
+		t.Fatalf("cohort = %+v, want [%d %d]", runs, reference, want)
+	}
+	trend, err := database.GetTrend(referenceResult, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trend) != 2 || trend[0].Result.ID != referenceResult || trend[1].Result.ID != wantResult {
+		t.Fatalf("trend = %+v, want result IDs [%d %d]", trend, referenceResult, wantResult)
+	}
+}
+
+func TestFailJobBoundsPersistedError(t *testing.T) {
+	database := openTestDB(t)
+	jobID, err := database.InsertJob(&Job{Status: "running", Kind: "benchmark", Branch: "main", Samples: 3, Profile: "none", CreatedAt: timeNow()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.FailJob(jobID, strings.Repeat("x", 5000)); err != nil {
+		t.Fatal(err)
+	}
+	job, err := database.GetJob(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(job.Error) != 4096 {
+		t.Fatalf("stored error length = %d, want 4096", len(job.Error))
 	}
 }
 

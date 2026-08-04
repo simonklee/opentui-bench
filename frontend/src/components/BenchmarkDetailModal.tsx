@@ -5,9 +5,10 @@ import { formatNs, formatBytes } from "../utils/format";
 import { Button } from "./Button";
 import TrendChart from "./TrendChart";
 import FlamegraphViewer from "./FlamegraphViewer";
-import type { BenchmarkResult, TrendResponse } from "../services/api";
+import type { BenchmarkResult, RunIdentity, TrendResponse } from "../services/api";
 import TrendIndicator from "./TrendIndicator";
 import type { RegressionNavigationContext } from "../hooks/useBenchmarkDetail";
+import RunIdentitySummary from "./RunIdentity";
 
 const GITHUB_REPO_URL = "https://github.com/anomalyco/opentui";
 
@@ -31,6 +32,7 @@ interface BenchmarkDetailModalProps {
   runId: number;
   commitHash: string;
   branch: string;
+  runIdentity: RunIdentity;
   trendData: TrendResponse | undefined;
   branchTrendData?: TrendResponse | undefined;
   flamegraphView: "flamegraph" | "callgraph";
@@ -50,6 +52,12 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
   const [showTrendHelp, setShowTrendHelp] = createSignal(false);
   const [chartValueMode, setChartValueMode] = createSignal<"absolute" | "index">("absolute");
   const [searchParams] = useSearchParams();
+  const isJavaScript = () => props.runIdentity.benchmark_kind === "js";
+  const innerRSDValues = () =>
+    props.benchmark.samples
+      .map((sample) => sample.inner_rsd_ppm)
+      .filter((value): value is number => value !== undefined);
+  const formatRSD = (ppm: number) => `${(ppm / 10_000).toFixed(2)}%`;
 
   const isViewingLatestRegression = () => props.regressionContext?.latestRunId === props.runId;
   const currentCommitHashFull = () => {
@@ -165,6 +173,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
               {regressionSummary()}
             </div>
           </Show>
+          <RunIdentitySummary identity={props.runIdentity} compact />
         </div>
         <div class="flex-none ml-4">
           <Button
@@ -190,6 +199,20 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
             sub={formatNs(props.benchmark.max_ns)}
           />
           <StatBlock label="Std Dev" value={formatNs(props.benchmark.std_dev_ns)} />
+          <Show when={isJavaScript() && innerRSDValues().length > 0}>
+            <StatBlock
+              label="Max Inner RSD"
+              value={formatRSD(Math.max(...innerRSDValues()))}
+              sub={props.benchmark.samples
+                .map((sample, index) =>
+                  sample.inner_rsd_ppm === undefined
+                    ? null
+                    : `P${index + 1} ${formatRSD(sample.inner_rsd_ppm)}`,
+                )
+                .filter(Boolean)
+                .join(" · ")}
+            />
+          </Show>
 
           <div class="flex flex-col gap-0.5 md:gap-1">
             <div class="text-[9px] md:text-[10px] uppercase tracking-widest text-text-muted font-bold">
@@ -380,7 +403,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
           </div>
 
           {/* Flamegraph Column */}
-          <div class="flex flex-col h-auto md:h-[600px]">
+          <div class={`flex flex-col h-auto md:h-[600px] ${isJavaScript() ? "hidden" : ""}`}>
             <div class="flex flex-col md:flex-row md:justify-between md:items-center gap-4 md:gap-0 mb-6 border-b border-border pb-2">
               <div class="flex items-center gap-2 relative">
                 <h3 class="text-[12px] font-bold text-black uppercase tracking-widest">

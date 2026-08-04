@@ -37,6 +37,11 @@ func (s *Server) handleRunsRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
+	filter, err := runFilterFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 {
@@ -47,13 +52,14 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	branch := r.URL.Query().Get("branch")
 	since := r.URL.Query().Get("since")
 
-	runs, err := s.db.ListRuns(limit, branch, since)
+	runs, err := s.db.ListRunsFiltered(limit, branch, since, filter)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	type runResponse struct {
+		runIdentityResponse
 		ID            int64  `json:"id"`
 		CommitHash    string `json:"commit_hash"`
 		CommitMessage string `json:"commit_message"`
@@ -71,13 +77,14 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response = append(response, runResponse{
-			ID:            run.ID,
-			CommitHash:    run.CommitHash,
-			CommitMessage: run.CommitMessage,
-			Branch:        run.Branch,
-			RunDate:       run.RunDate,
-			Notes:         run.Notes,
-			ResultCount:   count,
+			runIdentityResponse: identityResponse(&run),
+			ID:                  run.ID,
+			CommitHash:          run.CommitHash,
+			CommitMessage:       run.CommitMessage,
+			Branch:              run.Branch,
+			RunDate:             run.RunDate,
+			Notes:               run.Notes,
+			ResultCount:         count,
 		})
 	}
 
@@ -102,6 +109,15 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	filter, err := explicitRunFilterFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !runMatchesFilter(run, filter) {
+		http.Error(w, "run does not match requested benchmark identity", http.StatusNotFound)
 		return
 	}
 
@@ -137,6 +153,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type runDetailResponse struct {
+		runIdentityResponse
 		ID            int64            `json:"id"`
 		CommitHash    string           `json:"commit_hash"`
 		CommitMessage string           `json:"commit_message"`
@@ -176,13 +193,14 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := runDetailResponse{
-		ID:            run.ID,
-		CommitHash:    run.CommitHash,
-		CommitMessage: run.CommitMessage,
-		Branch:        run.Branch,
-		RunDate:       run.RunDate,
-		Notes:         run.Notes,
-		Results:       resultResponses,
+		runIdentityResponse: identityResponse(run),
+		ID:                  run.ID,
+		CommitHash:          run.CommitHash,
+		CommitMessage:       run.CommitMessage,
+		Branch:              run.Branch,
+		RunDate:             run.RunDate,
+		Notes:               run.Notes,
+		Results:             resultResponses,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -192,12 +210,18 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
+	filter, err := runFilterFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	idAStr := r.URL.Query().Get("id_a")
 	idBStr := r.URL.Query().Get("id_b")
 	commitA := r.URL.Query().Get("a")
 	commitB := r.URL.Query().Get("b")
 
 	var resultsA, resultsB []db.Result
+	var selectedA, selectedB *db.Run
 	var runAHash, runBHash string
 
 	if idAStr != "" && idBStr != "" {
@@ -225,6 +249,11 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if !runMatchesFilter(runA, filter) || !runMatchesFilter(runB, filter) {
+			http.Error(w, "run does not match requested benchmark identity", http.StatusBadRequest)
+			return
+		}
+		selectedA, selectedB = runA, runB
 		runAHash, runBHash = runA.CommitHash, runB.CommitHash
 		resultsA, err = s.db.GetResultsForRun(runA.ID)
 		if err != nil {
@@ -237,7 +266,7 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if commitA != "" && commitB != "" {
-		runA, err := s.db.GetRunByCommit(commitA)
+		runA, err := s.db.GetRunByCommitFiltered(commitA, filter)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				http.Error(w, "run A not found", http.StatusNotFound)
@@ -246,7 +275,7 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		runB, err := s.db.GetRunByCommit(commitB)
+		runB, err := s.db.GetRunByCommitFiltered(commitB, filter)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				http.Error(w, "run B not found", http.StatusNotFound)
@@ -255,6 +284,7 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		selectedA, selectedB = runA, runB
 		runAHash, runBHash = runA.CommitHash, runB.CommitHash
 		resultsA, err = s.db.GetResultsForRun(runA.ID)
 		if err != nil {
@@ -270,6 +300,10 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "provide either id_a & id_b or a & b parameters", http.StatusBadRequest)
 		return
 	}
+	if !sameRunIdentity(selectedA, selectedB) {
+		http.Error(w, "runs have different benchmark identities", http.StatusBadRequest)
+		return
+	}
 
 	// Use P50Ns (median) for comparison - more robust to outliers
 	resultsBMap := make(map[db.BenchmarkKey]db.Result)
@@ -278,14 +312,16 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type comparison struct {
-		Name             string  `json:"name"`
-		Category         string  `json:"category"`
-		BaselineNs       int64   `json:"baseline_ns"` // Median of baseline
-		CurrentNs        int64   `json:"current_ns"`  // Median of current
-		ChangePercent    float64 `json:"change_percent"`
-		IsRegression     bool    `json:"is_regression"`
-		BaselineResultID int64   `json:"baseline_result_id"`
-		CurrentResultID  int64   `json:"current_result_id"`
+		Name             string            `json:"name"`
+		Category         string            `json:"category"`
+		BaselineNs       int64             `json:"baseline_ns"` // Median of baseline
+		CurrentNs        int64             `json:"current_ns"`  // Median of current
+		ChangePercent    float64           `json:"change_percent"`
+		IsRegression     bool              `json:"is_regression"`
+		BaselineResultID int64             `json:"baseline_result_id"`
+		CurrentResultID  int64             `json:"current_result_id"`
+		BaselineSamples  []db.ResultSample `json:"baseline_samples,omitempty"`
+		CurrentSamples   []db.ResultSample `json:"current_samples,omitempty"`
 	}
 
 	var comparisons []comparison
@@ -303,21 +339,25 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 				BaselineNs:       rA.P50Ns,
 				CurrentNs:        resultB.P50Ns,
 				ChangePercent:    change,
-				IsRegression:     change > threshold,
+				IsRegression:     selectedB.BenchmarkKind == "zig" && change > threshold,
 				BaselineResultID: rA.ID,
 				CurrentResultID:  resultB.ID,
+				BaselineSamples:  rA.Samples,
+				CurrentSamples:   resultB.Samples,
 			})
 		}
 	}
 
 	response := struct {
+		runIdentityResponse
 		Baseline    string       `json:"baseline"`
 		Current     string       `json:"current"`
 		Comparisons []comparison `json:"comparisons"`
 	}{
-		Baseline:    runAHash,
-		Current:     runBHash,
-		Comparisons: comparisons,
+		runIdentityResponse: identityResponse(selectedB),
+		Baseline:            runAHash,
+		Current:             runBHash,
+		Comparisons:         comparisons,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -330,6 +370,29 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 	resultID, err := strconv.ParseInt(r.URL.Query().Get("result_id"), 10, 64)
 	if err != nil || resultID <= 0 {
 		http.Error(w, "valid result_id parameter required", http.StatusBadRequest)
+		return
+	}
+	filter, err := runFilterFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	result, err := s.db.GetResult(resultID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "result not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	referenceRun, err := s.db.GetRun(result.RunID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !runMatchesFilter(referenceRun, filter) {
+		http.Error(w, "result does not match requested benchmark identity", http.StatusBadRequest)
 		return
 	}
 
@@ -356,21 +419,24 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type trendPoint struct {
-		RunID         int64  `json:"run_id"`
-		ResultID      int64  `json:"result_id"`
-		CommitHash    string `json:"commit_hash"`
-		CommitMessage string `json:"commit_message,omitempty"`
-		Branch        string `json:"branch"`
-		RunDate       string `json:"run_date"`
-		AvgNs         int64  `json:"avg_ns"`
-		MedianNs      int64  `json:"median_ns"`
-		MinNs         int64  `json:"min_ns"`
-		MaxNs         int64  `json:"max_ns"`
-		StdDevNs      int64  `json:"std_dev_ns"`
-		SampleCount   int64  `json:"sample_count"`
-		CiLowerNs     int64  `json:"ci_lower_ns"`
-		CiUpperNs     int64  `json:"ci_upper_ns"`
-		SemNs         int64  `json:"sem_ns"`
+		runIdentityResponse
+		RunID          int64             `json:"run_id"`
+		ResultID       int64             `json:"result_id"`
+		CommitHash     string            `json:"commit_hash"`
+		CommitMessage  string            `json:"commit_message,omitempty"`
+		Branch         string            `json:"branch"`
+		RunDate        string            `json:"run_date"`
+		AvgNs          int64             `json:"avg_ns"`
+		MedianNs       int64             `json:"median_ns"`
+		MinNs          int64             `json:"min_ns"`
+		MaxNs          int64             `json:"max_ns"`
+		StdDevNs       int64             `json:"std_dev_ns"`
+		SampleCount    int64             `json:"sample_count"`
+		CiLowerNs      int64             `json:"ci_lower_ns"`
+		CiUpperNs      int64             `json:"ci_upper_ns"`
+		SemNs          int64             `json:"sem_ns"`
+		MaxInnerRSDPPM *int64            `json:"max_inner_rsd_ppm,omitempty"`
+		Samples        []db.ResultSample `json:"samples,omitempty"`
 	}
 
 	type trendResponse struct {
@@ -415,23 +481,36 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		ciLower, ciUpper, sem := stats.CI95(t.Result.AvgNs, t.Result.StdDevNs, t.Result.SampleCount)
+		samples, err := s.db.GetResultSamples(t.Result.ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		point := trendPoint{
-			RunID:         t.Run.ID,
-			ResultID:      t.Result.ID,
-			CommitHash:    t.Run.CommitHash,
-			CommitMessage: t.Run.CommitMessage,
-			Branch:        t.Run.Branch,
-			RunDate:       t.Run.RunDate,
-			AvgNs:         t.Result.AvgNs,
-			MedianNs:      t.Result.P50Ns,
-			MinNs:         t.Result.MinNs,
-			MaxNs:         t.Result.MaxNs,
-			StdDevNs:      t.Result.StdDevNs,
-			SampleCount:   t.Result.SampleCount,
-			CiLowerNs:     ciLower,
-			CiUpperNs:     ciUpper,
-			SemNs:         sem,
+			runIdentityResponse: identityResponse(&t.Run),
+			RunID:               t.Run.ID,
+			ResultID:            t.Result.ID,
+			CommitHash:          t.Run.CommitHash,
+			CommitMessage:       t.Run.CommitMessage,
+			Branch:              t.Run.Branch,
+			RunDate:             t.Run.RunDate,
+			AvgNs:               t.Result.AvgNs,
+			MedianNs:            t.Result.P50Ns,
+			MinNs:               t.Result.MinNs,
+			MaxNs:               t.Result.MaxNs,
+			StdDevNs:            t.Result.StdDevNs,
+			SampleCount:         t.Result.SampleCount,
+			CiLowerNs:           ciLower,
+			CiUpperNs:           ciUpper,
+			SemNs:               sem,
+			Samples:             samples,
+		}
+		for _, sample := range samples {
+			if sample.InnerRSDPPM != nil && (point.MaxInnerRSDPPM == nil || *sample.InnerRSDPPM > *point.MaxInnerRSDPPM) {
+				value := *sample.InnerRSDPPM
+				point.MaxInnerRSDPPM = &value
+			}
 		}
 
 		points = append(points, point)
@@ -444,13 +523,18 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		CalibrationCaveat: regressionCalibrationCaveat, FDRLevel: defaultFDR,
 	}
 	if targetFound {
-		evaluation := stats.EvaluateSnapshot(target, observations, stats.SnapshotConfig{
-			Window: defaultWindow, MinPoints: defaultMinPoints, BaselineOffset: defaultBaselineOffset,
-		})
 		response.CurrentStatus.RunID = target.Stat.RunID
-		response.CurrentStatus.Status = evaluation.Result.Status
-		if evaluation.Result.Status == "insufficient" {
-			response.CurrentStatus.Reason = "insufficient_baseline_history"
+		if referenceRun.BenchmarkKind == canonicalJSKind {
+			response.CurrentStatus.Status = "disabled"
+			response.CurrentStatus.Reason = "javascript_regressions_disabled"
+		} else {
+			evaluation := stats.EvaluateSnapshot(target, observations, stats.SnapshotConfig{
+				Window: defaultWindow, MinPoints: defaultMinPoints, BaselineOffset: defaultBaselineOffset,
+			})
+			response.CurrentStatus.Status = evaluation.Result.Status
+			if evaluation.Result.Status == "insufficient" {
+				response.CurrentStatus.Reason = "insufficient_baseline_history"
+			}
 		}
 	}
 
@@ -461,21 +545,36 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(`SELECT DISTINCT category, name FROM results ORDER BY category, name`)
+	filter, err := runFilterFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rows, err := s.db.Query(`SELECT DISTINCT r.category, r.name, COALESCE(ru.machine_id, ''), COALESCE(ru.zig_optimize, ''),
+		ru.benchmark_kind, ru.benchmark_suite, ru.protocol_version, ru.bun_version, ru.zig_version, ru.manifest_hash, ru.manifest_json
+		FROM results r JOIN runs ru ON ru.id = r.run_id ORDER BY r.category, r.name`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer func() { _ = rows.Close() }()
 
-	var keys []db.BenchmarkKey
+	type benchmarkResponse struct {
+		db.BenchmarkKey
+		runIdentityResponse
+	}
+	var keys []benchmarkResponse
 	for rows.Next() {
 		var key db.BenchmarkKey
-		if err := rows.Scan(&key.Category, &key.Name); err != nil {
+		var run db.Run
+		if err := rows.Scan(&key.Category, &key.Name, &run.MachineID, &run.ZigOptimize,
+			&run.BenchmarkKind, &run.BenchmarkSuite, &run.ProtocolVersion, &run.BunVersion, &run.ZigVersion, &run.ManifestHash, &run.ManifestJSON); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		keys = append(keys, key)
+		if runMatchesFilter(&run, filter) {
+			keys = append(keys, benchmarkResponse{BenchmarkKey: key, runIdentityResponse: identityResponse(&run)})
+		}
 	}
 	if err := rows.Err(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1245,6 +1344,10 @@ func (s *Server) handleDatabaseDownload(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
+	if kind := r.URL.Query().Get("benchmark_kind"); kind != "" && kind != "zig" {
+		http.Error(w, "regression analysis is available only for Zig benchmarks", http.StatusBadRequest)
+		return
+	}
 	if raw := r.URL.Query().Get("method"); raw != "" {
 		http.Error(w, "method parameter is no longer supported", http.StatusBadRequest)
 		return
@@ -1292,7 +1395,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		latestRun, err := s.db.GetLatestRunForBranch(branch)
+		latestRun, err := s.db.GetLatestRunFiltered(branch, db.RunFilter{BenchmarkKind: "zig"})
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				// No runs yet for this branch, return empty response
@@ -1341,6 +1444,10 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if targetRun.BenchmarkKind != "zig" {
+		http.Error(w, "regression analysis is available only for Zig benchmarks", http.StatusBadRequest)
 		return
 	}
 	branch = targetRun.Branch
@@ -1688,7 +1795,12 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
-	branches, err := s.db.GetBranchesWithRuns()
+	filter, err := runFilterFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	branches, err := s.db.GetBranchesWithRunsFiltered(filter)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1700,6 +1812,7 @@ func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
 // --- Job endpoints ---
 
 type jobResponse struct {
+	runIdentityResponse
 	ID          int64  `json:"id"`
 	Status      string `json:"status"`
 	Kind        string `json:"kind"`
@@ -1719,6 +1832,10 @@ type jobResponse struct {
 
 func jobToResponse(j *db.Job) jobResponse {
 	return jobResponse{
+		runIdentityResponse: runIdentityResponse{
+			BenchmarkKind: j.BenchmarkKind, BenchmarkSuite: j.BenchmarkSuite,
+			ProtocolVersion: j.ProtocolVersion, ManifestHash: j.ManifestHash,
+		},
 		ID:          j.ID,
 		Status:      j.Status,
 		Kind:        j.Kind,
@@ -1744,16 +1861,27 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Branch      string `json:"branch"`
-		CommitHash  string `json:"commit_hash"`
-		Samples     int    `json:"samples"`
-		Profile     string `json:"profile"`
-		Notes       string `json:"notes"`
-		RequestedBy string `json:"requested_by"`
+		Branch          string `json:"branch"`
+		CommitHash      string `json:"commit_hash"`
+		Samples         int    `json:"samples"`
+		Profile         string `json:"profile"`
+		Notes           string `json:"notes"`
+		RequestedBy     string `json:"requested_by"`
+		BenchmarkKind   string `json:"benchmark_kind"`
+		BenchmarkSuite  string `json:"benchmark_suite"`
+		ProtocolVersion int64  `json:"protocol_version"`
+		ManifestHash    string `json:"manifest_hash"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		http.Error(w, "request body must contain exactly one JSON value", http.StatusBadRequest)
 		return
 	}
 
@@ -1761,15 +1889,46 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "branch is required", http.StatusBadRequest)
 		return
 	}
+	if len(req.Branch) > 512 || len(req.CommitHash) > 128 || len(req.Notes) > 4096 || len(req.RequestedBy) > 256 {
+		http.Error(w, "job field exceeds maximum length", http.StatusBadRequest)
+		return
+	}
+	if req.BenchmarkKind == "" {
+		req.BenchmarkKind = "zig"
+	}
+	if req.BenchmarkSuite == "" {
+		req.BenchmarkSuite = canonicalJSSuite
+	}
+	if req.ProtocolVersion == 0 {
+		req.ProtocolVersion = 1
+	}
+	if req.BenchmarkKind != "zig" && req.BenchmarkKind != canonicalJSKind {
+		http.Error(w, "benchmark_kind must be 'zig' or 'js'", http.StatusBadRequest)
+		return
+	}
 
 	if req.Samples <= 0 {
 		req.Samples = 3
 	}
 	if req.Profile == "" {
-		req.Profile = "cpu"
+		if req.BenchmarkKind == canonicalJSKind {
+			req.Profile = "none"
+		} else {
+			req.Profile = "cpu"
+		}
 	}
 	if req.Profile != "none" && req.Profile != "cpu" {
 		http.Error(w, "profile must be 'none' or 'cpu'", http.StatusBadRequest)
+		return
+	}
+	if req.BenchmarkKind == canonicalJSKind && (req.BenchmarkSuite != canonicalJSSuite ||
+		req.ProtocolVersion != canonicalJSProtocol || req.ManifestHash != canonicalJSManifestHash ||
+		req.Samples != 3 || req.Profile != "none") {
+		http.Error(w, "JavaScript jobs require canonical suite, protocol, manifest_hash, samples=3, and profile='none'", http.StatusBadRequest)
+		return
+	}
+	if req.BenchmarkKind == "zig" && req.ManifestHash != "" {
+		http.Error(w, "Zig jobs must not include manifest_hash", http.StatusBadRequest)
 		return
 	}
 
@@ -1785,16 +1944,18 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := &db.Job{
-		Status:      "pending",
-		Kind:        "benchmark",
-		Branch:      branch,
-		CommitHash:  req.CommitHash,
-		RepoURL:     repoURL,
-		Samples:     req.Samples,
-		Profile:     req.Profile,
-		Notes:       req.Notes,
-		CreatedAt:   time.Now().UTC().Format(time.RFC3339),
-		RequestedBy: req.RequestedBy,
+		Status:        "pending",
+		Kind:          "benchmark",
+		Branch:        branch,
+		CommitHash:    req.CommitHash,
+		RepoURL:       repoURL,
+		Samples:       req.Samples,
+		Profile:       req.Profile,
+		Notes:         req.Notes,
+		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+		RequestedBy:   req.RequestedBy,
+		BenchmarkKind: req.BenchmarkKind, BenchmarkSuite: req.BenchmarkSuite,
+		ProtocolVersion: req.ProtocolVersion, ManifestHash: req.ManifestHash,
 	}
 
 	id, err := s.db.InsertJob(job)
@@ -1832,7 +1993,18 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	branch := r.URL.Query().Get("branch")
 
-	jobs, err := s.db.ListJobs(limit, status, branch)
+	var protocolVersion int64
+	if value := r.URL.Query().Get("protocol_version"); value != "" {
+		var err error
+		protocolVersion, err = strconv.ParseInt(value, 10, 64)
+		if err != nil || protocolVersion <= 0 {
+			http.Error(w, "invalid protocol_version", http.StatusBadRequest)
+			return
+		}
+	}
+	jobs, err := s.db.ListJobsFiltered(limit, status, branch,
+		r.URL.Query().Get("benchmark_kind"), r.URL.Query().Get("requested_by"),
+		r.URL.Query().Get("benchmark_suite"), protocolVersion, r.URL.Query().Get("manifest_hash"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1950,40 +2122,33 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		CommitHash     string `json:"commit_hash"`
-		CommitHashFull string `json:"commit_hash_full"`
-		CommitMessage  string `json:"commit_message"`
-		CommitDate     string `json:"commit_date"`
-		Branch         string `json:"branch"`
-		MachineID      string `json:"machine_id"`
-		Notes          string `json:"notes"`
-		ZigOptimize    string `json:"zig_optimize"`
-		Results        []struct {
-			Category             string            `json:"category"`
-			Name                 string            `json:"name"`
-			MinNs                int64             `json:"min_ns"`
-			AvgNs                int64             `json:"avg_ns"`
-			MaxNs                int64             `json:"max_ns"`
-			StdDevNs             int64             `json:"std_dev_ns"`
-			P50Ns                int64             `json:"p50_ns"`
-			P95Ns                int64             `json:"p95_ns"`
-			P99Ns                int64             `json:"p99_ns"`
-			TotalNs              int64             `json:"total_ns"`
-			Iterations           int64             `json:"iterations"`
-			SampleCount          int64             `json:"sample_count"`
-			SampleAvgVarianceNs2 *float64          `json:"sample_avg_variance_ns2"`
-			SampleDataVersion    *int64            `json:"sample_data_version"`
-			SummaryVersion       *int64            `json:"summary_version"`
-			Samples              []db.ResultSample `json:"samples"`
-			MemStats             []struct {
-				Name  string `json:"name"`
-				Bytes int64  `json:"bytes"`
-			} `json:"mem_stats,omitempty"`
-		} `json:"results"`
+		CommitHash      string            `json:"commit_hash"`
+		CommitHashFull  string            `json:"commit_hash_full"`
+		CommitMessage   string            `json:"commit_message"`
+		CommitDate      string            `json:"commit_date"`
+		Branch          string            `json:"branch"`
+		MachineID       string            `json:"machine_id"`
+		Notes           string            `json:"notes"`
+		ZigOptimize     string            `json:"zig_optimize"`
+		BenchmarkKind   string            `json:"benchmark_kind"`
+		BenchmarkSuite  string            `json:"benchmark_suite"`
+		ProtocolVersion int64             `json:"protocol_version"`
+		BunVersion      string            `json:"bun_version"`
+		ZigVersion      string            `json:"zig_version"`
+		ManifestHash    string            `json:"manifest_hash"`
+		ManifestJSON    string            `json:"manifest_json"`
+		Results         []createRunResult `json:"results"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
 		writeJSONError(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeJSONError(w, "request body must contain exactly one JSON value", http.StatusBadRequest)
 		return
 	}
 
@@ -1992,8 +2157,17 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.ZigOptimize == "" {
+	if req.BenchmarkKind == "" {
+		req.BenchmarkKind = "zig"
+	}
+	if req.BenchmarkKind == "zig" && req.ZigOptimize == "" {
 		req.ZigOptimize = "ReleaseFast"
+	}
+	if req.BenchmarkSuite == "" {
+		req.BenchmarkSuite = "core-default"
+	}
+	if req.ProtocolVersion == 0 {
+		req.ProtocolVersion = 1
 	}
 
 	run := &db.Run{
@@ -2006,6 +2180,13 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		MachineID:      req.MachineID,
 		Notes:          req.Notes,
 		ZigOptimize:    req.ZigOptimize,
+		BenchmarkKind:  req.BenchmarkKind, BenchmarkSuite: req.BenchmarkSuite,
+		ProtocolVersion: req.ProtocolVersion, BunVersion: req.BunVersion,
+		ZigVersion: req.ZigVersion, ManifestHash: req.ManifestHash, ManifestJSON: req.ManifestJSON,
+	}
+	if err := validateCreateRun(run, req.Results); err != nil {
+		writeJSONError(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	results := make([]db.Result, 0, len(req.Results))
@@ -2065,6 +2246,12 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		"result_count":     len(resultIDs),
 		"result_ids":       legacyResultIDMap(resultIDs),
 		"results":          resultIDList(resultIDs),
+		"benchmark_kind":   storedRun.BenchmarkKind,
+		"benchmark_suite":  storedRun.BenchmarkSuite,
+		"protocol_version": storedRun.ProtocolVersion,
+		"bun_version":      storedRun.BunVersion,
+		"zig_version":      storedRun.ZigVersion,
+		"manifest_hash":    storedRun.ManifestHash,
 	})
 }
 
@@ -2258,7 +2445,12 @@ func (s *Server) handleHasCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	exists, err := s.db.HasCommit(hash)
+	filter, err := runFilterFromRequest(r)
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	exists, err := s.db.HasCommitFiltered(hash, filter)
 	if err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2278,13 +2470,12 @@ func (s *Server) handleLatestCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var run *db.Run
-	var err error
-	if branch := r.URL.Query().Get("branch"); branch != "" {
-		run, err = s.db.GetLatestRunForBranch(branch)
-	} else {
-		run, err = s.db.GetLatestRun()
+	filter, err := runFilterFromRequest(r)
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusBadRequest)
+		return
 	}
+	run, err := s.db.GetLatestRunFiltered(r.URL.Query().Get("branch"), filter)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			w.Header().Set("Content-Type", "application/json")
@@ -2302,6 +2493,11 @@ func (s *Server) handleLatestCommit(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"commit_hash":      run.CommitHash,
 		"commit_hash_full": run.CommitHashFull,
+		"benchmark_kind":   run.BenchmarkKind, "benchmark_suite": run.BenchmarkSuite,
+		"protocol_version": run.ProtocolVersion, "bun_version": run.BunVersion,
+		"zig_version": run.ZigVersion, "manifest_hash": run.ManifestHash,
+		"manifest_json": run.ManifestJSON, "machine_id": run.MachineID,
+		"zig_optimize": run.ZigOptimize,
 	})
 }
 
@@ -2371,6 +2567,20 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request, id int6
 		case currentStatus == "running" && newStatus == "completed":
 			if req.RunID == nil {
 				writeJSONError(w, "run_id required for completed status", http.StatusBadRequest)
+				return
+			}
+			completedRun, err := s.db.GetRun(*req.RunID)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					writeJSONError(w, "run not found", http.StatusBadRequest)
+					return
+				}
+				writeJSONError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if completedRun.BenchmarkKind != job.BenchmarkKind || completedRun.BenchmarkSuite != job.BenchmarkSuite ||
+				completedRun.ProtocolVersion != job.ProtocolVersion || completedRun.ManifestHash != job.ManifestHash {
+				writeJSONError(w, "run benchmark identity does not match job", http.StatusBadRequest)
 				return
 			}
 			if err := s.db.CompleteJob(id, *req.RunID); err != nil {

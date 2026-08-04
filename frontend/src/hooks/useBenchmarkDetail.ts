@@ -1,8 +1,15 @@
 import { createResource, createSignal, createMemo, createEffect } from "solid-js";
 import { useParams, useSearchParams, useNavigate } from "@solidjs/router";
-import { api } from "../services/api";
+import { api, ApiError } from "../services/api";
 import type { BenchmarkResult, TrendResponse } from "../services/api";
-import { globalCategory, globalFilter, setGlobalCategory, setGlobalFilter } from "../store";
+import {
+  benchmarkKind,
+  globalCategory,
+  globalFilter,
+  setBenchmarkKind,
+  setGlobalCategory,
+  setGlobalFilter,
+} from "../store";
 import { useFilteredBenchmarks } from "./useFilteredBenchmarks";
 import { useFilterParams } from "./useFilterParams";
 
@@ -53,11 +60,30 @@ export function useBenchmarkDetail() {
   const navigate = useNavigate();
   useFilterParams(searchParams, setSearchParams);
 
-  const [run] = createResource(() => {
-    if (!params.id) return undefined;
-    const id = parseInt(params.id);
-    return isNaN(id) ? undefined : id;
-  }, api.getRunDetails);
+  const [run] = createResource(
+    () => {
+      if (!params.id) return undefined;
+      const id = parseInt(params.id);
+      return isNaN(id) ? undefined : { id, kind: benchmarkKind() };
+    },
+    async ({ id, kind }) => {
+      let details;
+      try {
+        details = await api.getRunDetails(id, kind);
+      } catch (error) {
+        if (!(error instanceof ApiError) || (error.status !== 400 && error.status !== 404)) {
+          throw error;
+        }
+        details = await api.getRunDetails(id, kind === "zig" ? "js" : "zig");
+      }
+
+      if (details.benchmark_kind !== kind) {
+        setBenchmarkKind(details.benchmark_kind);
+        setSearchParams({ benchmark_kind: details.benchmark_kind }, { replace: true });
+      }
+      return details;
+    },
+  );
 
   const [selectedBenchmarkId, setSelectedBenchmarkId] = createSignal<number | null>(null);
   const [sortBy, setSortBy] = createSignal<keyof BenchmarkResult | "mem_stats">("avg_ns");
@@ -198,10 +224,10 @@ export function useBenchmarkDetail() {
     () => {
       const resultId = selectedBenchmark()?.id;
       if (!resultId) return null;
-      return { resultId, limit: 100 };
+      return { resultId, limit: 100, kind: benchmarkKind() };
     },
-    async ({ resultId, limit }) => {
-      return api.getTrend(resultId, limit);
+    async ({ resultId, limit, kind }) => {
+      return api.getTrend(resultId, limit, kind);
     },
   );
 
@@ -215,7 +241,7 @@ export function useBenchmarkDetail() {
   createEffect(async () => {
     const rid = run()?.id;
     const bid = selectedBenchmarkId();
-    if (!rid || !bid) {
+    if (!rid || !bid || benchmarkKind() === "js") {
       setHasCpuProfile(false);
       return;
     }

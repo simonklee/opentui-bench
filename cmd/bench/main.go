@@ -76,7 +76,7 @@ func main() {
 
 func recordCmd() *cobra.Command {
 	var cfg runner.RunConfig
-	var profileStr string
+	var profileStr, benchmarkKind string
 	var apiURL, apiKey string
 
 	cmd := &cobra.Command{
@@ -101,6 +101,7 @@ Remote usage:
 			}
 
 			cfg.Profile = runner.ProfileMode(profileStr)
+			cfg.BenchmarkKind = runner.BenchmarkKind(benchmarkKind)
 			switch cfg.Profile {
 			case runner.ProfileNone, runner.ProfileCPU:
 			default:
@@ -144,6 +145,7 @@ Remote usage:
 	cmd.Flags().StringVar(&profileStr, "profile", string(runner.ProfileNone), "profile mode (none, cpu)")
 	cmd.Flags().IntVar(&cfg.PerfFreq, "perf-freq", 997, "perf sampling frequency")
 	cmd.Flags().StringVar(&cfg.Branch, "branch", "", "override branch name (useful for detached HEAD)")
+	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
 	cmd.Flags().StringVar(&apiURL, "api-url", "", "remote API URL (mutually exclusive with --db)")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key for remote auth")
 
@@ -1148,13 +1150,17 @@ func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath
 	}
 
 	cfg := runner.RunConfig{
-		RepoPath:    repoPath,
-		ZigOptimize: "ReleaseFast",
-		Samples:     job.Samples,
-		Profile:     profileMode,
-		PerfFreq:    997,
-		Notes:       job.Notes,
-		Branch:      job.Branch,
+		RepoPath:        repoPath,
+		ZigOptimize:     "ReleaseFast",
+		Samples:         job.Samples,
+		Profile:         profileMode,
+		PerfFreq:        997,
+		Notes:           job.Notes,
+		Branch:          job.Branch,
+		BenchmarkKind:   runner.BenchmarkKind(job.BenchmarkKind),
+		BenchmarkSuite:  job.BenchmarkSuite,
+		ProtocolVersion: job.ProtocolVersion,
+		ManifestHash:    job.ManifestHash,
 	}
 
 	// Run benchmarks
@@ -1301,13 +1307,17 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 	}
 
 	cfg := runner.RunConfig{
-		RepoPath:    repoPath,
-		ZigOptimize: "ReleaseFast",
-		Samples:     job.Samples,
-		Profile:     profileMode,
-		PerfFreq:    997,
-		Notes:       job.Notes,
-		Branch:      job.Branch,
+		RepoPath:        repoPath,
+		ZigOptimize:     "ReleaseFast",
+		Samples:         job.Samples,
+		Profile:         profileMode,
+		PerfFreq:        997,
+		Notes:           job.Notes,
+		Branch:          job.Branch,
+		BenchmarkKind:   runner.BenchmarkKind(job.BenchmarkKind),
+		BenchmarkSuite:  job.BenchmarkSuite,
+		ProtocolVersion: job.ProtocolVersion,
+		ManifestHash:    job.ManifestHash,
 	}
 
 	// Run benchmarks (collect results without writing to any DB)
@@ -1357,8 +1367,9 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 }
 
 func triggerCmd() *cobra.Command {
-	var branch, commitHash, notes, requestedBy, profile string
+	var branch, commitHash, notes, requestedBy, profile, benchmarkKind, benchmarkSuite, manifestHash string
 	var samples int
+	var protocolVersion int64
 
 	cmd := &cobra.Command{
 		Use:   "trigger",
@@ -1378,6 +1389,13 @@ Example:
 			if profile != "none" && profile != "cpu" {
 				return fmt.Errorf("profile must be 'none' or 'cpu'")
 			}
+			if benchmarkKind != string(runner.BenchmarkZig) && benchmarkKind != string(runner.BenchmarkJS) {
+				return fmt.Errorf("kind must be 'zig' or 'js'")
+			}
+			if benchmarkKind == string(runner.BenchmarkJS) && (samples != runner.JavaScriptSamples || profile != string(runner.ProfileNone) ||
+				benchmarkSuite != runner.JavaScriptSuite || protocolVersion != runner.JavaScriptProtocol || manifestHash != runner.JavaScriptManifestHash) {
+				return fmt.Errorf("JavaScript jobs require the canonical identity, samples=3, and profile=none")
+			}
 
 			database, cleanup, err := openDB()
 			if err != nil {
@@ -1386,16 +1404,20 @@ Example:
 			defer cleanup()
 
 			job := &db.Job{
-				Status:      "pending",
-				Kind:        "benchmark",
-				Branch:      branch,
-				CommitHash:  commitHash,
-				RepoURL:     "origin",
-				Samples:     samples,
-				Profile:     profile,
-				Notes:       notes,
-				CreatedAt:   time.Now().UTC().Format(time.RFC3339),
-				RequestedBy: requestedBy,
+				Status:          "pending",
+				Kind:            "benchmark",
+				Branch:          branch,
+				CommitHash:      commitHash,
+				RepoURL:         "origin",
+				Samples:         samples,
+				Profile:         profile,
+				Notes:           notes,
+				CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+				RequestedBy:     requestedBy,
+				BenchmarkKind:   benchmarkKind,
+				BenchmarkSuite:  benchmarkSuite,
+				ProtocolVersion: protocolVersion,
+				ManifestHash:    manifestHash,
 			}
 
 			id, err := database.InsertJob(job)
@@ -1415,6 +1437,10 @@ Example:
 	cmd.Flags().StringVar(&commitHash, "commit", "", "specific commit hash (default: branch HEAD)")
 	cmd.Flags().IntVar(&samples, "samples", 3, "number of benchmark samples")
 	cmd.Flags().StringVar(&profile, "profile", "cpu", "profile mode (none, cpu)")
+	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
+	cmd.Flags().StringVar(&benchmarkSuite, "suite", runner.JavaScriptSuite, "benchmark suite")
+	cmd.Flags().Int64Var(&protocolVersion, "protocol", runner.JavaScriptProtocol, "benchmark protocol version")
+	cmd.Flags().StringVar(&manifestHash, "manifest", "", "expected benchmark manifest hash")
 	cmd.Flags().StringVar(&notes, "notes", "", "optional notes")
 	cmd.Flags().StringVar(&requestedBy, "requested-by", "", "who requested this job")
 

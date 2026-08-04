@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import type { Component } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import type { Run } from "../services/api";
+import { benchmarkKind } from "../store";
 
 interface RunsTableProps {
   runs: Run[] | undefined;
@@ -29,7 +30,7 @@ const RunsTable: Component<RunsTableProps> = (props) => {
             {(run) => (
               <tr
                 class="hover:bg-bg-hover cursor-pointer transition-colors duration-75 border-b border-border group"
-                onClick={() => navigate(`/benchmarks/${run.id}`)}
+                onClick={() => navigate(`/benchmarks/${run.id}?benchmark_kind=${benchmarkKind()}`)}
               >
                 <td class="px-4 py-3">
                   <a
