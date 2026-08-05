@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"opentui-bench/internal/db"
@@ -51,9 +52,10 @@ func (e *remoteResponseError) Unwrap() error { return e.err }
 
 // RemoteRecorder posts benchmark results to the Fly.io API.
 type RemoteRecorder struct {
-	BaseURL string       // e.g. "https://opentui-bench.fly.dev"
-	APIKey  string       // Bearer token for auth
-	Client  *http.Client // HTTP client (uses default if nil)
+	BaseURL            string       // e.g. "https://opentui-bench.fly.dev"
+	APIKey             string       // Bearer token for auth
+	Client             *http.Client // HTTP client (uses default if nil)
+	JavaScriptRuntimes []string     // exact measured runtimes this worker can execute
 }
 
 func (r *RemoteRecorder) client() *http.Client {
@@ -84,6 +86,8 @@ type createRunRequest struct {
 	BenchmarkSuite  string               `json:"benchmark_suite"`
 	ProtocolVersion int64                `json:"protocol_version"`
 	BunVersion      string               `json:"bun_version"`
+	JSRuntime       string               `json:"js_runtime"`
+	RuntimeVersion  string               `json:"runtime_version"`
 	ZigVersion      string               `json:"zig_version"`
 	ManifestHash    string               `json:"manifest_hash"`
 	ManifestJSON    string               `json:"manifest_json"`
@@ -147,6 +151,8 @@ func (r *RemoteRecorder) RecordRun(ctx context.Context, parsed *record.ParsedRun
 		BenchmarkSuite:  parsed.Meta.BenchmarkSuite,
 		ProtocolVersion: parsed.Meta.ProtocolVersion,
 		BunVersion:      parsed.Meta.BunVersion,
+		JSRuntime:       parsed.Meta.JSRuntime,
+		RuntimeVersion:  parsed.Meta.RuntimeVersion,
 		ZigVersion:      parsed.Meta.ZigVersion,
 		ManifestHash:    parsed.Meta.ManifestHash,
 		ManifestJSON:    parsed.Meta.ManifestJSON,
@@ -445,6 +451,8 @@ func (r *RemoteRecorder) ClaimJob(ctx context.Context, benchmarkKind string) (*J
 	u := r.BaseURL + "/api/jobs/claim"
 	params := url.Values{}
 	params.Set(joblease.QueryParameter, strconv.Itoa(joblease.Protocol))
+	runtimes := r.JavaScriptRuntimes
+	params.Set("javascript_runtimes", strings.Join(runtimes, ","))
 	if benchmarkKind != "" {
 		params.Set("benchmark_kind", benchmarkKind)
 	}
@@ -513,6 +521,8 @@ type JobClaimResponse struct {
 	BenchmarkSuite  string `json:"benchmark_suite"`
 	ProtocolVersion int64  `json:"protocol_version"`
 	ManifestHash    string `json:"manifest_hash"`
+	JSRuntime       string `json:"js_runtime"`
+	RuntimeVersion  string `json:"runtime_version"`
 	ClaimToken      string `json:"-"`
 }
 

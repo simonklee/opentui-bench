@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"opentui-bench/internal/joblease"
 	"opentui-bench/internal/jsbench"
 )
 
@@ -1923,6 +1924,74 @@ func TestVersion5MigrationPreservesDuplicateRunsForRemoteIdempotency(t *testing.
 	}
 	if keyed != 1 {
 		t.Fatalf("idempotent runs = %d, want 1", keyed)
+	}
+}
+
+func TestVersion8MigrationBackfillsJavaScriptRuntimeIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "version-7-runtime.db")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO runs(commit_hash, run_date, benchmark_kind, bun_version, js_runtime, runtime_version)
+		VALUES ('legacy', '2026-08-04T00:00:00Z', 'js', '1.2.3', '', '');
+		INSERT INTO jobs(status, kind, branch, samples, profile, created_at, benchmark_kind, benchmark_suite,
+			protocol_version, manifest_hash, js_runtime, runtime_version)
+		VALUES ('pending', 'benchmark', 'main', 3, 'none', '2026-08-04T00:00:00Z', 'js', 'core-default',
+			1, ?, '', '');
+		PRAGMA user_version = 7`, jsbench.ManifestDigest); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = database.Close() }()
+	var runRuntime, runVersion, jobRuntime, jobVersion string
+	if err := database.QueryRow(`SELECT js_runtime, runtime_version FROM runs WHERE commit_hash = 'legacy'`).Scan(&runRuntime, &runVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT js_runtime, runtime_version FROM jobs`).Scan(&jobRuntime, &jobVersion); err != nil {
+		t.Fatal(err)
+	}
+	if runRuntime != jsbench.RuntimeBun || runVersion != "1.2.3" || jobRuntime != jsbench.RuntimeBun || jobVersion != jsbench.BunVersion {
+		t.Fatalf("run=%s/%s job=%s/%s", runRuntime, runVersion, jobRuntime, jobVersion)
+	}
+}
+
+func TestRuntimeIdentitySeparatesCohortsAndClaims(t *testing.T) {
+	database := openTestDB(t)
+	bun := &Run{BenchmarkKind: jsbench.Kind, BenchmarkSuite: jsbench.Suite, ProtocolVersion: jsbench.Protocol,
+		JSRuntime: jsbench.RuntimeBun, RuntimeVersion: jsbench.BunVersion, BunVersion: jsbench.BunVersion,
+		ZigVersion: jsbench.ZigVersion, ManifestHash: jsbench.ManifestDigest, MachineID: "runner"}
+	node := *bun
+	node.JSRuntime, node.RuntimeVersion, node.BunVersion = jsbench.RuntimeNode, jsbench.NodeVersion, ""
+	if SameRunCohort(bun, &node) || !CrossRuntimeCompatible(bun, &node) {
+		t.Fatalf("bun/node compatibility: same=%v cross=%v", SameRunCohort(bun, &node), CrossRuntimeCompatible(bun, &node))
+	}
+	jobID, err := database.InsertJob(&Job{Status: "pending", Kind: "benchmark", Branch: "main", Samples: 3,
+		Profile: "none", CreatedAt: "2026-08-04T00:00:00Z", BenchmarkKind: jsbench.Kind,
+		BenchmarkSuite: jsbench.Suite, ProtocolVersion: jsbench.Protocol, ManifestHash: jsbench.ManifestDigest,
+		JSRuntime: jsbench.RuntimeNode, RuntimeVersion: jsbench.NodeVersion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := joblease.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := database.ClaimNextPendingJobWithToken(jsbench.Kind, token)
+	if err != nil || claimed != nil {
+		t.Fatalf("Bun-compatible claim took Node job: job=%+v err=%v", claimed, err)
+	}
+	token, _ = joblease.NewToken()
+	claimed, err = database.ClaimNextPendingJobWithToken(jsbench.Kind, token, jsbench.RuntimeNode)
+	if err != nil || claimed == nil || claimed.ID != jobID {
+		t.Fatalf("Node claim: job=%+v err=%v", claimed, err)
 	}
 }
 

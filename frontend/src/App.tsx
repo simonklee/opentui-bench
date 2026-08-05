@@ -14,6 +14,8 @@ import {
   isSidebarExpanded,
   setBenchmarkKind,
   setIsSidebarExpanded,
+  jsRuntimeFilter,
+  setJSRuntimeFilter,
 } from "./store";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 
@@ -28,7 +30,16 @@ const Layout: ParentComponent = (props) => {
       setBenchmarkKind(kind);
     }
     if (location.pathname === "/" && kind === "js") {
-      navigate("/runs?benchmark_kind=js", { replace: true });
+      navigate(`/runs?benchmark_kind=js&js_runtime=${jsRuntimeFilter()}`, { replace: true });
+    }
+  });
+  createEffect(() => {
+    const runtime = new URLSearchParams(location.search).get("js_runtime");
+    if (
+      (runtime === "bun" || runtime === "node" || runtime === "all") &&
+      runtime !== jsRuntimeFilter()
+    ) {
+      setJSRuntimeFilter(runtime);
     }
   });
 

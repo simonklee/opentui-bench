@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS runs (
     benchmark_suite TEXT NOT NULL DEFAULT 'core-default',
     protocol_version INTEGER NOT NULL DEFAULT 1,
     bun_version TEXT NOT NULL DEFAULT '',
+    js_runtime TEXT NOT NULL DEFAULT '',
+    runtime_version TEXT NOT NULL DEFAULT '',
     zig_version TEXT NOT NULL DEFAULT '',
     manifest_hash TEXT NOT NULL DEFAULT '',
     manifest_json TEXT NOT NULL DEFAULT '',
@@ -128,7 +130,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     benchmark_kind TEXT NOT NULL DEFAULT 'zig',
     benchmark_suite TEXT NOT NULL DEFAULT 'core-default',
     protocol_version INTEGER NOT NULL DEFAULT 1,
-    manifest_hash TEXT NOT NULL DEFAULT ''
+    manifest_hash TEXT NOT NULL DEFAULT '',
+    js_runtime TEXT NOT NULL DEFAULT '',
+    runtime_version TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
@@ -185,10 +189,12 @@ SELECT
     ru.benchmark_suite,
     ru.protocol_version,
     ru.bun_version,
+    ru.js_runtime,
+    ru.runtime_version,
     ru.zig_version,
     ru.manifest_hash,
     ru.manifest_json
 FROM results r
 JOIN runs ru ON r.run_id = ru.id;
 
-PRAGMA user_version = 7;
+PRAGMA user_version = 8;

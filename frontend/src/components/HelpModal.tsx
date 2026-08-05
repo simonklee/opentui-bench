@@ -29,6 +29,10 @@ const HelpModal: Component<HelpModalProps> = (props) => {
             </button>
           </div>
           <div class="p-6">
+            <p class="mb-5 text-[12px] leading-relaxed text-text-muted">
+              JavaScript views can discover Bun, Node, or all runs. Compare uses exact history by
+              default; choose Runtimes for same-commit Bun/Node comparisons.
+            </p>
             <div class="flex justify-between mb-3 text-[13px] text-text-main">
               <span>Next/Prev Run</span>
               <div>

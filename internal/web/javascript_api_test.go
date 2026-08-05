@@ -107,14 +107,14 @@ func TestJavaScriptRunCapability(t *testing.T) {
 	server, _ := newAPIStorageServer(t)
 	recorder := httptest.NewRecorder()
 	server.handleCapabilities(recorder, httptest.NewRequest(http.MethodGet, "/api/capabilities", nil))
-	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"javascript_runs":0,"job_lease_protocol":2}` {
+	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"javascript_runs":0,"javascript_runtimes":["bun","node"],"javascript_protocol":1,"job_lease_protocol":3}` {
 		t.Fatalf("status/body = %d: %s", recorder.Code, recorder.Body.String())
 	}
 
 	server.javascriptRuns = true
 	recorder = httptest.NewRecorder()
 	server.handleCapabilities(recorder, httptest.NewRequest(http.MethodGet, "/api/capabilities", nil))
-	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"javascript_runs":1,"job_lease_protocol":2}` {
+	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"javascript_runs":1,"javascript_runtimes":["bun","node"],"javascript_protocol":1,"job_lease_protocol":3}` {
 		t.Fatalf("enabled status/body = %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
@@ -513,7 +513,7 @@ func TestDisabledJavaScriptClaimsOnlySelectZig(t *testing.T) {
 
 	server.javascriptRuns = true
 	enabledJS := httptest.NewRecorder()
-	server.handleClaimJob(enabledJS, leaseClaimRequest("/api/jobs/claim?benchmark_kind=js"))
+	server.handleClaimJob(enabledJS, leaseClaimRequest("/api/jobs/claim?benchmark_kind=js&javascript_runtimes=bun"))
 	if enabledJS.Code != http.StatusOK || !strings.Contains(enabledJS.Body.String(), fmt.Sprintf(`"id":%d`, jsID)) {
 		t.Fatalf("enabled JS claim status/body = %d: %s", enabledJS.Code, enabledJS.Body.String())
 	}

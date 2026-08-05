@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	Protocol       = 2
+	Protocol       = 3
 	QueryParameter = "job_lease_protocol"
 	TokenBytes     = 32
 	TokenLength    = TokenBytes * 2

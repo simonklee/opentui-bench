@@ -5,10 +5,16 @@ import { formatNs, formatBytes } from "../utils/format";
 import { Button } from "./Button";
 import TrendChart from "./TrendChart";
 import FlamegraphViewer from "./FlamegraphViewer";
-import type { BenchmarkResult, RunIdentity, TrendResponse } from "../services/api";
+import type {
+  BenchmarkResult,
+  RunIdentity,
+  RuntimeTrendResponse,
+  TrendResponse,
+} from "../services/api";
 import TrendIndicator from "./TrendIndicator";
 import type { RegressionNavigationContext } from "../hooks/useBenchmarkDetail";
 import RunIdentitySummary from "./RunIdentity";
+import RuntimeTrendChart from "./RuntimeTrendChart";
 
 const GITHUB_REPO_URL = "https://github.com/anomalyco/opentui";
 
@@ -34,6 +40,7 @@ interface BenchmarkDetailModalProps {
   branch: string;
   runIdentity: RunIdentity;
   trendData: TrendResponse | undefined;
+  runtimeTrendData?: RuntimeTrendResponse | undefined;
   branchTrendData?: TrendResponse | undefined;
   flamegraphView: "flamegraph" | "callgraph";
   setFlamegraphView: (v: "flamegraph" | "callgraph") => void;
@@ -51,8 +58,13 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
   const [showProfileHelp, setShowProfileHelp] = createSignal(false);
   const [showTrendHelp, setShowTrendHelp] = createSignal(false);
   const [chartValueMode, setChartValueMode] = createSignal<"absolute" | "index">("absolute");
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const isJavaScript = () => props.runIdentity.benchmark_kind === "js";
+  const trendMode = () =>
+    isJavaScript() && searchParams.trend_mode === "runtime" ? "runtime" : "cohort";
+  const runtimeValueMode = () =>
+    searchParams.runtime_value === "relative" ? "relative" : "absolute";
+  const baselineRuntime = () => (searchParams.baseline_runtime === "node" ? "node" : "bun");
   const innerRSDValues = () =>
     props.benchmark.samples
       .map((sample) => sample.inner_rsd_ppm)
@@ -275,6 +287,13 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                 <h3 class="text-[12px] font-bold text-black uppercase tracking-widest">
                   Performance History
                 </h3>
+                <Show when={isJavaScript()}>
+                  <span class="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider border border-border text-text-main whitespace-nowrap">
+                    {trendMode() === "runtime"
+                      ? `${baselineRuntime()} cohort = 100`
+                      : `${props.runIdentity.js_runtime || "bun"} exact cohort`}
+                  </span>
+                </Show>
                 <Show when={props.trendData?.current_status}>
                   {(status) => (
                     <span
@@ -345,6 +364,22 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
               </div>
               <div class="self-start md:self-auto">
                 <div class="flex items-center gap-2 md:gap-3 flex-wrap">
+                  <Show when={isJavaScript()}>
+                    <div class="flex border border-border text-[9px] font-bold uppercase tracking-wider">
+                      <button
+                        class={`px-2 py-1 ${trendMode() === "cohort" ? "bg-black text-white" : "bg-white text-text-muted"}`}
+                        onClick={() => setSearchParams({ trend_mode: null })}
+                      >
+                        Cohort history
+                      </button>
+                      <button
+                        class={`px-2 py-1 ${trendMode() === "runtime" ? "bg-black text-white" : "bg-white text-text-muted"}`}
+                        onClick={() => setSearchParams({ trend_mode: "runtime" })}
+                      >
+                        Compare runtimes
+                      </button>
+                    </div>
+                  </Show>
                   <div class="flex items-center gap-1">
                     <Button
                       active={props.chartRange === 30}
@@ -372,13 +407,23 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                     <div class="relative">
                       <select
                         class="appearance-none pl-2 pr-6 py-1 border border-border rounded-none text-[11px] bg-white text-black outline-none cursor-pointer font-mono font-medium hover:border-black transition-colors"
-                        value={chartValueMode()}
+                        value={trendMode() === "runtime" ? runtimeValueMode() : chartValueMode()}
                         onChange={(e) =>
-                          setChartValueMode(e.currentTarget.value as "absolute" | "index")
+                          trendMode() === "runtime"
+                            ? setSearchParams({
+                                runtime_value:
+                                  e.currentTarget.value === "relative" ? "relative" : null,
+                              })
+                            : setChartValueMode(e.currentTarget.value as "absolute" | "index")
                         }
                       >
                         <option value="absolute">ns</option>
-                        <option value="index">index</option>
+                        <Show
+                          when={trendMode() === "runtime"}
+                          fallback={<option value="index">index</option>}
+                        >
+                          <option value="relative">relative</option>
+                        </Show>
                       </select>
                       <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1.5 text-black">
                         <svg
@@ -395,28 +440,52 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
               </div>
             </div>
             <Show when={isJavaScript()}>
-              <div class="mb-3 text-[11px] text-text-muted">
-                JavaScript statistical inference is disabled; trend deltas are descriptive.
+              <div class="mb-3 flex items-center justify-between gap-3 text-[11px] text-text-muted">
+                <span>
+                  JavaScript statistical inference is disabled; trend deltas are descriptive.
+                </span>
+                <Show when={trendMode() === "runtime"}>
+                  <Button
+                    onClick={() =>
+                      setSearchParams({
+                        baseline_runtime: baselineRuntime() === "bun" ? "node" : "bun",
+                      })
+                    }
+                  >
+                    Swap baseline
+                  </Button>
+                </Show>
               </div>
             </Show>
             <div class="h-[300px] relative border border-border p-4">
               <Show
-                when={props.trendData}
+                when={trendMode() === "runtime" ? props.runtimeTrendData : props.trendData}
                 fallback={
                   <div class="flex items-center justify-center h-full text-text-muted font-mono text-xs">
                     Loading trend data...
                   </div>
                 }
               >
-                <TrendChart
-                  data={props.trendData!.points}
-                  overlayData={props.branchTrendData?.points}
-                  overlayBranch={props.branch}
-                  range={props.chartRange}
-                  valueMode={chartValueMode()}
-                  currentRunId={props.runId}
-                  onPointClick={props.onTrendClick}
-                />
+                <Show
+                  when={trendMode() === "runtime"}
+                  fallback={
+                    <TrendChart
+                      data={props.trendData!.points}
+                      overlayData={props.branchTrendData?.points}
+                      overlayBranch={props.branch}
+                      range={props.chartRange}
+                      valueMode={chartValueMode()}
+                      currentRunId={props.runId}
+                      onPointClick={props.onTrendClick}
+                    />
+                  }
+                >
+                  <RuntimeTrendChart
+                    data={props.runtimeTrendData!}
+                    mode={runtimeValueMode()}
+                    range={props.chartRange}
+                  />
+                </Show>
               </Show>
             </div>
             <div class="mt-3 flex justify-between text-[10px] text-text-muted font-mono uppercase tracking-wider">

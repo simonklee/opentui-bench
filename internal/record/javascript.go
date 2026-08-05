@@ -18,6 +18,8 @@ type jsInvocation struct {
 	BenchmarkSuite  string           `json:"benchmark_suite"`
 	ProtocolVersion int64            `json:"protocol_version"`
 	BunVersion      string           `json:"bun_version"`
+	JSRuntime       string           `json:"js_runtime"`
+	RuntimeVersion  string           `json:"runtime_version"`
 	ZigVersion      string           `json:"zig_version"`
 	Manifest        jsbench.Manifest `json:"manifest"`
 	Results         []jsResult       `json:"results"`
@@ -38,7 +40,10 @@ func ParseJSInvocations(invocations []io.Reader, meta RunMetadata) (*ParsedRun, 
 	if len(invocations) != jsbench.Samples {
 		return nil, fmt.Errorf("JavaScript protocol requires exactly 3 invocations, got %d", len(invocations))
 	}
-	if meta.BenchmarkSuite == "" || meta.ProtocolVersion <= 0 || meta.BunVersion == "" ||
+	if meta.JSRuntime == "" && meta.BunVersion != "" {
+		meta.JSRuntime, meta.RuntimeVersion = jsbench.RuntimeBun, meta.BunVersion
+	}
+	if meta.BenchmarkSuite == "" || meta.ProtocolVersion <= 0 || meta.JSRuntime == "" || meta.RuntimeVersion == "" ||
 		meta.ZigVersion == "" || meta.ManifestHash == "" {
 		return nil, fmt.Errorf("complete expected JavaScript identity is required")
 	}
@@ -56,6 +61,9 @@ func ParseJSInvocations(invocations []io.Reader, meta RunMetadata) (*ParsedRun, 
 		}
 		if err := validateJSIdentity(document, meta); err != nil {
 			return nil, fmt.Errorf("JavaScript invocation %d: %w", invocationIndex, err)
+		}
+		if document.SchemaVersion == 1 {
+			meta.LegacyJSIdentity = true
 		}
 		manifestJSON, err := jsbench.CanonicalManifestJSON(document.Manifest)
 		if err != nil {
@@ -137,11 +145,22 @@ func decodeJSInvocation(reader io.Reader) (*jsInvocation, error) {
 }
 
 func validateJSIdentity(document *jsInvocation, expected RunMetadata) error {
-	if document.SchemaVersion != 1 {
-		return fmt.Errorf("schema_version = %d, want 1", document.SchemaVersion)
+	if document.SchemaVersion != 1 && document.SchemaVersion != 2 {
+		return fmt.Errorf("schema_version = %d, want 1 or 2", document.SchemaVersion)
+	}
+	if document.SchemaVersion == 1 {
+		if expected.JSRuntime != jsbench.RuntimeBun || document.BunVersion != expected.RuntimeVersion {
+			return fmt.Errorf("schema 1 is accepted only for legacy Bun retries")
+		}
+	} else if document.JSRuntime != expected.JSRuntime || document.RuntimeVersion != expected.RuntimeVersion {
+		return fmt.Errorf("runtime identity does not match requested runtime")
+	}
+	if document.SchemaVersion == 2 && ((document.JSRuntime == jsbench.RuntimeNode && document.BunVersion != "") ||
+		(document.JSRuntime == jsbench.RuntimeBun && document.BunVersion != "" && document.BunVersion != document.RuntimeVersion)) {
+		return fmt.Errorf("bun_version is legacy Bun compatibility data and must not identify another runtime")
 	}
 	if document.BenchmarkSuite != expected.BenchmarkSuite || document.ProtocolVersion != expected.ProtocolVersion ||
-		document.BunVersion != expected.BunVersion || document.ZigVersion != expected.ZigVersion ||
+		document.ZigVersion != expected.ZigVersion ||
 		document.Manifest.Hash != expected.ManifestHash {
 		return fmt.Errorf("identity does not match requested suite, protocol, versions, and manifest")
 	}

@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS runs (
     benchmark_suite TEXT NOT NULL DEFAULT 'core-default',
     protocol_version INTEGER NOT NULL DEFAULT 1,
     bun_version TEXT NOT NULL DEFAULT '',
+    js_runtime TEXT NOT NULL DEFAULT '',
+    runtime_version TEXT NOT NULL DEFAULT '',
     zig_version TEXT NOT NULL DEFAULT '',
     manifest_hash TEXT NOT NULL DEFAULT '',
     manifest_json TEXT NOT NULL DEFAULT '',
@@ -147,7 +149,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     benchmark_kind TEXT NOT NULL DEFAULT 'zig',
     benchmark_suite TEXT NOT NULL DEFAULT 'core-default',
     protocol_version INTEGER NOT NULL DEFAULT 1,
-    manifest_hash TEXT NOT NULL DEFAULT ''
+    manifest_hash TEXT NOT NULL DEFAULT '',
+    js_runtime TEXT NOT NULL DEFAULT '',
+    runtime_version TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
@@ -176,12 +180,12 @@ SELECT r.id AS result_id, r.category, r.name, r.min_ns, r.avg_ns, r.max_ns,
        r.summary_version, ru.id AS run_id, ru.commit_hash, ru.commit_hash_full,
        ru.commit_message, ru.commit_date, ru.branch, ru.run_date, ru.machine_id, ru.notes,
        ru.zig_optimize, ru.benchmark_kind, ru.benchmark_suite, ru.protocol_version,
-       ru.bun_version, ru.zig_version, ru.manifest_hash, ru.manifest_json
+       ru.bun_version, ru.js_runtime, ru.runtime_version, ru.zig_version, ru.manifest_hash, ru.manifest_json
 FROM results r JOIN runs ru ON r.run_id = ru.id;
 `
 
 const (
-	CurrentSchemaVersion     = 7
+	CurrentSchemaVersion     = 8
 	CurrentSampleDataVersion = 1
 	CurrentSummaryVersion    = 2
 	DefaultProfileRunsMax    = 256
@@ -345,23 +349,26 @@ type oldFlamegraph struct {
 }
 
 type Run struct {
-	ID              int64
-	CommitHash      string
-	CommitHashFull  string
-	CommitMessage   string
-	CommitDate      string
-	Branch          string
-	RunDate         string
-	MachineID       string
-	Notes           string
-	ZigOptimize     string
-	BenchmarkKind   string
-	BenchmarkSuite  string
-	ProtocolVersion int64
-	BunVersion      string
-	ZigVersion      string
-	ManifestHash    string
-	ManifestJSON    string
+	ID               int64
+	CommitHash       string
+	CommitHashFull   string
+	CommitMessage    string
+	CommitDate       string
+	Branch           string
+	RunDate          string
+	MachineID        string
+	Notes            string
+	ZigOptimize      string
+	BenchmarkKind    string
+	BenchmarkSuite   string
+	ProtocolVersion  int64
+	BunVersion       string
+	JSRuntime        string
+	RuntimeVersion   string
+	ZigVersion       string
+	ManifestHash     string
+	ManifestJSON     string
+	LegacyJSIdentity bool // request-only marker for deployed schema-1 Bun retries
 }
 
 // RunFilter selects one benchmark cohort. Empty fields are unconstrained.
@@ -370,6 +377,8 @@ type RunFilter struct {
 	BenchmarkSuite  string
 	ProtocolVersion int64
 	BunVersion      string
+	JSRuntime       string
+	RuntimeVersion  string
 	ZigVersion      string
 	ManifestHash    string
 	MachineID       string
@@ -381,6 +390,8 @@ func (filter RunFilter) Matches(run *Run) bool {
 		(filter.BenchmarkSuite == "" || run.BenchmarkSuite == filter.BenchmarkSuite) &&
 		(filter.ProtocolVersion == 0 || run.ProtocolVersion == filter.ProtocolVersion) &&
 		(filter.BunVersion == "" || run.BunVersion == filter.BunVersion) &&
+		(filter.JSRuntime == "" || run.JSRuntime == filter.JSRuntime) &&
+		(filter.RuntimeVersion == "" || run.RuntimeVersion == filter.RuntimeVersion) &&
 		(filter.ZigVersion == "" || run.ZigVersion == filter.ZigVersion) &&
 		(filter.ManifestHash == "" || run.ManifestHash == filter.ManifestHash) &&
 		(filter.MachineID == "" || run.MachineID == filter.MachineID) &&
@@ -399,6 +410,8 @@ func appendRunFilter(query string, args []interface{}, alias string, filter RunF
 		{"benchmark_kind", filter.BenchmarkKind},
 		{"benchmark_suite", filter.BenchmarkSuite},
 		{"bun_version", filter.BunVersion},
+		{"js_runtime", filter.JSRuntime},
+		{"runtime_version", filter.RuntimeVersion},
 		{"zig_version", filter.ZigVersion},
 		{"manifest_hash", filter.ManifestHash},
 		{"machine_id", filter.MachineID},
@@ -418,12 +431,17 @@ func appendRunFilter(query string, args []interface{}, alias string, filter RunF
 }
 
 func runCohortFilter(run *Run) RunFilter {
-	return RunFilter{
+	filter := RunFilter{
 		BenchmarkKind: run.BenchmarkKind, BenchmarkSuite: run.BenchmarkSuite,
-		ProtocolVersion: run.ProtocolVersion, BunVersion: run.BunVersion,
+		ProtocolVersion: run.ProtocolVersion,
+		JSRuntime:       run.JSRuntime, RuntimeVersion: run.RuntimeVersion,
 		ZigVersion: run.ZigVersion, ManifestHash: run.ManifestHash, MachineID: run.MachineID,
 		ZigOptimize: relevantOptimize(run),
 	}
+	if run.BenchmarkKind == jsbench.Kind && run.JSRuntime == "" {
+		filter.BunVersion = run.BunVersion
+	}
+	return filter
 }
 
 // SameRunCohort reports whether two runs have the same measurement identity.
@@ -444,7 +462,7 @@ func scanRun(s scanner, run *Run) error {
 	var commitHashFull, commitMessage, commitDate, branch, machineID, notes, zigOptimize sql.NullString
 	if err := s.Scan(&run.ID, &run.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branch,
 		&run.RunDate, &machineID, &notes, &zigOptimize, &run.BenchmarkKind, &run.BenchmarkSuite,
-		&run.ProtocolVersion, &run.BunVersion, &run.ZigVersion, &run.ManifestHash, &run.ManifestJSON); err != nil {
+		&run.ProtocolVersion, &run.BunVersion, &run.JSRuntime, &run.RuntimeVersion, &run.ZigVersion, &run.ManifestHash, &run.ManifestJSON); err != nil {
 		return err
 	}
 	run.CommitHashFull = commitHashFull.String
@@ -558,11 +576,11 @@ func (db *DB) InsertRun(run *Run) (int64, error) {
 	normalizeRunIdentity(run)
 	res, err := db.Exec(`
 		INSERT INTO runs (commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
-			benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.CommitHash, run.CommitHashFull, run.CommitMessage, run.CommitDate,
 		run.Branch, run.RunDate, run.MachineID, run.Notes, run.ZigOptimize,
-		run.BenchmarkKind, run.BenchmarkSuite, run.ProtocolVersion, run.BunVersion,
+		run.BenchmarkKind, run.BenchmarkSuite, run.ProtocolVersion, run.BunVersion, run.JSRuntime, run.RuntimeVersion,
 		run.ZigVersion, run.ManifestHash, run.ManifestJSON)
 	if err != nil {
 		return 0, err
@@ -582,6 +600,17 @@ func normalizeRunIdentity(run *Run) {
 	}
 	if run.ProtocolVersion == 0 {
 		run.ProtocolVersion = 1
+	}
+	if run.BenchmarkKind == jsbench.Kind {
+		if run.JSRuntime == "" {
+			run.JSRuntime = jsbench.RuntimeBun
+		}
+		if run.RuntimeVersion == "" && run.JSRuntime == jsbench.RuntimeBun {
+			run.RuntimeVersion = run.BunVersion
+		}
+		if run.BunVersion == "" && run.JSRuntime == jsbench.RuntimeBun {
+			run.BunVersion = run.RuntimeVersion
+		}
 	}
 }
 
@@ -667,11 +696,11 @@ func (db *DB) InsertRunWithResultsIfAbsent(run *Run, results []Result) (*Run, ma
 
 func insertRunWithResultsTx(tx *sql.Tx, run *Run, results []Result, idempotencyKey string) (int64, map[BenchmarkKey]int64, bool, error) {
 	res, err := tx.Exec(`INSERT INTO runs (commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
-		benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json, idempotency_key)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+		benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json, idempotency_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
 		ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key <> '' DO NOTHING`, run.CommitHash, run.CommitHashFull, run.CommitMessage,
 		run.CommitDate, run.Branch, run.RunDate, run.MachineID, run.Notes, run.ZigOptimize,
-		run.BenchmarkKind, run.BenchmarkSuite, run.ProtocolVersion, run.BunVersion, run.ZigVersion, run.ManifestHash, run.ManifestJSON, idempotencyKey)
+		run.BenchmarkKind, run.BenchmarkSuite, run.ProtocolVersion, run.BunVersion, run.JSRuntime, run.RuntimeVersion, run.ZigVersion, run.ManifestHash, run.ManifestJSON, idempotencyKey)
 	if err != nil {
 		return 0, nil, false, err
 	}
@@ -728,14 +757,27 @@ func measurementIdempotencyKey(run *Run) string {
 	if branch == "" || branch == "main" {
 		branch = "main"
 	}
-	for _, value := range []string{
-		"measurement-v1", run.CommitHashFull, branch, run.MachineID, run.BenchmarkKind,
-		run.BenchmarkSuite, fmt.Sprint(run.ProtocolVersion), run.BunVersion, run.ZigVersion,
-		run.ManifestHash, relevantOptimize(run),
-	} {
+	values := []string{idempotencySerialization(run), run.CommitHashFull, branch, run.MachineID, run.BenchmarkKind,
+		run.BenchmarkSuite, fmt.Sprint(run.ProtocolVersion)}
+	if values[0] == "measurement-v1" {
+		values = append(values, run.BunVersion)
+	} else {
+		values = append(values, run.JSRuntime, run.RuntimeVersion)
+	}
+	values = append(values, run.ZigVersion, run.ManifestHash, relevantOptimize(run))
+	for _, value := range values {
 		_, _ = fmt.Fprintf(hash, "%d:%s", len(value), value)
 	}
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func idempotencySerialization(run *Run) string {
+	// Preserve keys used by already-deployed schema-1 Bun clients while all
+	// generic runtime records use an identity that cannot collide across engines.
+	if run.BenchmarkKind != jsbench.Kind || run.LegacyJSIdentity {
+		return "measurement-v1"
+	}
+	return "measurement-v2"
 }
 
 func getRunByIdempotencyKeyTx(tx *sql.Tx, idempotencyKey string) (*Run, error) {
@@ -743,10 +785,10 @@ func getRunByIdempotencyKeyTx(tx *sql.Tx, idempotencyKey string) (*Run, error) {
 	var commitHashFullN, commitMessage, commitDate, branch, machineIDN, notes, zigOptimizeN sql.NullString
 	err := tx.QueryRow(`
 		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
-		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json
 		FROM runs WHERE idempotency_key = ?`, idempotencyKey).Scan(
 		&run.ID, &run.CommitHash, &commitHashFullN, &commitMessage, &commitDate, &branch, &run.RunDate, &machineIDN, &notes, &zigOptimizeN,
-		&run.BenchmarkKind, &run.BenchmarkSuite, &run.ProtocolVersion, &run.BunVersion, &run.ZigVersion, &run.ManifestHash, &run.ManifestJSON)
+		&run.BenchmarkKind, &run.BenchmarkSuite, &run.ProtocolVersion, &run.BunVersion, &run.JSRuntime, &run.RuntimeVersion, &run.ZigVersion, &run.ManifestHash, &run.ManifestJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -799,7 +841,7 @@ func (db *DB) ListRuns(limit int, branch string, since string) ([]Run, error) {
 
 func (db *DB) ListRunsFiltered(limit int, branch string, since string, filter RunFilter) ([]Run, error) {
 	query := `SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
-		benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json FROM runs WHERE 1=1`
+		benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json FROM runs WHERE 1=1`
 	args := []interface{}{}
 
 	if branch != "" {
@@ -843,7 +885,7 @@ func (db *DB) GetRun(id int64) (*Run, error) {
 	var r Run
 	err := scanRun(db.QueryRow(`
 		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
-		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json
 		FROM runs WHERE id = ?`, id), &r)
 	if err != nil {
 		return nil, err
@@ -859,7 +901,7 @@ func (db *DB) GetRunByCommitFiltered(commitHash string, filter RunFilter) (*Run,
 	var r Run
 	query := `
 		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
-		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json
 		FROM runs WHERE (commit_hash = ? OR commit_hash_full = ?)`
 	args := []interface{}{commitHash, commitHash}
 	query, args = appendRunFilter(query, args, "", filter)
@@ -879,7 +921,7 @@ func (db *DB) GetLatestRunFiltered(branch string, filter RunFilter) (*Run, error
 	var r Run
 	query := `
 		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
-		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json
 		FROM runs WHERE 1=1`
 	args := []interface{}{}
 	if branch == "main" {
@@ -905,14 +947,14 @@ func (db *DB) GetLatestRunForBranch(branch string) (*Run, error) {
 	if branch == "main" || branch == "" {
 		query = `
 			SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
-			       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
+			       benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json
 			FROM runs
 			WHERE branch = 'main' OR branch IS NULL OR branch = ''
 			ORDER BY julianday(run_date) DESC, id DESC LIMIT 1`
 	} else {
 		query = `
 			SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
-			       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
+			       benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json
 			FROM runs
 			WHERE branch = ?
 			ORDER BY julianday(run_date) DESC, id DESC LIMIT 1`
@@ -936,7 +978,7 @@ func (db *DB) ListRunsForBranch(branch string, limit int) ([]Run, error) {
 func (db *DB) ListRunsForBranchFiltered(branch string, limit int, filter RunFilter) ([]Run, error) {
 	query := `
 		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
-		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json
 		FROM runs
 		WHERE `
 	args := []interface{}{}
@@ -1281,7 +1323,7 @@ func (db *DB) GetTrend(resultID int64, limit int) ([]struct {
 	query := `
 		SELECT 
 			ru.id, ru.commit_hash, ru.commit_hash_full, ru.commit_message, ru.commit_date, ru.branch, ru.run_date, ru.machine_id, ru.notes, ru.zig_optimize,
-			ru.benchmark_kind, ru.benchmark_suite, ru.protocol_version, ru.bun_version, ru.zig_version, ru.manifest_hash, ru.manifest_json,
+			ru.benchmark_kind, ru.benchmark_suite, ru.protocol_version, ru.bun_version, ru.js_runtime, ru.runtime_version, ru.zig_version, ru.manifest_hash, ru.manifest_json,
 			r.id, r.run_id, r.category, r.name, r.min_ns, r.avg_ns, r.max_ns, 
 			COALESCE(r.std_dev_ns, 0), COALESCE(r.p50_ns, 0), COALESCE(r.p95_ns, 0), COALESCE(r.p99_ns, 0),
 			r.total_ns, r.iterations, COALESCE(r.sample_count, 1)
@@ -1332,7 +1374,7 @@ func (db *DB) GetTrend(resultID int64, limit int) ([]struct {
 
 		if err := rows.Scan(
 			&run.ID, &run.CommitHash, &commitHashFull, &commitMessage, &commitDate, &branch, &run.RunDate, &machineID, &notes, &zigOptimize,
-			&run.BenchmarkKind, &run.BenchmarkSuite, &run.ProtocolVersion, &run.BunVersion, &run.ZigVersion, &run.ManifestHash, &run.ManifestJSON,
+			&run.BenchmarkKind, &run.BenchmarkSuite, &run.ProtocolVersion, &run.BunVersion, &run.JSRuntime, &run.RuntimeVersion, &run.ZigVersion, &run.ManifestHash, &run.ManifestJSON,
 			&result.ID, &result.RunID, &result.Category, &result.Name, &result.MinNs, &result.AvgNs, &result.MaxNs,
 			&result.StdDevNs, &result.P50Ns, &result.P95Ns, &result.P99Ns,
 			&result.TotalNs, &result.Iterations, &result.SampleCount,
@@ -1364,7 +1406,15 @@ func hasCompleteCohortIdentity(run *Run) bool {
 	if run.BenchmarkKind == "zig" {
 		return run.ZigOptimize != ""
 	}
-	return run.BunVersion != "" && run.ZigVersion != "" && run.ManifestHash != ""
+	return run.JSRuntime != "" && run.RuntimeVersion != "" && run.ZigVersion != "" && run.ManifestHash != ""
+}
+
+// CrossRuntimeCompatible reports whether JavaScript runs differ only in their
+// measured runtime identity. It is intentionally descriptive, not inferential.
+func CrossRuntimeCompatible(a, b *Run) bool {
+	return a != nil && b != nil && a.BenchmarkKind == jsbench.Kind && b.BenchmarkKind == jsbench.Kind &&
+		a.JSRuntime != b.JSRuntime && a.MachineID == b.MachineID && a.BenchmarkSuite == b.BenchmarkSuite &&
+		a.ProtocolVersion == b.ProtocolVersion && a.ZigVersion == b.ZigVersion && a.ManifestHash == b.ManifestHash
 }
 
 func (db *DB) DeleteRun(id int64) error {
@@ -1420,7 +1470,7 @@ func (db *DB) RegressionDataFingerprint(runID int64) (fingerprint string, err er
 		       COALESCE(ru.branch, ''), ru.run_date, COALESCE(ru.machine_id, ''),
 		       COALESCE(ru.notes, ''), COALESCE(ru.zig_optimize, ''),
 		       ru.benchmark_kind, ru.benchmark_suite, ru.protocol_version,
-		       ru.bun_version, ru.zig_version, ru.manifest_hash, ru.manifest_json,
+		       ru.bun_version, ru.js_runtime, ru.runtime_version, ru.zig_version, ru.manifest_hash, ru.manifest_json,
 		       r.id, r.category, r.name, r.avg_ns, r.std_dev_ns, r.sample_count
 		FROM runs ru
 		LEFT JOIN results r ON r.run_id = ru.id
@@ -1441,21 +1491,21 @@ func (db *DB) RegressionDataFingerprint(runID int64) (fingerprint string, err er
 	for rows.Next() {
 		var sourceRunID int64
 		var commitHash, commitHashFull, commitMessage, commitDate, branch, runDate, machineID, notes, zigOptimize string
-		var benchmarkKind, benchmarkSuite, bunVersion, zigVersion, manifestHash, manifestJSON string
+		var benchmarkKind, benchmarkSuite, bunVersion, jsRuntime, runtimeVersion, zigVersion, manifestHash, manifestJSON string
 		var protocolVersion int64
 		var resultID, avgNs, stdDevNs, sampleCount sql.NullInt64
 		var category, name sql.NullString
 		if err := rows.Scan(
 			&sourceRunID, &commitHash, &commitHashFull, &commitMessage, &commitDate,
 			&branch, &runDate, &machineID, &notes, &zigOptimize,
-			&benchmarkKind, &benchmarkSuite, &protocolVersion, &bunVersion, &zigVersion, &manifestHash, &manifestJSON,
+			&benchmarkKind, &benchmarkSuite, &protocolVersion, &bunVersion, &jsRuntime, &runtimeVersion, &zigVersion, &manifestHash, &manifestJSON,
 			&resultID, &category, &name, &avgNs, &stdDevNs, &sampleCount,
 		); err != nil {
 			return "", err
 		}
-		_, _ = fmt.Fprintf(hash, "%d:%q:%q:%q:%q:%q:%q:%q:%q:%q:%q:%q:%d:%q:%q:%q:%q:%d:%q:%q:%d:%d:%d\n",
+		_, _ = fmt.Fprintf(hash, "%d:%q:%q:%q:%q:%q:%q:%q:%q:%q:%q:%q:%d:%q:%q:%q:%q:%q:%q:%d:%q:%q:%d:%d:%d\n",
 			sourceRunID, commitHash, commitHashFull, commitMessage, commitDate, branch, runDate, machineID, notes, zigOptimize,
-			benchmarkKind, benchmarkSuite, protocolVersion, bunVersion, zigVersion, manifestHash, manifestJSON,
+			benchmarkKind, benchmarkSuite, protocolVersion, bunVersion, jsRuntime, runtimeVersion, zigVersion, manifestHash, manifestJSON,
 			resultID.Int64, category.String, name.String, avgNs.Int64, stdDevNs.Int64, sampleCount.Int64)
 	}
 	if err := rows.Err(); err != nil {
@@ -1536,7 +1586,7 @@ func (db *DB) RegressionDataFingerprints(runIDs []int64) (fingerprints map[int64
 		       COALESCE(ru.branch, ''), ru.run_date, COALESCE(ru.machine_id, ''),
 		       COALESCE(ru.notes, ''), COALESCE(ru.zig_optimize, ''),
 		       ru.benchmark_kind, ru.benchmark_suite, ru.protocol_version,
-		       ru.bun_version, ru.zig_version, ru.manifest_hash, ru.manifest_json,
+		       ru.bun_version, ru.js_runtime, ru.runtime_version, ru.zig_version, ru.manifest_hash, ru.manifest_json,
 		       r.id, r.category, r.name, r.avg_ns, r.std_dev_ns, r.sample_count
 		FROM runs ru
 		LEFT JOIN results r ON r.run_id = ru.id
@@ -1558,14 +1608,14 @@ func (db *DB) RegressionDataFingerprints(runIDs []int64) (fingerprints map[int64
 	for rows.Next() {
 		var sourceRunID int64
 		var commitHash, commitHashFull, commitMessage, commitDate, branch, runDate, machineID, notes, zigOptimize string
-		var benchmarkKind, benchmarkSuite, bunVersion, zigVersion, manifestHash, manifestJSON string
+		var benchmarkKind, benchmarkSuite, bunVersion, jsRuntime, runtimeVersion, zigVersion, manifestHash, manifestJSON string
 		var protocolVersion int64
 		var resultID, avgNs, stdDevNs, sampleCount sql.NullInt64
 		var category, name sql.NullString
 		if err := rows.Scan(
 			&sourceRunID, &commitHash, &commitHashFull, &commitMessage, &commitDate,
 			&branch, &runDate, &machineID, &notes, &zigOptimize,
-			&benchmarkKind, &benchmarkSuite, &protocolVersion, &bunVersion, &zigVersion, &manifestHash, &manifestJSON,
+			&benchmarkKind, &benchmarkSuite, &protocolVersion, &bunVersion, &jsRuntime, &runtimeVersion, &zigVersion, &manifestHash, &manifestJSON,
 			&resultID, &category, &name, &avgNs, &stdDevNs, &sampleCount,
 		); err != nil {
 			return nil, err
@@ -1575,9 +1625,9 @@ func (db *DB) RegressionDataFingerprints(runIDs []int64) (fingerprints map[int64
 				fingerprints[previousRunID] = hex.EncodeToString(hash.Sum(nil))
 			}
 		}
-		_, _ = fmt.Fprintf(hash, "%d:%q:%q:%q:%q:%q:%q:%q:%q:%q:%q:%q:%d:%q:%q:%q:%q:%d:%q:%q:%d:%d:%d\n",
+		_, _ = fmt.Fprintf(hash, "%d:%q:%q:%q:%q:%q:%q:%q:%q:%q:%q:%q:%d:%q:%q:%q:%q:%q:%q:%d:%q:%q:%d:%d:%d\n",
 			sourceRunID, commitHash, commitHashFull, commitMessage, commitDate, branch, runDate, machineID, notes, zigOptimize,
-			benchmarkKind, benchmarkSuite, protocolVersion, bunVersion, zigVersion, manifestHash, manifestJSON,
+			benchmarkKind, benchmarkSuite, protocolVersion, bunVersion, jsRuntime, runtimeVersion, zigVersion, manifestHash, manifestJSON,
 			resultID.Int64, category.String, name.String, avgNs.Int64, stdDevNs.Int64, sampleCount.Int64)
 		previousRunID = sourceRunID
 	}
@@ -1938,7 +1988,7 @@ func (db *DB) GetComparableRunsWindow(runID int64, window int) ([]Run, error) {
 
 	query := `
 		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
-		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json
 		FROM runs
 		WHERE `
 	args := []interface{}{}
@@ -1997,7 +2047,7 @@ func (db *DB) GetComparableMainRunsWindow(runID int64, window int) ([]Run, error
 
 	query := `
 		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
-		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
+		       benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json
 		FROM runs
 		WHERE (branch = 'main' OR branch IS NULL OR branch = '')`
 	query, args := appendRunFilter(query, nil, "", runCohortFilter(refRun))
@@ -2091,6 +2141,8 @@ type Job struct {
 	BenchmarkSuite  string
 	ProtocolVersion int64
 	ManifestHash    string
+	JSRuntime       string
+	RuntimeVersion  string
 }
 
 func (db *DB) InsertJob(job *Job) (int64, error) {
@@ -2103,11 +2155,19 @@ func (db *DB) InsertJob(job *Job) (int64, error) {
 	if job.ProtocolVersion == 0 {
 		job.ProtocolVersion = 1
 	}
+	if job.BenchmarkKind == jsbench.Kind {
+		if job.JSRuntime == "" {
+			job.JSRuntime = jsbench.RuntimeBun
+		}
+		if job.RuntimeVersion == "" {
+			job.RuntimeVersion = jsbench.RuntimeVersion(job.JSRuntime)
+		}
+	}
 	if job.BenchmarkKind != "zig" && job.BenchmarkKind != jsbench.Kind {
 		return 0, fmt.Errorf("benchmark kind must be zig or js")
 	}
-	if job.BenchmarkKind == jsbench.Kind && !jsbench.MatchesJob(job.BenchmarkSuite, job.ProtocolVersion,
-		job.ManifestHash, job.Samples, job.Profile) {
+	if job.BenchmarkKind == jsbench.Kind && !jsbench.MatchesRuntimeJob(job.BenchmarkSuite, job.ProtocolVersion,
+		job.JSRuntime, job.RuntimeVersion, job.ManifestHash, job.Samples, job.Profile) {
 		return 0, fmt.Errorf("JavaScript jobs require canonical suite, protocol, manifest, three samples, and no profile")
 	}
 	var commitHash, notes, requestedBy *string
@@ -2123,11 +2183,11 @@ func (db *DB) InsertJob(job *Job) (int64, error) {
 
 	res, err := db.Exec(`
 		INSERT INTO jobs (status, kind, branch, commit_hash, repo_url, samples, profile, notes, created_at, requested_by,
-			benchmark_kind, benchmark_suite, protocol_version, manifest_hash)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			benchmark_kind, benchmark_suite, protocol_version, manifest_hash, js_runtime, runtime_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.Status, job.Kind, job.Branch, commitHash, job.RepoURL,
 		job.Samples, job.Profile, notes, job.CreatedAt, requestedBy,
-		job.BenchmarkKind, job.BenchmarkSuite, job.ProtocolVersion, job.ManifestHash)
+		job.BenchmarkKind, job.BenchmarkSuite, job.ProtocolVersion, job.ManifestHash, job.JSRuntime, job.RuntimeVersion)
 	if err != nil {
 		return 0, err
 	}
@@ -2142,12 +2202,12 @@ func (db *DB) GetJob(id int64) (*Job, error) {
 	err := db.QueryRow(`
 		SELECT id, status, kind, branch, commit_hash, repo_url, samples, profile, notes,
 		       created_at, started_at, completed_at, error, run_id, requested_by,
-		       benchmark_kind, benchmark_suite, protocol_version, manifest_hash
+		       benchmark_kind, benchmark_suite, protocol_version, manifest_hash, js_runtime, runtime_version
 		FROM jobs WHERE id = ?`, id).Scan(
 		&j.ID, &j.Status, &j.Kind, &j.Branch, &commitHash, &j.RepoURL,
 		&j.Samples, &j.Profile, &notes,
 		&j.CreatedAt, &startedAt, &completedAt, &jobError, &runID, &requestedBy,
-		&j.BenchmarkKind, &j.BenchmarkSuite, &j.ProtocolVersion, &j.ManifestHash)
+		&j.BenchmarkKind, &j.BenchmarkSuite, &j.ProtocolVersion, &j.ManifestHash, &j.JSRuntime, &j.RuntimeVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -2169,11 +2229,11 @@ func (db *DB) ListJobs(limit int, status string, branch string) ([]Job, error) {
 }
 
 func (db *DB) ListJobsFiltered(limit int, status string, branch string, benchmarkKind string, requestedBy string,
-	benchmarkSuite string, protocolVersion int64, manifestHash string,
+	benchmarkSuite string, protocolVersion int64, manifestHash string, runtimeIdentity ...string,
 ) ([]Job, error) {
 	query := `SELECT id, status, kind, branch, commit_hash, repo_url, samples, profile, notes,
 	                 created_at, started_at, completed_at, error, run_id, requested_by,
-	                 benchmark_kind, benchmark_suite, protocol_version, manifest_hash
+	                 benchmark_kind, benchmark_suite, protocol_version, manifest_hash, js_runtime, runtime_version
 	          FROM jobs WHERE 1=1`
 	args := []interface{}{}
 
@@ -2205,6 +2265,14 @@ func (db *DB) ListJobsFiltered(limit int, status string, branch string, benchmar
 		query += " AND manifest_hash = ?"
 		args = append(args, manifestHash)
 	}
+	if len(runtimeIdentity) > 0 && runtimeIdentity[0] != "" {
+		query += " AND js_runtime = ?"
+		args = append(args, runtimeIdentity[0])
+	}
+	if len(runtimeIdentity) > 1 && runtimeIdentity[1] != "" {
+		query += " AND runtime_version = ?"
+		args = append(args, runtimeIdentity[1])
+	}
 
 	query += " ORDER BY created_at DESC"
 	if limit > 0 {
@@ -2232,7 +2300,7 @@ func (db *DB) ListJobsFiltered(limit int, status string, branch string, benchmar
 			&j.ID, &j.Status, &j.Kind, &j.Branch, &commitHash, &j.RepoURL,
 			&j.Samples, &j.Profile, &notes,
 			&j.CreatedAt, &startedAt, &completedAt, &jobError, &runID, &requestedBy,
-			&j.BenchmarkKind, &j.BenchmarkSuite, &j.ProtocolVersion, &j.ManifestHash,
+			&j.BenchmarkKind, &j.BenchmarkSuite, &j.ProtocolVersion, &j.ManifestHash, &j.JSRuntime, &j.RuntimeVersion,
 		); err != nil {
 			return nil, err
 		}
@@ -2282,12 +2350,12 @@ func (db *DB) ClaimNextPendingJob(benchmarkKind string) (*Job, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate job claim token: %w", err)
 	}
-	return db.ClaimNextPendingJobWithToken(benchmarkKind, claimToken)
+	return db.ClaimNextPendingJobWithToken(benchmarkKind, claimToken, jsbench.RuntimeBun)
 }
 
 // ClaimNextPendingJobWithToken uses a caller-owned bearer token so a repeated
 // remote claim can recover the lease after its first response was lost.
-func (db *DB) ClaimNextPendingJobWithToken(benchmarkKind, claimToken string) (*Job, error) {
+func (db *DB) ClaimNextPendingJobWithToken(benchmarkKind, claimToken string, javascriptRuntimes ...string) (*Job, error) {
 	if benchmarkKind != "" && benchmarkKind != "zig" && benchmarkKind != jsbench.Kind {
 		return nil, fmt.Errorf("benchmark kind must be zig or js")
 	}
@@ -2339,6 +2407,18 @@ func (db *DB) ClaimNextPendingJobWithToken(benchmarkKind, claimToken string) (*J
 		query += ` AND benchmark_kind = ?`
 		args = append(args, benchmarkKind)
 	}
+	if len(javascriptRuntimes) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(javascriptRuntimes)), ",")
+		query += ` AND (benchmark_kind != 'js' OR js_runtime IN (` + placeholders + `))`
+		for _, runtime := range javascriptRuntimes {
+			if jsbench.RuntimeVersion(runtime) == "" {
+				return nil, fmt.Errorf("unsupported JavaScript runtime %q", runtime)
+			}
+			args = append(args, runtime)
+		}
+	} else {
+		query += ` AND benchmark_kind != 'js'`
+	}
 	query += ` ORDER BY created_at ASC LIMIT 1`
 	var jobID int64
 	err = tx.QueryRow(query, args...).Scan(&jobID)
@@ -2386,6 +2466,8 @@ func (db *DB) CompleteJob(ctx context.Context, jobID int64, claimToken string, r
 			  AND runs.benchmark_suite = jobs.benchmark_suite
 			  AND runs.protocol_version = jobs.protocol_version
 			  AND runs.manifest_hash = jobs.manifest_hash
+			  AND runs.js_runtime = jobs.js_runtime
+			  AND runs.runtime_version = jobs.runtime_version
 		  )`, timeNow(), runID, jobID, storedJobClaimCredential(claimToken), claimToken, runID)
 	if err != nil {
 		return err

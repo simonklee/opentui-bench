@@ -13,21 +13,39 @@ const (
 	Kind           = "js"
 	Suite          = "core-default"
 	Protocol       = int64(1)
+	RuntimeBun     = "bun"
+	RuntimeNode    = "node"
 	BunVersion     = "1.3.14"
+	NodeVersion    = "26.4.0"
 	ZigVersion     = "0.15.2"
 	ManifestDigest = "sha256:eadd082d755c58b7e8a865bd5873802974881967a4edab1c79d0fb1cba482aa0"
 	Samples        = 3
 	MaxSafeInteger = int64(1<<53 - 1)
 )
 
-func MatchesIdentity(suite string, protocol int64, bunVersion, zigVersion, manifestHash string) bool {
-	return suite == Suite && protocol == Protocol && bunVersion == BunVersion &&
+func RuntimeVersion(runtime string) string {
+	switch runtime {
+	case RuntimeBun:
+		return BunVersion
+	case RuntimeNode:
+		return NodeVersion
+	default:
+		return ""
+	}
+}
+
+func MatchesIdentity(suite string, protocol int64, runtime, runtimeVersion, zigVersion, manifestHash string) bool {
+	return suite == Suite && protocol == Protocol && runtimeVersion == RuntimeVersion(runtime) &&
 		zigVersion == ZigVersion && manifestHash == ManifestDigest
 }
 
 func MatchesJob(suite string, protocol int64, manifestHash string, samples int, profile string) bool {
+	return MatchesRuntimeJob(suite, protocol, RuntimeBun, BunVersion, manifestHash, samples, profile)
+}
+
+func MatchesRuntimeJob(suite string, protocol int64, runtime, runtimeVersion, manifestHash string, samples int, profile string) bool {
 	return suite == Suite && protocol == Protocol && manifestHash == ManifestDigest &&
-		samples == Samples && profile == "none"
+		runtimeVersion == RuntimeVersion(runtime) && samples == Samples && profile == "none"
 }
 
 type Manifest struct {

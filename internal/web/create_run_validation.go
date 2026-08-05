@@ -37,13 +37,17 @@ func validateCreateRun(run *db.Run, results []createRunResult) error {
 		return fmt.Errorf("benchmark_kind must be 'zig' or 'js'")
 	}
 	if run.BenchmarkKind == "zig" {
-		if run.BunVersion != "" || run.ManifestHash != "" || run.ManifestJSON != "" {
+		if run.BunVersion != "" || run.JSRuntime != "" || run.RuntimeVersion != "" || run.ManifestHash != "" || run.ManifestJSON != "" {
 			return fmt.Errorf("Zig runs must not include Bun or manifest fields")
 		}
 		return validateZigStoredResults(results)
 	}
-	if !jsbench.MatchesIdentity(run.BenchmarkSuite, run.ProtocolVersion, run.BunVersion, run.ZigVersion, run.ManifestHash) {
-		return fmt.Errorf("JavaScript runs require canonical suite, protocol, Bun, Zig, and manifest identity")
+	if !jsbench.MatchesIdentity(run.BenchmarkSuite, run.ProtocolVersion, run.JSRuntime, run.RuntimeVersion, run.ZigVersion, run.ManifestHash) {
+		return fmt.Errorf("JavaScript runs require canonical suite, protocol, runtime, Zig, and manifest identity")
+	}
+	if (run.JSRuntime == jsbench.RuntimeNode && run.BunVersion != "") ||
+		(run.JSRuntime == jsbench.RuntimeBun && run.BunVersion != run.RuntimeVersion) {
+		return fmt.Errorf("bun_version is legacy compatibility storage for Bun only")
 	}
 	if run.ManifestJSON == "" {
 		return fmt.Errorf("manifest_json is required for JavaScript runs")

@@ -72,6 +72,22 @@ func TestParseJSInvocationsAggregatesAndRetainsEvidence(t *testing.T) {
 	}
 }
 
+func TestParseJSInvocationsSchema2UsesGenericRuntimeIdentity(t *testing.T) {
+	document := strings.Replace(jsTestInvocation(100, 102, 14002),
+		`"schema_version":1`, `"schema_version":2,"js_runtime":"node","runtime_version":"26.4.0"`, 1)
+	document = strings.Replace(document, `,"bun_version":"1.3.14"`, ``, 1)
+	meta := jsTestMeta()
+	meta.BunVersion = ""
+	meta.JSRuntime, meta.RuntimeVersion = jsbench.RuntimeNode, jsbench.NodeVersion
+	parsed, err := ParseJSInvocations(jsReaders(document, document, document), meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Meta.JSRuntime != jsbench.RuntimeNode || parsed.Meta.RuntimeVersion != jsbench.NodeVersion || parsed.Meta.BunVersion != "" || parsed.Meta.LegacyJSIdentity {
+		t.Fatalf("runtime identity = %+v", parsed.Meta)
+	}
+}
+
 func jsBudgetFixture(t *testing.T, maxCaseNS, maxProcessNS int64, elapsed [][]int64) (string, RunMetadata) {
 	t.Helper()
 	maxRSD, minIterations, maxIterations := int64(0), int64(1), int64(1)

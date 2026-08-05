@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import type { BenchmarkKind } from "./services/api";
+import type { BenchmarkKind, JSRuntimeFilter } from "./services/api";
 
 export function benchmarkKindForLocation(pathname: string, search: string): BenchmarkKind | null {
   const urlKind = new URLSearchParams(search).get("benchmark_kind");
@@ -14,6 +14,25 @@ const initialKind: BenchmarkKind =
 
 export const [lastViewedRunId, setLastViewedRunId] = createSignal<number | null>(null);
 export const [benchmarkKind, setBenchmarkKindSignal] = createSignal<BenchmarkKind>(initialKind);
+const urlRuntime = new URLSearchParams(window.location.search).get("js_runtime");
+const storedRuntime = window.localStorage.getItem("js_runtime");
+const isOldJavaScriptURL =
+  new URLSearchParams(window.location.search).get("benchmark_kind") === "js" && !urlRuntime;
+const initialRuntime: JSRuntimeFilter =
+  urlRuntime === "node" || urlRuntime === "all" || urlRuntime === "bun"
+    ? urlRuntime
+    : isOldJavaScriptURL
+      ? "bun"
+      : storedRuntime === "node" || storedRuntime === "all"
+        ? storedRuntime
+        : "bun";
+export const [jsRuntimeFilter, setJSRuntimeFilterSignal] =
+  createSignal<JSRuntimeFilter>(initialRuntime);
+export const setJSRuntimeFilter = (runtime: JSRuntimeFilter) => {
+  window.localStorage.setItem("js_runtime", runtime);
+  setLastViewedRunId(null);
+  setJSRuntimeFilterSignal(runtime);
+};
 export const setBenchmarkKind = (kind: BenchmarkKind) => {
   window.localStorage.setItem("benchmark_kind", kind);
   setLastViewedRunId(null);

@@ -1,7 +1,7 @@
 import { createResource, createSignal, For, Show, createMemo, createEffect } from "solid-js";
 import type { Component } from "solid-js";
 import { useSearchParams, useNavigate } from "@solidjs/router";
-import { api, ApiError } from "../services/api";
+import { api, ApiError, runtimeName, runtimeVersion } from "../services/api";
 import type { Run } from "../services/api";
 import { formatDate, formatNs } from "../utils/format";
 import { Button } from "../components/Button";
@@ -14,6 +14,7 @@ import {
   setGlobalCategory,
   setGlobalFilter,
   benchmarkKind,
+  jsRuntimeFilter,
 } from "../store";
 import { useFilteredBenchmarks } from "../hooks/useFilteredBenchmarks";
 import { useFilterParams } from "../hooks/useFilterParams";
@@ -39,7 +40,8 @@ function groupRunsByBranch(runs: Run[]): { branch: string; runs: Run[] }[] {
 }
 
 function formatRunOption(r: Run): string {
-  return `#${r.commit_hash.substring(0, 7)} · ${r.commit_message?.substring(0, 50)}${r.commit_message?.length > 50 ? "..." : ""}`;
+  const runtime = r.benchmark_kind === "js" ? `${runtimeName(r)} ${runtimeVersion(r)} · ` : "";
+  return `${runtime}#${r.commit_hash.substring(0, 7)} · ${r.commit_message?.substring(0, 50)}${r.commit_message?.length > 50 ? "..." : ""}`;
 }
 
 const RunOption: Component<{ run: Run; disabled: boolean }> = (props) => (
@@ -54,10 +56,25 @@ function hasSameIdentity(a: Run, b: Run): boolean {
     a.machine_id === b.machine_id &&
     a.benchmark_suite === b.benchmark_suite &&
     a.protocol_version === b.protocol_version &&
-    a.bun_version === b.bun_version &&
+    a.js_runtime === b.js_runtime &&
+    runtimeVersion(a) === runtimeVersion(b) &&
     a.zig_version === b.zig_version &&
     a.manifest_hash === b.manifest_hash &&
     (a.benchmark_kind !== "zig" || a.zig_optimize === b.zig_optimize)
+  );
+}
+
+function hasRuntimeCompareIdentity(a: Run, b: Run): boolean {
+  return (
+    a.benchmark_kind === "js" &&
+    b.benchmark_kind === "js" &&
+    (a.commit_hash_full || a.commit_hash) === (b.commit_hash_full || b.commit_hash) &&
+    a.js_runtime !== b.js_runtime &&
+    a.machine_id === b.machine_id &&
+    a.benchmark_suite === b.benchmark_suite &&
+    a.protocol_version === b.protocol_version &&
+    a.zig_version === b.zig_version &&
+    a.manifest_hash === b.manifest_hash
   );
 }
 
@@ -71,6 +88,16 @@ function findDefaultPair(runs: Run[], preferredRunId: number | null) {
     if (baseline) return { baseline: baseline.id, current: current.id };
   }
 
+  return null;
+}
+
+function findRuntimeDefaultPair(runs: Run[], preferredRunId: number | null) {
+  const preferred = runs.find((run) => run.id === preferredRunId);
+  const candidates = preferred ? [preferred, ...runs.filter((run) => run !== preferred)] : runs;
+  for (const compared of candidates) {
+    const baseline = runs.find((run) => hasRuntimeCompareIdentity(run, compared));
+    if (baseline) return { baseline: baseline.id, current: compared.id };
+  }
   return null;
 }
 
@@ -93,12 +120,21 @@ const Compare: Component = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   useFilterParams(searchParams, setSearchParams);
-  const [loadedRecentRuns] = createResource(benchmarkKind, (kind) => api.getRuns(100, kind));
+  const compareMode = createMemo(() =>
+    benchmarkKind() === "js" && searchParams.compare_mode === "runtime" ? "runtime" : "history",
+  );
+  const [loadedRecentRuns] = createResource(
+    () => [benchmarkKind(), compareMode(), jsRuntimeFilter()] as const,
+    ([kind, mode, runtime]) =>
+      api.getRuns(100, kind, undefined, mode === "runtime" ? "all" : runtime),
+  );
   const recentRuns = createMemo(() => {
     const loaded = loadedRecentRuns();
     return loaded?.every((run) => run.benchmark_kind === benchmarkKind()) ? loaded : undefined;
   });
   const [copyToast, setCopyToast] = createSignal(false);
+  const compatible = (a: Run, b: Run) =>
+    compareMode() === "runtime" ? hasRuntimeCompareIdentity(a, b) : hasSameIdentity(a, b);
 
   // Keep as strings to match select option values
   const baseId = createMemo(() => {
@@ -223,6 +259,15 @@ const Compare: Component = () => {
     setDidAutoSelect(false);
   });
 
+  const setCompareMode = (mode: "history" | "runtime") => {
+    setDidAutoSelect(false);
+    setSearchParams({
+      compare_mode: mode === "runtime" ? "runtime" : null,
+      base: null,
+      curr: null,
+    });
+  };
+
   // Auto-select runs only on first load with no URL params.
   // Use the router's searchParams (not window.location.search) so that
   // navigations like navigate("/compare?base=103&curr=105") are detected
@@ -233,10 +278,12 @@ const Compare: Component = () => {
     if (searchParams.base || searchParams.curr || didAutoSelect()) return;
 
     if (r && r.length > 0) {
-      setDidAutoSelect(true);
-
-      const pair = findDefaultPair(r, lastViewedRunId());
+      const pair =
+        compareMode() === "runtime"
+          ? findRuntimeDefaultPair(r, lastViewedRunId())
+          : findDefaultPair(r, lastViewedRunId());
       if (!pair) return;
+      setDidAutoSelect(true);
 
       setSearchParams(
         {
@@ -258,7 +305,7 @@ const Compare: Component = () => {
       !current ||
       baseline.benchmark_kind !== kind ||
       current.benchmark_kind !== kind ||
-      !hasSameIdentity(baseline, current)
+      !compatible(baseline, current)
     ) {
       return null;
     }
@@ -273,7 +320,18 @@ const Compare: Component = () => {
     compareRequest,
     async (request) => ({
       key: request.key,
-      data: await api.getCompare(request.baseId, request.currId, request.kind),
+      data:
+        compareMode() === "runtime"
+          ? await api.getRuntimeCompare(request.baseId, request.currId).then((response) => ({
+              ...response.baseline,
+              comparisons: response.comparisons.map((comparison) => ({
+                ...comparison,
+                current_ns: comparison.compared_ns,
+                change_percent: comparison.duration_change_percent,
+                current_result_id: comparison.compared_result_id,
+              })),
+            }))
+          : await api.getCompare(request.baseId, request.currId, request.kind),
     }),
   );
   const compareFailure = createMemo(() => {
@@ -301,12 +359,12 @@ const Compare: Component = () => {
 
   const isBaseOptionDisabled = (run: Run) => {
     const current = selectedCurrRun();
-    return current !== null && !hasSameIdentity(run, current);
+    return current !== null && !compatible(run, current);
   };
 
   const isCurrOptionDisabled = (run: Run) => {
     const baseline = selectedBaseRun();
-    return baseline !== null && !hasSameIdentity(run, baseline);
+    return baseline !== null && !compatible(run, baseline);
   };
 
   const handleBaseChange = (e: Event) => {
@@ -318,6 +376,8 @@ const Compare: Component = () => {
     const val = (e.target as HTMLSelectElement).value;
     setSearchParams({ ...searchParams, curr: val });
   };
+
+  const swapRuns = () => setSearchParams({ base: currId(), curr: baseId() });
 
   const [sortBy, setSortBy] = createSignal<string>("change_percent");
   const [sortDesc, setSortDesc] = createSignal(true);
@@ -361,8 +421,16 @@ const Compare: Component = () => {
     const comparisons = sortedComparisons();
     if (!comparisons.length) return;
 
+    const baselineLabel =
+      benchmarkKind() === "js" && selectedBaseRun()
+        ? `${runtimeName(selectedBaseRun()!)} ${runtimeVersion(selectedBaseRun()!)}`
+        : "Baseline";
+    const comparedLabel =
+      benchmarkKind() === "js" && selectedCurrRun()
+        ? `${runtimeName(selectedCurrRun()!)} ${runtimeVersion(selectedCurrRun()!)}`
+        : "Current";
     const md =
-      "| Benchmark | Baseline | Current | Delta |\n|---|---|---|---|\n" +
+      `| Benchmark | ${baselineLabel} | ${comparedLabel} | Delta (compared / baseline) |\n|---|---|---|---|\n` +
       comparisons
         .map((c) => {
           const delta =
@@ -390,7 +458,25 @@ const Compare: Component = () => {
   return (
     <div class="flex flex-col h-full font-ui">
       <div class="flex-none p-6 border-b border-border bg-bg-dark h-[57px] flex items-center justify-between">
-        <h2 class="text-[14px] font-bold text-black uppercase tracking-widest">COMPARE</h2>
+        <div class="flex items-center gap-4">
+          <h2 class="text-[14px] font-bold text-black uppercase tracking-widest">COMPARE</h2>
+          <Show when={benchmarkKind() === "js"}>
+            <div class="flex border border-border text-[9px] font-bold uppercase tracking-wider">
+              <button
+                class={`px-2 py-1 ${compareMode() === "history" ? "bg-black text-white" : "bg-white text-text-muted"}`}
+                onClick={() => setCompareMode("history")}
+              >
+                History
+              </button>
+              <button
+                class={`px-2 py-1 ${compareMode() === "runtime" ? "bg-black text-white" : "bg-white text-text-muted"}`}
+                onClick={() => setCompareMode("runtime")}
+              >
+                Runtimes
+              </button>
+            </div>
+          </Show>
+        </div>
         <Button onClick={copyCompareResults} disabled={!sortedComparisons().length}>
           Copy
         </Button>
@@ -412,7 +498,9 @@ const Compare: Component = () => {
                   for="baseline-select"
                   class="text-[11px] font-bold text-text-muted uppercase tracking-widest"
                 >
-                  Baseline
+                  {compareMode() === "runtime" && selectedBaseRun()
+                    ? `${runtimeName(selectedBaseRun()!)} baseline`
+                    : "Baseline"}
                 </label>
               </div>
               <div class="flex flex-col gap-2">
@@ -470,9 +558,15 @@ const Compare: Component = () => {
               </div>
             </div>
 
-            <div class="hidden lg:flex flex-col items-center justify-center text-text-muted font-semibold text-[11px] uppercase tracking-widest">
+            <div class="flex lg:flex flex-row lg:flex-col items-center justify-center text-text-muted font-semibold text-[11px] uppercase tracking-widest">
               <div class="w-8 h-[1px] bg-border"></div>
-              <span class="my-3">VS</span>
+              <button
+                class="my-3 border border-border px-2 py-1 hover:border-black"
+                onClick={swapRuns}
+                title="Swap comparison direction"
+              >
+                SWAP
+              </button>
               <div class="w-8 h-[1px] bg-border"></div>
             </div>
 
@@ -482,7 +576,9 @@ const Compare: Component = () => {
                   for="current-select"
                   class="text-[11px] font-bold text-text-muted uppercase tracking-widest"
                 >
-                  Current
+                  {compareMode() === "runtime" && selectedCurrRun()
+                    ? `${runtimeName(selectedCurrRun()!)} compared`
+                    : "Current"}
                 </label>
               </div>
               <div class="flex flex-col gap-2">
@@ -561,7 +657,9 @@ const Compare: Component = () => {
 
       <Show when={benchmarkKind() === "js"}>
         <div class="flex-none border-b border-border bg-bg-panel px-4 py-2 text-[11px] text-text-muted sm:px-6">
-          JavaScript statistical inference is disabled; deltas are descriptive.
+          {compareMode() === "runtime"
+            ? "Runtime comparison uses P50 duration. Delta = (compared - baseline) / baseline; lower is better."
+            : "JavaScript statistical inference is disabled; deltas are descriptive."}
         </div>
       </Show>
 
@@ -590,7 +688,62 @@ const Compare: Component = () => {
             </div>
           }
         >
-          <table class="w-full text-left border-collapse text-[12px] font-mono">
+          <Show when={compareMode() === "runtime"}>
+            <div class="divide-y divide-border sm:hidden">
+              <For each={sortedComparisons()}>
+                {(comparison) => {
+                  const speedRatio =
+                    comparison.speed_ratio ?? comparison.baseline_ns / comparison.current_ns;
+                  const speed =
+                    Math.abs(comparison.change_percent) < 0.05
+                      ? "Same duration"
+                      : speedRatio >= 1
+                        ? `${runtimeName(selectedCurrRun()!)} ${speedRatio.toFixed(2)}x faster`
+                        : `${runtimeName(selectedBaseRun()!)} ${(1 / speedRatio).toFixed(2)}x faster`;
+                  return (
+                    <button
+                      type="button"
+                      class="grid w-full grid-cols-2 gap-x-4 gap-y-3 px-4 py-4 text-left hover:bg-bg-hover"
+                      onClick={() =>
+                        handleBenchmarkClick(
+                          comparison.current_result_id,
+                          comparison.baseline_result_id,
+                        )
+                      }
+                    >
+                      <span class="col-span-2 font-ui text-[12px] font-semibold text-text-main">
+                        {comparison.name}
+                      </span>
+                      <span>
+                        <span class="block font-ui text-[9px] font-bold uppercase tracking-widest text-text-muted">
+                          Baseline
+                        </span>
+                        <span class="font-mono text-[12px]">
+                          {formatNs(comparison.baseline_ns)}
+                        </span>
+                      </span>
+                      <span class="text-right">
+                        <span class="block font-ui text-[9px] font-bold uppercase tracking-widest text-text-muted">
+                          Compared
+                        </span>
+                        <span class="font-mono text-[12px]">{formatNs(comparison.current_ns)}</span>
+                      </span>
+                      <span class="col-span-2 flex items-baseline justify-between border-t border-border pt-2 font-mono">
+                        <span class="text-[11px] font-bold">
+                          {comparison.change_percent > 0 ? "+" : ""}
+                          {comparison.change_percent.toFixed(1)}%
+                        </span>
+                        <span class="text-[10px] text-text-muted">{speed}</span>
+                      </span>
+                    </button>
+                  );
+                }}
+              </For>
+            </div>
+          </Show>
+          <table
+            class={`w-full text-left border-collapse text-[12px] font-mono ${compareMode() === "runtime" ? "hidden sm:table" : ""}`}
+          >
             <thead class="bg-bg-dark sticky top-0 z-10 border-b-2 border-black font-ui text-[10px] uppercase tracking-widest text-text-main">
               <tr>
                 <th
@@ -609,13 +762,13 @@ const Compare: Component = () => {
                   class="px-4 py-2.5 font-semibold text-right cursor-pointer hover:bg-bg-hover hover:text-text-main"
                   onClick={() => handleSort("current_ns")}
                 >
-                  Current
+                  {compareMode() === "runtime" ? "Compared" : "Current"}
                 </th>
                 <th
                   class="px-4 py-2.5 font-semibold text-right cursor-pointer hover:bg-bg-hover hover:text-text-main"
                   onClick={() => handleSort("change_percent")}
                 >
-                  Delta %
+                  {compareMode() === "runtime" ? "Duration delta / speed" : "Delta %"}
                 </th>
               </tr>
             </thead>
@@ -624,6 +777,7 @@ const Compare: Component = () => {
                 {(c) => {
                   const isPos = c.change_percent > 0;
                   const isNeg = c.change_percent < 0;
+                  const speedRatio = c.speed_ratio ?? c.baseline_ns / c.current_ns;
                   const colorClass =
                     benchmarkKind() === "js"
                       ? "text-text-main"
@@ -650,6 +804,15 @@ const Compare: Component = () => {
                       <td class={`px-4 py-2.5 text-right font-bold ${colorClass}`}>
                         {isPos ? "+" : ""}
                         {c.change_percent.toFixed(1)}%
+                        <Show when={compareMode() === "runtime"}>
+                          <span class="block text-[10px] font-normal text-text-muted">
+                            {Math.abs(c.change_percent) < 0.05
+                              ? "same"
+                              : speedRatio >= 1
+                                ? `${runtimeName(selectedCurrRun()!)} ${speedRatio.toFixed(2)}x faster`
+                                : `${runtimeName(selectedBaseRun()!)} ${(1 / speedRatio).toFixed(2)}x faster`}
+                          </span>
+                        </Show>
                       </td>
                     </tr>
                   );

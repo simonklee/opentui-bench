@@ -17,12 +17,15 @@ import (
 type ProfileMode string
 
 type BenchmarkKind string
+type JavaScriptRuntime string
 
 const (
-	ProfileNone  ProfileMode   = "none"
-	ProfileCPU   ProfileMode   = "cpu"
-	BenchmarkZig BenchmarkKind = "zig"
-	BenchmarkJS  BenchmarkKind = jsbench.Kind
+	ProfileNone  ProfileMode       = "none"
+	ProfileCPU   ProfileMode       = "cpu"
+	BenchmarkZig BenchmarkKind     = "zig"
+	BenchmarkJS  BenchmarkKind     = jsbench.Kind
+	RuntimeBun   JavaScriptRuntime = jsbench.RuntimeBun
+	RuntimeNode  JavaScriptRuntime = jsbench.RuntimeNode
 )
 
 type RunConfig struct {
@@ -42,6 +45,8 @@ type RunConfig struct {
 	BenchmarkSuite  string
 	ProtocolVersion int64
 	BunVersion      string
+	JSRuntime       JavaScriptRuntime
+	RuntimeVersion  string
 	ZigVersion      string
 	ManifestHash    string
 }
@@ -96,6 +101,8 @@ func RunAndCollectWithExecutor(ctx context.Context, cfg RunConfig, executor Exec
 	meta.BenchmarkSuite = cfg.BenchmarkSuite
 	meta.ProtocolVersion = cfg.ProtocolVersion
 	meta.BunVersion = cfg.BunVersion
+	meta.JSRuntime = string(cfg.JSRuntime)
+	meta.RuntimeVersion = cfg.RuntimeVersion
 	meta.ZigVersion = cfg.ZigVersion
 	meta.ManifestHash = cfg.ManifestHash
 
@@ -202,8 +209,14 @@ func normalizeRunConfig(cfg RunConfig) RunConfig {
 		cfg.ProtocolVersion = jsbench.Protocol
 	}
 	if cfg.BenchmarkKind == BenchmarkJS {
-		if cfg.BunVersion == "" {
-			cfg.BunVersion = jsbench.BunVersion
+		if cfg.JSRuntime == "" {
+			cfg.JSRuntime = RuntimeBun
+		}
+		if cfg.RuntimeVersion == "" {
+			cfg.RuntimeVersion = jsbench.RuntimeVersion(string(cfg.JSRuntime))
+		}
+		if cfg.JSRuntime == RuntimeBun && cfg.BunVersion == "" {
+			cfg.BunVersion = cfg.RuntimeVersion
 		}
 		if cfg.ZigVersion == "" {
 			cfg.ZigVersion = jsbench.ZigVersion
@@ -220,7 +233,7 @@ func validateRunConfig(cfg RunConfig) error {
 		return fmt.Errorf("benchmark kind must be zig or js")
 	}
 	if cfg.BenchmarkKind == BenchmarkJS {
-		if !jsbench.MatchesIdentity(cfg.BenchmarkSuite, cfg.ProtocolVersion, cfg.BunVersion, cfg.ZigVersion, cfg.ManifestHash) {
+		if !jsbench.MatchesIdentity(cfg.BenchmarkSuite, cfg.ProtocolVersion, string(cfg.JSRuntime), cfg.RuntimeVersion, cfg.ZigVersion, cfg.ManifestHash) {
 			return fmt.Errorf("JavaScript benchmark identity is not canonical")
 		}
 		if cfg.Samples != jsbench.Samples || cfg.Profile != ProfileNone || cfg.Filter != "" ||

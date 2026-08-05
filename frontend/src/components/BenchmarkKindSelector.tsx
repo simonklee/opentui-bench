@@ -1,7 +1,7 @@
 import type { Component } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 import type { BenchmarkKind } from "../services/api";
-import { benchmarkKind, isSidebarExpanded, setBenchmarkKind } from "../store";
+import { benchmarkKind, isSidebarExpanded, jsRuntimeFilter, setBenchmarkKind } from "../store";
 
 const BenchmarkKindSelector: Component = () => {
   const location = useLocation();
@@ -10,7 +10,9 @@ const BenchmarkKindSelector: Component = () => {
   const select = (kind: BenchmarkKind) => {
     if (kind === benchmarkKind()) return;
     setBenchmarkKind(kind);
-    const params = new URLSearchParams({ benchmark_kind: kind });
+    const params = new URLSearchParams(location.search);
+    params.set("benchmark_kind", kind);
+    if (kind === "js") params.set("js_runtime", jsRuntimeFilter());
     if (kind === "js" && location.pathname === "/") {
       navigate(`/runs?${params}`);
     } else if (location.pathname.startsWith("/benchmarks/")) {

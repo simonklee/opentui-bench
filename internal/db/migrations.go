@@ -3,6 +3,8 @@ package db
 import (
 	"database/sql"
 	"fmt"
+
+	"opentui-bench/internal/jsbench"
 )
 
 type migration func(*sql.Tx) error
@@ -18,6 +20,45 @@ var migrations = []migration{
 	purgeRegressionCacheForCalibrationRollout,
 	migrateJavaScriptStorage,
 	migrateJobClaimTokens,
+	migrateJavaScriptRuntimes,
+}
+
+func migrateJavaScriptRuntimes(tx *sql.Tx) error {
+	for _, table := range []string{"runs", "jobs"} {
+		columns, err := tableColumns(tx, table)
+		if err != nil {
+			return err
+		}
+		if !columns["js_runtime"] {
+			if _, err := tx.Exec(`ALTER TABLE ` + table + ` ADD COLUMN js_runtime TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
+		}
+		if !columns["runtime_version"] {
+			if _, err := tx.Exec(`ALTER TABLE ` + table + ` ADD COLUMN runtime_version TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := tx.Exec(`
+		UPDATE runs SET js_runtime = 'bun', runtime_version = bun_version
+		WHERE benchmark_kind = 'js' AND js_runtime = '';
+		UPDATE jobs SET js_runtime = 'bun', runtime_version = '` + jsbench.BunVersion + `'
+		WHERE benchmark_kind = 'js' AND js_runtime = '';
+		DROP VIEW IF EXISTS results_with_run;
+		CREATE VIEW results_with_run AS
+		SELECT r.id AS result_id, r.category, r.name, r.min_ns, r.avg_ns, r.max_ns,
+		       r.std_dev_ns, r.p50_ns, r.p95_ns, r.p99_ns, r.total_ns, r.iterations,
+		       r.sample_count, r.sample_avg_variance_ns2, r.sample_data_version,
+		       r.summary_version, ru.id AS run_id, ru.commit_hash, ru.commit_hash_full,
+		       ru.commit_message, ru.commit_date, ru.branch, ru.run_date, ru.machine_id,
+		       ru.notes, ru.zig_optimize, ru.benchmark_kind, ru.benchmark_suite,
+		       ru.protocol_version, ru.bun_version, ru.js_runtime, ru.runtime_version,
+		       ru.zig_version, ru.manifest_hash, ru.manifest_json
+		FROM results r JOIN runs ru ON r.run_id = ru.id;
+		DELETE FROM regression_cache;
+	`)
+	return err
 }
 
 func migrateJobClaimTokens(tx *sql.Tx) error {

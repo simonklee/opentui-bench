@@ -1,10 +1,15 @@
 export type BenchmarkKind = "zig" | "js";
+export type JSRuntime = "bun" | "node";
+export type JSRuntimeFilter = JSRuntime | "all";
 
 export interface RunIdentity {
   benchmark_kind: BenchmarkKind;
   benchmark_suite: string;
   protocol_version: number;
-  bun_version: string;
+  js_runtime?: JSRuntime;
+  runtime_version?: string;
+  /** @deprecated Use runtime_version. */
+  bun_version?: string;
   zig_version: string;
   manifest_hash: string;
   manifest_json?: string;
@@ -15,6 +20,7 @@ export interface RunIdentity {
 export interface Run extends RunIdentity {
   id: number;
   commit_hash: string;
+  commit_hash_full?: string;
   commit_message: string;
   branch: string;
   run_date: string;
@@ -93,7 +99,50 @@ export interface CompareResult extends RunIdentity {
     change_percent: number;
     baseline_result_id: number;
     current_result_id: number;
+    speed_ratio?: number;
   }[];
+}
+
+export interface RuntimeComparison {
+  category: string;
+  name: string;
+  baseline_result_id: number;
+  compared_result_id: number;
+  baseline_ns: number;
+  compared_ns: number;
+  duration_change_percent: number;
+  speed_ratio: number;
+}
+
+export interface RuntimeCompareResponse {
+  metric: "p50_ns";
+  lower_is_better: true;
+  baseline: RunIdentity & { id: number; commit_hash: string; commit_hash_full?: string };
+  compared: RunIdentity & { id: number; commit_hash: string; commit_hash_full?: string };
+  comparisons: RuntimeComparison[];
+}
+
+export interface RuntimeTrendResponse {
+  baseline_runtime: JSRuntime;
+  baseline_runtime_version?: string;
+  compared_runtime: JSRuntime;
+  compared_runtime_version?: string;
+  pairs: {
+    baseline_result_id: number | null;
+    compared_result_id: number | null;
+    commit_hash: string;
+    run_date: string;
+    baseline_p50_ns: number | null;
+    compared_p50_ns: number | null;
+  }[];
+}
+
+export function runtimeName(identity: Pick<RunIdentity, "js_runtime">): string {
+  return identity.js_runtime === "node" ? "Node" : "Bun";
+}
+
+export function runtimeVersion(identity: RunIdentity): string {
+  return identity.runtime_version || identity.bun_version || "unknown";
 }
 
 export interface Job extends Partial<RunIdentity> {
@@ -238,12 +287,20 @@ async function fetchJson<T>(url: string): Promise<T> {
 }
 
 export const api = {
-  getRuns: async (limit = 100, kind: BenchmarkKind = "zig", identity?: RunIdentity) => {
+  getRuns: async (
+    limit = 100,
+    kind: BenchmarkKind = "zig",
+    identity?: RunIdentity,
+    jsRuntime?: JSRuntimeFilter,
+  ) => {
     const params = new URLSearchParams({ benchmark_kind: kind, limit: String(limit) });
+    if (kind === "js" && jsRuntime && jsRuntime !== "all") params.set("js_runtime", jsRuntime);
     if (identity) {
       params.set("benchmark_suite", identity.benchmark_suite);
       params.set("protocol_version", String(identity.protocol_version));
-      params.set("bun_version", identity.bun_version);
+      if (identity.js_runtime) params.set("js_runtime", identity.js_runtime);
+      if (identity.runtime_version) params.set("runtime_version", identity.runtime_version);
+      else if (identity.bun_version) params.set("bun_version", identity.bun_version);
       params.set("zig_version", identity.zig_version);
       params.set("manifest_hash", identity.manifest_hash);
       params.set("machine_id", identity.machine_id);
@@ -256,16 +313,23 @@ export const api = {
   getRunDetails: async (id: number, kind: BenchmarkKind = "zig") => {
     return fetchJson<RunDetails>(withBenchmarkKind(`/api/runs/${id}`, kind));
   },
-  getLatest: async (kind: BenchmarkKind = "zig", branch = "") => {
+  getLatest: async (
+    kind: BenchmarkKind = "zig",
+    branch = "",
+    jsRuntime: JSRuntimeFilter = "bun",
+  ) => {
     const params = new URLSearchParams({ benchmark_kind: kind });
+    if (kind === "js") params.set("js_runtime", jsRuntime);
     if (branch) params.set("branch", branch);
     return fetchJson<RunIdentity & { commit_hash: string | null; commit_hash_full: string | null }>(
       `/api/latest-commit?${params}`,
     );
   },
-  getCatalog: async (kind: BenchmarkKind = "zig") => {
+  getCatalog: async (kind: BenchmarkKind = "zig", jsRuntime: JSRuntimeFilter = "bun") => {
+    const params = new URLSearchParams({ benchmark_kind: kind });
+    if (kind === "js") params.set("js_runtime", jsRuntime);
     return fetchJson<(RunIdentity & { category: string; name: string })[]>(
-      withBenchmarkKind("/api/benchmarks", kind),
+      `/api/benchmarks?${params}`,
     );
   },
   getCompare: async (baseId: number, currId: number, kind: BenchmarkKind = "zig") => {
@@ -277,6 +341,27 @@ export const api = {
     return fetchJson<TrendResponse>(
       withBenchmarkKind(`/api/trend?result_id=${resultId}&limit=${limit}`, kind),
     );
+  },
+  getRuntimeCompare: async (baselineRunId: number, comparedRunId: number) => {
+    const params = new URLSearchParams({
+      baseline_run_id: String(baselineRunId),
+      compared_run_id: String(comparedRunId),
+    });
+    return fetchJson<RuntimeCompareResponse>(`/api/runtime-compare?${params}`);
+  },
+  getRuntimeTrend: async (
+    resultId: number,
+    baselineRuntime: JSRuntime,
+    comparedRuntime: JSRuntime,
+    limit = 100,
+  ) => {
+    const params = new URLSearchParams({
+      result_id: String(resultId),
+      baseline_runtime: baselineRuntime,
+      compared_runtime: comparedRuntime,
+      limit: String(limit),
+    });
+    return fetchJson<RuntimeTrendResponse>(`/api/runtime-trend?${params}`);
   },
   getFlamegraphs: async (runId: number) => {
     return fetchJson<{ result_id: number; type: string }[]>(`/api/runs/${runId}/flamegraphs`);
@@ -340,8 +425,15 @@ export const api = {
   getBranches: async (kind: BenchmarkKind = "zig") => {
     return fetchJson<string[]>(withBenchmarkKind("/api/branches", kind));
   },
-  getJobs: async (kind: BenchmarkKind, status?: string, limit = 50, requestedBy?: string) => {
+  getJobs: async (
+    kind: BenchmarkKind,
+    status?: string,
+    limit = 50,
+    requestedBy?: string,
+    jsRuntime: JSRuntimeFilter = "bun",
+  ) => {
     const params = new URLSearchParams({ benchmark_kind: kind, limit: String(limit) });
+    if (kind === "js") params.set("js_runtime", jsRuntime);
     if (status) params.set("status", status);
     if (requestedBy) params.set("requested_by", requestedBy);
     return fetchJson<Job[]>(`/api/jobs?${params}`);

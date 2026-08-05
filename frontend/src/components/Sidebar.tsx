@@ -2,8 +2,15 @@ import { createResource, Show } from "solid-js";
 import type { Component } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 import { api } from "../services/api";
-import { benchmarkKind, lastViewedRunId, isSidebarExpanded, setIsSidebarExpanded } from "../store";
+import {
+  benchmarkKind,
+  lastViewedRunId,
+  isSidebarExpanded,
+  jsRuntimeFilter,
+  setIsSidebarExpanded,
+} from "../store";
 import BenchmarkKindSelector from "./BenchmarkKindSelector";
+import JSRuntimeSelector from "./JSRuntimeSelector";
 import { toggleHelp } from "../shortcuts";
 import {
   LayoutDashboard,
@@ -19,10 +26,13 @@ import {
 const Sidebar: Component = () => {
   const location = useLocation();
   const navigate = useNavigate();
-  const [loadedRuns] = createResource(benchmarkKind, async (kind) => ({
-    kind,
-    runs: await api.getRuns(1, kind),
-  }));
+  const [loadedRuns] = createResource(
+    () => [benchmarkKind(), jsRuntimeFilter()] as const,
+    async ([kind, runtime]) => ({
+      kind,
+      runs: await api.getRuns(1, kind, undefined, runtime),
+    }),
+  );
 
   const navItemClass =
     "nav-item flex w-full items-center border-0 bg-transparent p-3 text-left text-[13px] font-medium transition-all duration-150 cursor-pointer text-text-muted hover:text-black group border-r-2 border-transparent hover:bg-bg-hover";
@@ -38,7 +48,7 @@ const Sidebar: Component = () => {
     const latestRunId = !loadedRuns.loading && loaded?.kind === kind ? loaded.runs[0]?.id : null;
     const id = lastViewedRunId() || latestRunId;
     if (id) {
-      navigate(`/benchmarks/${id}?benchmark_kind=${kind}`);
+      navigate(`/benchmarks/${id}?benchmark_kind=${kind}&js_runtime=${jsRuntimeFilter()}`);
     }
   };
 
@@ -46,9 +56,11 @@ const Sidebar: Component = () => {
     const currentRunId = lastViewedRunId();
     if (currentRunId) {
       // Pre-select the current run as "current" in compare
-      navigate(`/compare?benchmark_kind=${benchmarkKind()}&curr=${currentRunId}`);
+      navigate(
+        `/compare?benchmark_kind=${benchmarkKind()}&js_runtime=${jsRuntimeFilter()}&curr=${currentRunId}`,
+      );
     } else {
-      navigate(`/compare?benchmark_kind=${benchmarkKind()}`);
+      navigate(`/compare?benchmark_kind=${benchmarkKind()}&js_runtime=${jsRuntimeFilter()}`);
     }
   };
 
@@ -61,7 +73,11 @@ const Sidebar: Component = () => {
           type="button"
           class={`border-0 bg-transparent p-0 text-left font-mono font-bold text-black text-[14px] flex items-center cursor-pointer overflow-hidden whitespace-nowrap transition-all duration-300 ${isSidebarExpanded() ? "max-w-[200px] opacity-100" : "max-w-0 opacity-0"}`}
           onClick={() =>
-            navigate(benchmarkKind() === "zig" ? "/" : `/runs?benchmark_kind=${benchmarkKind()}`)
+            navigate(
+              benchmarkKind() === "zig"
+                ? "/"
+                : `/runs?benchmark_kind=${benchmarkKind()}&js_runtime=${jsRuntimeFilter()}`,
+            )
           }
         >
           <Activity size={20} class="flex-shrink-0 mr-2" />
@@ -78,6 +94,9 @@ const Sidebar: Component = () => {
       </div>
 
       <BenchmarkKindSelector />
+      <Show when={benchmarkKind() === "js"}>
+        <JSRuntimeSelector />
+      </Show>
 
       <div class="py-4 flex flex-col gap-1 flex-1">
         <Show when={benchmarkKind() === "zig"}>
@@ -98,7 +117,9 @@ const Sidebar: Component = () => {
         <button
           type="button"
           class={`${navItemClass} ${isSidebarExpanded() ? "" : "justify-center"} ${location.pathname === "/runs" ? activeClass + " active" : ""}`}
-          onClick={() => navigate(`/runs?benchmark_kind=${benchmarkKind()}`)}
+          onClick={() =>
+            navigate(`/runs?benchmark_kind=${benchmarkKind()}&js_runtime=${jsRuntimeFilter()}`)
+          }
           title={!isSidebarExpanded() ? "Runs" : ""}
         >
           <List

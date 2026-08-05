@@ -24,6 +24,11 @@ func runJavaScript(ctx context.Context, cfg RunConfig, meta record.RunMetadata, 
 	if err := checkBunVersion(ctx, executor, cfg.RepoPath); err != nil {
 		return nil, err
 	}
+	if cfg.JSRuntime == RuntimeNode {
+		if err := checkToolVersion(ctx, executor, cfg.RepoPath, "node", "--version", "v"+jsbench.NodeVersion); err != nil {
+			return nil, err
+		}
+	}
 	if err := checkToolVersion(ctx, executor, ZigDir(cfg.RepoPath), "zig", "version", jsbench.ZigVersion); err != nil {
 		return nil, err
 	}
@@ -35,11 +40,18 @@ func runJavaScript(ctx context.Context, cfg RunConfig, meta record.RunMetadata, 
 	}
 
 	outputs := make([][]byte, 0, jsbench.Samples)
+	script := "bench:js"
+	if cfg.JSRuntime == RuntimeNode {
+		script = "bench:js:node"
+	}
 	for i := 0; i < jsbench.Samples; i++ {
 		processCtx, cancel := context.WithTimeout(ctx, JavaScriptTimeout)
-		cmd := exec.Command("bun", "--no-env-file", "--cwd=packages/core", "run", "bench:js", "--format=json")
+		cmd := exec.Command("bun", "--no-env-file", "--cwd=packages/core", "run", script, "--format=json")
 		cmd.Dir = cfg.RepoPath
 		cmd.Env = canonicalJavaScriptEnv(os.Environ())
+		if cfg.JSRuntime == RuntimeNode {
+			cmd.Env = append(cmd.Env, "OTUI_BENCH_NATIVE_PREPARED=1")
+		}
 		stdout, stderr, err := executor.Output(processCtx, cmd)
 		cancel()
 		if err != nil {

@@ -34,22 +34,25 @@ type MemStatJSON struct {
 }
 
 type RunMetadata struct {
-	CommitHash      string
-	CommitHashFull  string
-	CommitMessage   string
-	CommitDate      string
-	Branch          string
-	MachineID       string
-	Notes           string
-	ZigOptimize     string
-	SampleCount     int
-	BenchmarkKind   string
-	BenchmarkSuite  string
-	ProtocolVersion int64
-	BunVersion      string
-	ZigVersion      string
-	ManifestHash    string
-	ManifestJSON    string
+	CommitHash       string
+	CommitHashFull   string
+	CommitMessage    string
+	CommitDate       string
+	Branch           string
+	MachineID        string
+	Notes            string
+	ZigOptimize      string
+	SampleCount      int
+	BenchmarkKind    string
+	BenchmarkSuite   string
+	ProtocolVersion  int64
+	BunVersion       string
+	JSRuntime        string
+	RuntimeVersion   string
+	ZigVersion       string
+	ManifestHash     string
+	ManifestJSON     string
+	LegacyJSIdentity bool
 }
 
 // ParsedRun contains a fully parsed and aggregated benchmark run, ready for
@@ -197,22 +200,25 @@ func parseInvocation(reader io.Reader) (map[db.BenchmarkKey]sample, []db.Benchma
 // Store writes a ParsedRun to the database. Returns the run ID and result count.
 func Store(database *db.DB, parsed *ParsedRun) (int64, int, error) {
 	run := &db.Run{
-		CommitHash:      parsed.Meta.CommitHash,
-		CommitHashFull:  parsed.Meta.CommitHashFull,
-		CommitMessage:   parsed.Meta.CommitMessage,
-		CommitDate:      parsed.Meta.CommitDate,
-		Branch:          parsed.Meta.Branch,
-		RunDate:         time.Now().UTC().Format(time.RFC3339),
-		MachineID:       parsed.Meta.MachineID,
-		Notes:           parsed.Meta.Notes,
-		ZigOptimize:     parsed.Meta.ZigOptimize,
-		BenchmarkKind:   parsed.Meta.BenchmarkKind,
-		BenchmarkSuite:  parsed.Meta.BenchmarkSuite,
-		ProtocolVersion: parsed.Meta.ProtocolVersion,
-		BunVersion:      parsed.Meta.BunVersion,
-		ZigVersion:      parsed.Meta.ZigVersion,
-		ManifestHash:    parsed.Meta.ManifestHash,
-		ManifestJSON:    parsed.Meta.ManifestJSON,
+		CommitHash:       parsed.Meta.CommitHash,
+		CommitHashFull:   parsed.Meta.CommitHashFull,
+		CommitMessage:    parsed.Meta.CommitMessage,
+		CommitDate:       parsed.Meta.CommitDate,
+		Branch:           parsed.Meta.Branch,
+		RunDate:          time.Now().UTC().Format(time.RFC3339),
+		MachineID:        parsed.Meta.MachineID,
+		Notes:            parsed.Meta.Notes,
+		ZigOptimize:      parsed.Meta.ZigOptimize,
+		BenchmarkKind:    parsed.Meta.BenchmarkKind,
+		BenchmarkSuite:   parsed.Meta.BenchmarkSuite,
+		ProtocolVersion:  parsed.Meta.ProtocolVersion,
+		BunVersion:       parsed.Meta.BunVersion,
+		JSRuntime:        parsed.Meta.JSRuntime,
+		RuntimeVersion:   parsed.Meta.RuntimeVersion,
+		ZigVersion:       parsed.Meta.ZigVersion,
+		ManifestHash:     parsed.Meta.ManifestHash,
+		ManifestJSON:     parsed.Meta.ManifestJSON,
+		LegacyJSIdentity: parsed.Meta.LegacyJSIdentity,
 	}
 
 	if run.ZigOptimize == "" {

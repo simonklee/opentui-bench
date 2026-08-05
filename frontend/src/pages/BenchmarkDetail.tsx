@@ -29,6 +29,7 @@ const BenchmarkDetail: Component = () => {
     selectBenchmark,
     selectedBenchmark,
     trendData,
+    runtimeTrendData,
     branchTrendData,
     isOnBranch,
     runBranch,
@@ -156,6 +157,7 @@ const BenchmarkDetail: Component = () => {
               branch={runBranch()}
               runIdentity={run()!}
               trendData={trendData()}
+              runtimeTrendData={runtimeTrendData()}
               branchTrendData={isOnBranch() ? branchTrendData() : undefined}
               flamegraphView={flamegraphView()}
               setFlamegraphView={setFlamegraphView}

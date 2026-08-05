@@ -17,6 +17,7 @@ import (
 
 	"opentui-bench/internal/cache"
 	"opentui-bench/internal/db"
+	"opentui-bench/internal/joblease"
 	"opentui-bench/internal/jsbench"
 	"opentui-bench/internal/runner"
 	"opentui-bench/internal/web"
@@ -79,7 +80,7 @@ func main() {
 
 func recordCmd() *cobra.Command {
 	var cfg runner.RunConfig
-	var profileStr, benchmarkKind string
+	var profileStr, benchmarkKind, jsRuntime string
 	var apiURL, apiKey string
 
 	cmd := &cobra.Command{
@@ -105,6 +106,7 @@ Remote usage:
 
 			cfg.Profile = runner.ProfileMode(profileStr)
 			cfg.BenchmarkKind = runner.BenchmarkKind(benchmarkKind)
+			cfg.JSRuntime = runner.JavaScriptRuntime(jsRuntime)
 			applyRecordDefaults(cmd, &cfg)
 			switch cfg.Profile {
 			case runner.ProfileNone, runner.ProfileCPU:
@@ -150,6 +152,7 @@ Remote usage:
 	cmd.Flags().IntVar(&cfg.PerfFreq, "perf-freq", 997, "perf sampling frequency")
 	cmd.Flags().StringVar(&cfg.Branch, "branch", "", "override branch name (useful for detached HEAD)")
 	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
+	cmd.Flags().StringVar(&jsRuntime, "runtime", jsbench.RuntimeBun, "JavaScript runtime (bun, node)")
 	cmd.Flags().StringVar(&apiURL, "api-url", "", "remote API URL (mutually exclusive with --db)")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key for remote auth")
 
@@ -215,16 +218,23 @@ func recordRemote(ctx context.Context, cfg runner.RunConfig, apiURL, apiKey stri
 	return nil
 }
 
-func benchmarkRunFilter(kind string) (db.RunFilter, error) {
+func benchmarkRunFilter(kind string, runtime ...string) (db.RunFilter, error) {
 	if kind != string(runner.BenchmarkZig) && kind != string(runner.BenchmarkJS) {
 		return db.RunFilter{}, fmt.Errorf("kind must be 'zig' or 'js'")
 	}
-	return db.RunFilter{BenchmarkKind: kind}, nil
+	filter := db.RunFilter{BenchmarkKind: kind}
+	if kind == string(runner.BenchmarkJS) && len(runtime) > 0 {
+		if jsbench.RuntimeVersion(runtime[0]) == "" {
+			return db.RunFilter{}, fmt.Errorf("runtime must be bun or node")
+		}
+		filter.JSRuntime, filter.RuntimeVersion = runtime[0], jsbench.RuntimeVersion(runtime[0])
+	}
+	return filter, nil
 }
 
 func listCmd() *cobra.Command {
 	var limit int
-	var branch, since, benchmarkKind string
+	var branch, since, benchmarkKind, jsRuntime string
 
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -236,7 +246,7 @@ func listCmd() *cobra.Command {
 			}
 			defer cleanup()
 
-			filter, err := benchmarkRunFilter(benchmarkKind)
+			filter, err := benchmarkRunFilter(benchmarkKind, jsRuntime)
 			if err != nil {
 				return err
 			}
@@ -277,12 +287,13 @@ func listCmd() *cobra.Command {
 	cmd.Flags().StringVar(&branch, "branch", "", "filter by branch")
 	cmd.Flags().StringVar(&since, "since", "", "filter runs since date (YYYY-MM-DD)")
 	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
+	cmd.Flags().StringVar(&jsRuntime, "runtime", jsbench.RuntimeBun, "JavaScript runtime (bun, node)")
 
 	return cmd
 }
 
 func showCmd() *cobra.Command {
-	var benchmarkKind string
+	var benchmarkKind, jsRuntime string
 	cmd := &cobra.Command{
 		Use:   "show [run_id or commit]",
 		Short: "Show details of a run",
@@ -293,7 +304,7 @@ func showCmd() *cobra.Command {
 				return err
 			}
 			defer cleanup()
-			filter, err := benchmarkRunFilter(benchmarkKind)
+			filter, err := benchmarkRunFilter(benchmarkKind, jsRuntime)
 			if err != nil {
 				return err
 			}
@@ -337,13 +348,14 @@ func showCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
+	cmd.Flags().StringVar(&jsRuntime, "runtime", jsbench.RuntimeBun, "JavaScript runtime (bun, node)")
 
 	return cmd
 }
 
 func compareCmd() *cobra.Command {
 	var threshold float64
-	var filter, benchmarkKind string
+	var filter, benchmarkKind, jsRuntime string
 
 	cmd := &cobra.Command{
 		Use:   "compare [commit1] [commit2]",
@@ -355,7 +367,7 @@ func compareCmd() *cobra.Command {
 				return err
 			}
 			defer cleanup()
-			runFilter, err := benchmarkRunFilter(benchmarkKind)
+			runFilter, err := benchmarkRunFilter(benchmarkKind, jsRuntime)
 			if err != nil {
 				return err
 			}
@@ -473,6 +485,7 @@ func compareCmd() *cobra.Command {
 	cmd.Flags().Float64Var(&threshold, "threshold", 10, "regression threshold percentage")
 	cmd.Flags().StringVar(&filter, "filter", "", "filter benchmarks by name")
 	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
+	cmd.Flags().StringVar(&jsRuntime, "runtime", jsbench.RuntimeBun, "JavaScript runtime (bun, node)")
 
 	return cmd
 }
@@ -752,7 +765,7 @@ func backfillCmd() *cobra.Command {
 	var dryRun bool
 	var flamegraph bool
 	var cfg runner.RunConfig
-	var profileStr, benchmarkKind string
+	var profileStr, benchmarkKind, jsRuntime string
 
 	cmd := &cobra.Command{
 		Use:   "backfill",
@@ -783,7 +796,8 @@ Example:
 
 			cfg.Profile = runner.ProfileMode(profileStr)
 			cfg.BenchmarkKind = runner.BenchmarkKind(benchmarkKind)
-			if _, err := benchmarkRunFilter(benchmarkKind); err != nil {
+			cfg.JSRuntime = runner.JavaScriptRuntime(jsRuntime)
+			if _, err := benchmarkRunFilter(benchmarkKind, jsRuntime); err != nil {
 				return err
 			}
 			switch cfg.Profile {
@@ -814,6 +828,7 @@ Example:
 	cmd.Flags().StringVar(&profileStr, "profile", string(runner.ProfileNone), "profile mode (none, cpu)")
 	cmd.Flags().IntVar(&cfg.PerfFreq, "perf-freq", 997, "perf sampling frequency")
 	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
+	cmd.Flags().StringVar(&jsRuntime, "runtime", jsbench.RuntimeBun, "JavaScript runtime (bun, node)")
 
 	if err := cmd.MarkFlagRequired("repo"); err != nil {
 		panic(err)
@@ -1072,8 +1087,9 @@ Example:
 			if apiURL != "" {
 				// Remote mode
 				remote := &runner.RemoteRecorder{
-					BaseURL: apiURL,
-					APIKey:  apiKey,
+					BaseURL:            apiURL,
+					APIKey:             apiKey,
+					JavaScriptRuntimes: supportedJavaScriptRuntimes(),
 				}
 				return runWorkerRemote(ctx, remote, repoPath, pollInterval, once, benchmarkKind)
 			}
@@ -1101,6 +1117,25 @@ Example:
 	}
 
 	return cmd
+}
+
+func supportedJavaScriptRuntimes() []string {
+	var runtimes []string
+	hasBun := false
+	if output, err := exec.Command("bun", "--revision").Output(); err == nil {
+		version, _, stable := strings.Cut(strings.TrimSpace(string(output)), "+")
+		if stable && version == jsbench.BunVersion {
+			runtimes = append(runtimes, jsbench.RuntimeBun)
+			hasBun = true
+		}
+	}
+	if hasBun {
+		output, err := exec.Command("node", "--version").Output()
+		if err == nil && strings.TrimSpace(string(output)) == "v"+jsbench.NodeVersion {
+			runtimes = append(runtimes, jsbench.RuntimeNode)
+		}
+	}
+	return runtimes
 }
 
 const (
@@ -1145,13 +1180,18 @@ func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollI
 		return fmt.Errorf("zig directory not found: %s", zigDir)
 	}
 
+	javascriptRuntimes := supportedJavaScriptRuntimes()
 	for {
 		if ctx.Err() != nil {
 			fmt.Println("Worker stopped")
 			return nil
 		}
 		runPersisted := false
-		job, err := database.ClaimNextPendingJob(benchmarkKind)
+		claimToken, err := joblease.NewToken()
+		if err != nil {
+			return fmt.Errorf("generate job claim token: %w", err)
+		}
+		job, err := database.ClaimNextPendingJobWithToken(benchmarkKind, claimToken, javascriptRuntimes...)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error claiming job: %v\n", err)
 			if once {
@@ -1271,6 +1311,8 @@ func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath
 		BenchmarkSuite:  job.BenchmarkSuite,
 		ProtocolVersion: job.ProtocolVersion,
 		ManifestHash:    job.ManifestHash,
+		JSRuntime:       runner.JavaScriptRuntime(job.JSRuntime),
+		RuntimeVersion:  job.RuntimeVersion,
 	}
 
 	// Run benchmarks
@@ -1432,6 +1474,8 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 		BenchmarkSuite:  job.BenchmarkSuite,
 		ProtocolVersion: job.ProtocolVersion,
 		ManifestHash:    job.ManifestHash,
+		JSRuntime:       runner.JavaScriptRuntime(job.JSRuntime),
+		RuntimeVersion:  job.RuntimeVersion,
 	}
 
 	// Run benchmarks (collect results without writing to any DB)
@@ -1484,7 +1528,7 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 }
 
 func triggerCmd() *cobra.Command {
-	var branch, commitHash, notes, requestedBy, profile, benchmarkKind, benchmarkSuite, manifestHash string
+	var branch, commitHash, notes, requestedBy, profile, benchmarkKind, benchmarkSuite, manifestHash, jsRuntime string
 	var samples int
 	var protocolVersion int64
 
@@ -1513,12 +1557,15 @@ Example:
 				if !cmd.Flags().Changed("manifest") {
 					manifestHash = jsbench.ManifestDigest
 				}
+				if jsbench.RuntimeVersion(jsRuntime) == "" {
+					return fmt.Errorf("runtime must be bun or node")
+				}
 			}
 			if profile != "none" && profile != "cpu" {
 				return fmt.Errorf("profile must be 'none' or 'cpu'")
 			}
-			if benchmarkKind == string(runner.BenchmarkJS) && !jsbench.MatchesJob(benchmarkSuite, protocolVersion,
-				manifestHash, samples, profile) {
+			if benchmarkKind == string(runner.BenchmarkJS) && !jsbench.MatchesRuntimeJob(benchmarkSuite, protocolVersion,
+				jsRuntime, jsbench.RuntimeVersion(jsRuntime), manifestHash, samples, profile) {
 				return fmt.Errorf("JavaScript jobs require the canonical identity, samples=3, and profile=none")
 			}
 
@@ -1543,6 +1590,8 @@ Example:
 				BenchmarkSuite:  benchmarkSuite,
 				ProtocolVersion: protocolVersion,
 				ManifestHash:    manifestHash,
+				JSRuntime:       jsRuntime,
+				RuntimeVersion:  jsbench.RuntimeVersion(jsRuntime),
 			}
 
 			id, err := database.InsertJob(job)
@@ -1566,6 +1615,7 @@ Example:
 	cmd.Flags().StringVar(&benchmarkSuite, "suite", jsbench.Suite, "benchmark suite")
 	cmd.Flags().Int64Var(&protocolVersion, "protocol", jsbench.Protocol, "benchmark protocol version")
 	cmd.Flags().StringVar(&manifestHash, "manifest", "", "expected benchmark manifest hash")
+	cmd.Flags().StringVar(&jsRuntime, "runtime", jsbench.RuntimeBun, "JavaScript runtime (bun, node)")
 	cmd.Flags().StringVar(&notes, "notes", "", "optional notes")
 	cmd.Flags().StringVar(&requestedBy, "requested-by", "", "who requested this job")
 
@@ -1607,7 +1657,11 @@ func runBackfill(ctx context.Context, database *db.DB, count int, start string, 
 
 	var unrecorded []commitInfo
 	for _, c := range commits {
-		exists, err := database.HasCommitFiltered(c.hash, db.RunFilter{BenchmarkKind: string(cfg.BenchmarkKind)})
+		filter := db.RunFilter{BenchmarkKind: string(cfg.BenchmarkKind)}
+		if cfg.BenchmarkKind == runner.BenchmarkJS {
+			filter.JSRuntime, filter.RuntimeVersion = string(cfg.JSRuntime), jsbench.RuntimeVersion(string(cfg.JSRuntime))
+		}
+		exists, err := database.HasCommitFiltered(c.hash, filter)
 		if err != nil {
 			return fmt.Errorf("check commit %s: %w", c.short, err)
 		}
@@ -1783,8 +1837,8 @@ func truncate(s string, max int) string {
 }
 
 func printJavaScriptRunDetails(run *db.Run, results []db.Result) {
-	fmt.Printf("Kind:     %s\nSuite:    %s\nProtocol: %d\nBun:      %s\nZig:      %s\nManifest: %s\nMachine:  %s\n",
-		run.BenchmarkKind, run.BenchmarkSuite, run.ProtocolVersion, run.BunVersion, run.ZigVersion, run.ManifestHash, run.MachineID)
+	fmt.Printf("Kind:     %s\nSuite:    %s\nProtocol: %d\nRuntime:  %s %s\nBun:      %s\nZig:      %s\nManifest: %s\nMachine:  %s\n",
+		run.BenchmarkKind, run.BenchmarkSuite, run.ProtocolVersion, run.JSRuntime, run.RuntimeVersion, run.BunVersion, run.ZigVersion, run.ManifestHash, run.MachineID)
 
 	var maxInnerRSD int64
 	hasInnerRSD := false

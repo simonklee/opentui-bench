@@ -1,12 +1,13 @@
 import { For, Show } from "solid-js";
 import type { Component } from "solid-js";
+import { runtimeName, runtimeVersion } from "../services/api";
 import type { RunIdentity as RunIdentityData } from "../services/api";
 
 const RunIdentity: Component<{ identity: RunIdentityData; compact?: boolean }> = (props) => {
   const fields = () =>
     [
       ["Suite", props.identity.benchmark_suite],
-      ["Bun", props.identity.bun_version],
+      [runtimeName(props.identity), runtimeVersion(props.identity)],
       ["Zig", props.identity.zig_version],
       ["Protocol", String(props.identity.protocol_version)],
       ["Manifest", props.identity.manifest_hash],

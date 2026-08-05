@@ -142,6 +142,8 @@ func (s *Server) Start(openBrowser bool) error {
 	mux.HandleFunc("/api/runs/", s.routeRunsAPI)
 	mux.HandleFunc("/api/compare", s.handleCompare)
 	mux.HandleFunc("/api/trend", s.handleTrend)
+	mux.HandleFunc("/api/runtime-compare", s.handleRuntimeCompare)
+	mux.HandleFunc("/api/runtime-trend", s.handleRuntimeTrend)
 	mux.HandleFunc("/api/benchmarks", s.handleBenchmarks)
 	mux.HandleFunc("/api/regressions/history", s.handleRegressionsHistory)
 	mux.HandleFunc("/api/regressions", s.handleRegressions)
@@ -172,7 +174,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	if s.javascriptRuns {
 		javascriptRuns = 1
 	}
-	_, _ = fmt.Fprintf(w, `{"javascript_runs":%d,"job_lease_protocol":%d}`, javascriptRuns, joblease.Protocol)
+	_, _ = fmt.Fprintf(w, `{"javascript_runs":%d,"javascript_runtimes":["bun","node"],"javascript_protocol":%d,"job_lease_protocol":%d}`, javascriptRuns, 1, joblease.Protocol)
 }
 
 func (s *Server) pruneProfileData() (db.ProfileRetentionResult, error) {

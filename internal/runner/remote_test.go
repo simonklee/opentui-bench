@@ -131,6 +131,9 @@ func TestRemoteJobMethodsCarryClaimToken(t *testing.T) {
 			if r.URL.Query().Get("benchmark_kind") != "zig" || r.URL.Query().Get("job_lease_protocol") != fmt.Sprint(joblease.Protocol) {
 				t.Errorf("claim query = %q", r.URL.RawQuery)
 			}
+			if _, present := r.URL.Query()["javascript_runtimes"]; !present || r.URL.Query().Get("javascript_runtimes") != "" {
+				t.Errorf("empty runtime capabilities were not advertised explicitly: %q", r.URL.RawQuery)
+			}
 			var request struct {
 				ClaimToken string `json:"claim_token"`
 			}

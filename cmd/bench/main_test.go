@@ -22,6 +22,26 @@ import (
 	"opentui-bench/internal/runner"
 )
 
+func TestSupportedJavaScriptRuntimesRequiresBunForNode(t *testing.T) {
+	dir := t.TempDir()
+	writeTool := func(name, output string) {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' '"+output+"'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTool("node", "v"+jsbench.NodeVersion)
+	t.Setenv("PATH", dir)
+	if got := supportedJavaScriptRuntimes(); len(got) != 0 {
+		t.Fatalf("Node without Bun advertised runtimes %q", got)
+	}
+	writeTool("bun", jsbench.BunVersion+"+revision")
+	got := supportedJavaScriptRuntimes()
+	if len(got) != 2 || got[0] != jsbench.RuntimeBun || got[1] != jsbench.RuntimeNode {
+		t.Fatalf("canonical tools advertised runtimes %q", got)
+	}
+}
+
 func TestRecordJavaScriptDefaultsToCanonicalSamples(t *testing.T) {
 	cmd := &cobra.Command{}
 	samples := 1
@@ -129,6 +149,7 @@ func TestShowJavaScriptPrintsIdentityAndMeasurementQuality(t *testing.T) {
 	wantIdentity := "Kind:     js\n" +
 		"Suite:    " + jsbench.Suite + "\n" +
 		"Protocol: " + strconv.FormatInt(jsbench.Protocol, 10) + "\n" +
+		"Runtime:  bun " + jsbench.BunVersion + "\n" +
 		"Bun:      " + jsbench.BunVersion + "\n" +
 		"Zig:      " + jsbench.ZigVersion + "\n" +
 		"Manifest: " + jsbench.ManifestDigest + "\n" +

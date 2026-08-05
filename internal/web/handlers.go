@@ -372,6 +372,218 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleRuntimeCompare(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	baselineID, baselineErr := strconv.ParseInt(r.URL.Query().Get("baseline_run_id"), 10, 64)
+	comparedID, comparedErr := strconv.ParseInt(r.URL.Query().Get("compared_run_id"), 10, 64)
+	if baselineErr != nil || comparedErr != nil || baselineID <= 0 || comparedID <= 0 {
+		http.Error(w, "valid baseline_run_id and compared_run_id are required", http.StatusBadRequest)
+		return
+	}
+	baselineRun, err := s.db.GetRun(baselineID)
+	if err != nil {
+		http.Error(w, "baseline run not found", http.StatusNotFound)
+		return
+	}
+	comparedRun, err := s.db.GetRun(comparedID)
+	if err != nil {
+		http.Error(w, "compared run not found", http.StatusNotFound)
+		return
+	}
+	baselineCommit := firstNonempty(baselineRun.CommitHashFull, baselineRun.CommitHash)
+	comparedCommit := firstNonempty(comparedRun.CommitHashFull, comparedRun.CommitHash)
+	if baselineCommit != comparedCommit || !db.CrossRuntimeCompatible(baselineRun, comparedRun) {
+		http.Error(w, "runs are not cross-runtime compatible", http.StatusBadRequest)
+		return
+	}
+	baselineResults, err := s.db.GetResultsForRun(baselineRun.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	comparedResults, err := s.db.GetResultsForRun(comparedRun.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	type runtimeComparison struct {
+		Category              string  `json:"category"`
+		Name                  string  `json:"name"`
+		BaselineResultID      int64   `json:"baseline_result_id"`
+		ComparedResultID      int64   `json:"compared_result_id"`
+		BaselineNS            int64   `json:"baseline_ns"`
+		ComparedNS            int64   `json:"compared_ns"`
+		DurationChangePercent float64 `json:"duration_change_percent"`
+		SpeedRatio            float64 `json:"speed_ratio"`
+	}
+	comparedByKey := make(map[db.BenchmarkKey]db.Result, len(comparedResults))
+	for _, result := range comparedResults {
+		comparedByKey[db.BenchmarkKey{Category: result.Category, Name: result.Name}] = result
+	}
+	comparisons := make([]runtimeComparison, 0, len(baselineResults))
+	for _, baseline := range baselineResults {
+		compared, ok := comparedByKey[db.BenchmarkKey{Category: baseline.Category, Name: baseline.Name}]
+		if !ok || baseline.P50Ns <= 0 || compared.P50Ns <= 0 {
+			continue
+		}
+		comparisons = append(comparisons, runtimeComparison{
+			Category: baseline.Category, Name: baseline.Name,
+			BaselineResultID: baseline.ID, ComparedResultID: compared.ID,
+			BaselineNS: baseline.P50Ns, ComparedNS: compared.P50Ns,
+			DurationChangePercent: float64(compared.P50Ns-baseline.P50Ns) / float64(baseline.P50Ns) * 100,
+			SpeedRatio:            float64(baseline.P50Ns) / float64(compared.P50Ns),
+		})
+	}
+	type runtimeRun struct {
+		runIdentityResponse
+		ID             int64  `json:"id"`
+		CommitHash     string `json:"commit_hash"`
+		CommitHashFull string `json:"commit_hash_full,omitempty"`
+	}
+	response := struct {
+		Metric      string              `json:"metric"`
+		LowerBetter bool                `json:"lower_is_better"`
+		Baseline    runtimeRun          `json:"baseline"`
+		Compared    runtimeRun          `json:"compared"`
+		Comparisons []runtimeComparison `json:"comparisons"`
+	}{
+		Metric: "p50_ns", LowerBetter: true,
+		Baseline: runtimeRun{runIdentityResponse: identityResponse(baselineRun), ID: baselineRun.ID,
+			CommitHash: baselineRun.CommitHash, CommitHashFull: baselineRun.CommitHashFull},
+		Compared: runtimeRun{runIdentityResponse: identityResponse(comparedRun), ID: comparedRun.ID,
+			CommitHash: comparedRun.CommitHash, CommitHashFull: comparedRun.CommitHashFull},
+		Comparisons: comparisons,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func firstNonempty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (s *Server) handleRuntimeTrend(w http.ResponseWriter, r *http.Request) {
+	resultID, err := strconv.ParseInt(r.URL.Query().Get("result_id"), 10, 64)
+	if err != nil || resultID <= 0 {
+		http.Error(w, "valid result_id is required", http.StatusBadRequest)
+		return
+	}
+	baselineRuntime := firstNonempty(r.URL.Query().Get("baseline_runtime"), jsbench.RuntimeBun)
+	comparedRuntime := firstNonempty(r.URL.Query().Get("compared_runtime"), jsbench.RuntimeNode)
+	if baselineRuntime == comparedRuntime || jsbench.RuntimeVersion(baselineRuntime) == "" || jsbench.RuntimeVersion(comparedRuntime) == "" {
+		http.Error(w, "baseline_runtime and compared_runtime must be distinct canonical runtimes", http.StatusBadRequest)
+		return
+	}
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit <= 0 || limit > 500 {
+			http.Error(w, "limit must be between 1 and 500", http.StatusBadRequest)
+			return
+		}
+	}
+	reference, err := s.db.GetResult(resultID)
+	if err != nil {
+		http.Error(w, "result not found", http.StatusNotFound)
+		return
+	}
+	referenceRun, err := s.db.GetRun(reference.RunID)
+	if err != nil || referenceRun.BenchmarkKind != jsbench.Kind {
+		http.Error(w, "result is not a JavaScript benchmark", http.StatusBadRequest)
+		return
+	}
+	rows, err := s.db.Query(`
+		WITH baseline_runs AS (
+			SELECT COALESCE(NULLIF(commit_hash_full, ''), commit_hash) AS commit_key, MAX(id) AS run_id
+			FROM runs WHERE benchmark_kind = 'js' AND js_runtime = ? AND runtime_version = ?
+			  AND machine_id = ? AND benchmark_suite = ? AND protocol_version = ?
+			  AND zig_version = ? AND manifest_hash = ?
+			GROUP BY COALESCE(NULLIF(commit_hash_full, ''), commit_hash)
+		), compared_runs AS (
+			SELECT COALESCE(NULLIF(commit_hash_full, ''), commit_hash) AS commit_key, MAX(id) AS run_id
+			FROM runs WHERE benchmark_kind = 'js' AND js_runtime = ? AND runtime_version = ?
+			  AND machine_id = ? AND benchmark_suite = ? AND protocol_version = ?
+			  AND zig_version = ? AND manifest_hash = ?
+			GROUP BY COALESCE(NULLIF(commit_hash_full, ''), commit_hash)
+		), commits AS (
+			SELECT commit_key FROM baseline_runs UNION SELECT commit_key FROM compared_runs
+		)
+		SELECT baseline_result.id, compared_result.id, commits.commit_key,
+		       COALESCE(baseline_run.run_date, compared_run.run_date),
+		       baseline_result.p50_ns, compared_result.p50_ns
+		FROM commits
+		LEFT JOIN baseline_runs ON baseline_runs.commit_key = commits.commit_key
+		LEFT JOIN runs baseline_run ON baseline_run.id = baseline_runs.run_id
+		LEFT JOIN results baseline_result ON baseline_result.run_id = baseline_run.id
+		  AND baseline_result.category = ? AND baseline_result.name = ?
+		LEFT JOIN compared_runs ON compared_runs.commit_key = commits.commit_key
+		LEFT JOIN runs compared_run ON compared_run.id = compared_runs.run_id
+		LEFT JOIN results compared_result ON compared_result.run_id = compared_run.id
+		  AND compared_result.category = ? AND compared_result.name = ?
+		WHERE baseline_result.id IS NOT NULL OR compared_result.id IS NOT NULL
+		ORDER BY julianday(COALESCE(baseline_run.run_date, compared_run.run_date)) DESC,
+		         COALESCE(baseline_run.id, compared_run.id) DESC LIMIT ?`,
+		baselineRuntime, jsbench.RuntimeVersion(baselineRuntime), referenceRun.MachineID,
+		referenceRun.BenchmarkSuite, referenceRun.ProtocolVersion, referenceRun.ZigVersion, referenceRun.ManifestHash,
+		comparedRuntime, jsbench.RuntimeVersion(comparedRuntime), referenceRun.MachineID,
+		referenceRun.BenchmarkSuite, referenceRun.ProtocolVersion, referenceRun.ZigVersion, referenceRun.ManifestHash,
+		reference.Category, reference.Name, reference.Category, reference.Name, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = rows.Close() }()
+	type pair struct {
+		BaselineResultID *int64 `json:"baseline_result_id"`
+		ComparedResultID *int64 `json:"compared_result_id"`
+		CommitHash       string `json:"commit_hash"`
+		RunDate          string `json:"run_date"`
+		BaselineP50Ns    *int64 `json:"baseline_p50_ns"`
+		ComparedP50Ns    *int64 `json:"compared_p50_ns"`
+	}
+	pairs := []pair{}
+	for rows.Next() {
+		var point pair
+		var baselineResultID, comparedResultID, baselineP50NS, comparedP50NS sql.NullInt64
+		if err := rows.Scan(&baselineResultID, &comparedResultID, &point.CommitHash, &point.RunDate,
+			&baselineP50NS, &comparedP50NS); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if baselineResultID.Valid {
+			point.BaselineResultID = &baselineResultID.Int64
+		}
+		if comparedResultID.Valid {
+			point.ComparedResultID = &comparedResultID.Int64
+		}
+		if baselineP50NS.Valid {
+			point.BaselineP50Ns = &baselineP50NS.Int64
+		}
+		if comparedP50NS.Valid {
+			point.ComparedP50Ns = &comparedP50NS.Int64
+		}
+		pairs = append(pairs, point)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"baseline_runtime": baselineRuntime, "baseline_runtime_version": jsbench.RuntimeVersion(baselineRuntime),
+		"compared_runtime": comparedRuntime, "compared_runtime_version": jsbench.RuntimeVersion(comparedRuntime),
+		"pairs": pairs,
+	})
+}
+
 func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 	resultID, err := strconv.ParseInt(r.URL.Query().Get("result_id"), 10, 64)
 	if err != nil || resultID <= 0 {
@@ -1812,6 +2024,7 @@ func jobToResponse(j *db.Job) jobResponse {
 		runIdentityResponse: runIdentityResponse{
 			BenchmarkKind: j.BenchmarkKind, BenchmarkSuite: j.BenchmarkSuite,
 			ProtocolVersion: j.ProtocolVersion, ManifestHash: j.ManifestHash,
+			JSRuntime: j.JSRuntime, RuntimeVersion: j.RuntimeVersion,
 		},
 		ID:          j.ID,
 		Status:      j.Status,
@@ -1848,6 +2061,8 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		BenchmarkSuite  string `json:"benchmark_suite"`
 		ProtocolVersion int64  `json:"protocol_version"`
 		ManifestHash    string `json:"manifest_hash"`
+		JSRuntime       string `json:"js_runtime"`
+		RuntimeVersion  string `json:"runtime_version"`
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
@@ -1887,6 +2102,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "JavaScript benchmark runs are disabled", http.StatusForbidden)
 		return
 	}
+	if req.BenchmarkKind == jsbench.Kind {
+		if req.JSRuntime == "" {
+			req.JSRuntime = jsbench.RuntimeBun
+		}
+		if req.RuntimeVersion == "" {
+			req.RuntimeVersion = jsbench.RuntimeVersion(req.JSRuntime)
+		}
+	}
 
 	if req.Samples <= 0 {
 		req.Samples = 3
@@ -1902,9 +2125,9 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "profile must be 'none' or 'cpu'", http.StatusBadRequest)
 		return
 	}
-	if req.BenchmarkKind == jsbench.Kind && !jsbench.MatchesJob(req.BenchmarkSuite, req.ProtocolVersion,
-		req.ManifestHash, req.Samples, req.Profile) {
-		http.Error(w, "JavaScript jobs require canonical suite, protocol, manifest_hash, samples=3, and profile='none'", http.StatusBadRequest)
+	if req.BenchmarkKind == jsbench.Kind && !jsbench.MatchesRuntimeJob(req.BenchmarkSuite, req.ProtocolVersion,
+		req.JSRuntime, req.RuntimeVersion, req.ManifestHash, req.Samples, req.Profile) {
+		http.Error(w, "JavaScript jobs require canonical suite, protocol, runtime, manifest_hash, samples=3, and profile='none'", http.StatusBadRequest)
 		return
 	}
 	if req.BenchmarkKind == "zig" && req.ManifestHash != "" {
@@ -1936,6 +2159,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		RequestedBy:   req.RequestedBy,
 		BenchmarkKind: req.BenchmarkKind, BenchmarkSuite: req.BenchmarkSuite,
 		ProtocolVersion: req.ProtocolVersion, ManifestHash: req.ManifestHash,
+		JSRuntime: req.JSRuntime, RuntimeVersion: req.RuntimeVersion,
 	}
 
 	id, err := s.db.InsertJob(job)
@@ -1984,7 +2208,8 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs, err := s.db.ListJobsFiltered(limit, status, branch,
 		r.URL.Query().Get("benchmark_kind"), r.URL.Query().Get("requested_by"),
-		r.URL.Query().Get("benchmark_suite"), protocolVersion, r.URL.Query().Get("manifest_hash"))
+		r.URL.Query().Get("benchmark_suite"), protocolVersion, r.URL.Query().Get("manifest_hash"),
+		r.URL.Query().Get("js_runtime"), r.URL.Query().Get("runtime_version"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2114,6 +2339,8 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		BenchmarkSuite  string            `json:"benchmark_suite"`
 		ProtocolVersion int64             `json:"protocol_version"`
 		BunVersion      string            `json:"bun_version"`
+		JSRuntime       string            `json:"js_runtime"`
+		RuntimeVersion  string            `json:"runtime_version"`
 		ZigVersion      string            `json:"zig_version"`
 		ManifestHash    string            `json:"manifest_hash"`
 		ManifestJSON    string            `json:"manifest_json"`
@@ -2144,6 +2371,22 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, "JavaScript benchmark runs are disabled", http.StatusForbidden)
 		return
 	}
+	legacyJSIdentity := req.BenchmarkKind == jsbench.Kind && req.JSRuntime == "" && req.RuntimeVersion == ""
+	if req.BenchmarkKind == jsbench.Kind {
+		if req.JSRuntime == "" {
+			req.JSRuntime = jsbench.RuntimeBun
+		}
+		if req.RuntimeVersion == "" {
+			if req.BunVersion != "" {
+				req.RuntimeVersion = req.BunVersion
+			} else {
+				req.RuntimeVersion = jsbench.RuntimeVersion(req.JSRuntime)
+			}
+		}
+		if req.JSRuntime == jsbench.RuntimeBun && req.BunVersion == "" {
+			req.BunVersion = req.RuntimeVersion
+		}
+	}
 	if req.BenchmarkKind == "zig" && req.ZigOptimize == "" {
 		req.ZigOptimize = "ReleaseFast"
 	}
@@ -2166,7 +2409,9 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		ZigOptimize:    req.ZigOptimize,
 		BenchmarkKind:  req.BenchmarkKind, BenchmarkSuite: req.BenchmarkSuite,
 		ProtocolVersion: req.ProtocolVersion, BunVersion: req.BunVersion,
+		JSRuntime: req.JSRuntime, RuntimeVersion: req.RuntimeVersion,
 		ZigVersion: req.ZigVersion, ManifestHash: req.ManifestHash, ManifestJSON: req.ManifestJSON,
+		LegacyJSIdentity: legacyJSIdentity,
 	}
 	if err := validateCreateRun(run, req.Results); err != nil {
 		writeJSONError(w, err.Error(), http.StatusBadRequest)
@@ -2234,6 +2479,8 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		"benchmark_suite":  storedRun.BenchmarkSuite,
 		"protocol_version": storedRun.ProtocolVersion,
 		"bun_version":      storedRun.BunVersion,
+		"js_runtime":       storedRun.JSRuntime,
+		"runtime_version":  storedRun.RuntimeVersion,
 		"zig_version":      storedRun.ZigVersion,
 		"manifest_hash":    storedRun.ManifestHash,
 	})
@@ -2479,6 +2726,7 @@ func (s *Server) handleLatestCommit(w http.ResponseWriter, r *http.Request) {
 		"commit_hash_full": run.CommitHashFull,
 		"benchmark_kind":   run.BenchmarkKind, "benchmark_suite": run.BenchmarkSuite,
 		"protocol_version": run.ProtocolVersion, "bun_version": run.BunVersion,
+		"js_runtime": run.JSRuntime, "runtime_version": run.RuntimeVersion,
 		"zig_version": run.ZigVersion, "manifest_hash": run.ManifestHash,
 		"manifest_json": run.ManifestJSON, "machine_id": run.MachineID,
 		"zig_optimize": run.ZigOptimize,
@@ -2524,7 +2772,11 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 			benchmarkKind = "zig"
 		}
 	}
-	job, err := s.db.ClaimNextPendingJobWithToken(benchmarkKind, claimRequest.ClaimToken)
+	runtimes := strings.Split(strings.Trim(r.URL.Query().Get("javascript_runtimes"), ","), ",")
+	if len(runtimes) == 1 && runtimes[0] == "" {
+		runtimes = nil
+	}
+	job, err := s.db.ClaimNextPendingJobWithToken(benchmarkKind, claimRequest.ClaimToken, runtimes...)
 	if err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return

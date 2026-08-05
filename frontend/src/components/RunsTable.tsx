@@ -1,8 +1,9 @@
 import { For, Show } from "solid-js";
 import type { Component } from "solid-js";
 import { useNavigate } from "@solidjs/router";
+import { runtimeName, runtimeVersion } from "../services/api";
 import type { Run } from "../services/api";
-import { benchmarkKind } from "../store";
+import { benchmarkKind, jsRuntimeFilter } from "../store";
 
 interface RunsTableProps {
   runs: Run[] | undefined;
@@ -19,6 +20,9 @@ const RunsTable: Component<RunsTableProps> = (props) => {
         <thead class="bg-bg-dark sticky top-0 z-10 border-b-2 border-black font-ui text-[10px] uppercase tracking-widest text-text-main">
           <tr>
             <th class={thClass}>Commit</th>
+            <Show when={benchmarkKind() === "js"}>
+              <th class={thClass}>Runtime</th>
+            </Show>
             <th class={thClass}>Message</th>
             <th class={thClass}>Branch</th>
             <th class={thClass}>Date</th>
@@ -30,7 +34,11 @@ const RunsTable: Component<RunsTableProps> = (props) => {
             {(run) => (
               <tr
                 class="hover:bg-bg-hover cursor-pointer transition-colors duration-75 border-b border-border group"
-                onClick={() => navigate(`/benchmarks/${run.id}?benchmark_kind=${benchmarkKind()}`)}
+                onClick={() =>
+                  navigate(
+                    `/benchmarks/${run.id}?benchmark_kind=${benchmarkKind()}&js_runtime=${jsRuntimeFilter()}`,
+                  )
+                }
               >
                 <td class="px-4 py-3">
                   <a
@@ -42,6 +50,12 @@ const RunsTable: Component<RunsTableProps> = (props) => {
                     {run.commit_hash.substring(0, 7)}
                   </a>
                 </td>
+                <Show when={run.benchmark_kind === "js"}>
+                  <td class="px-4 py-3 whitespace-nowrap">
+                    <span class="font-bold text-text-main">{runtimeName(run)}</span>{" "}
+                    <span class="text-[10px] text-text-muted">{runtimeVersion(run)}</span>
+                  </td>
+                </Show>
                 <td
                   class="px-4 py-3 max-w-[400px] truncate font-medium font-ui"
                   title={run.commit_message}

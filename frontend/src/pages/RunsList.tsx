@@ -3,19 +3,22 @@ import type { Component } from "solid-js";
 import { api } from "../services/api";
 import StatsBar from "../components/StatsBar";
 import RunsTable from "../components/RunsTable";
-import { benchmarkKind } from "../store";
+import { benchmarkKind, jsRuntimeFilter } from "../store";
 
 const RunsList: Component = () => {
-  const [runs] = createResource(benchmarkKind, (kind) => api.getRuns(100, kind));
-  const [failedJobs] = createResource(benchmarkKind, (kind) =>
-    kind === "js" ? api.getJobs(kind, "failed", 50, "automatic") : Promise.resolve([]),
+  const request = () => [benchmarkKind(), jsRuntimeFilter()] as const;
+  const [runs] = createResource(request, ([kind, runtime]) =>
+    api.getRuns(100, kind, undefined, runtime),
+  );
+  const [failedJobs] = createResource(request, ([kind, runtime]) =>
+    kind === "js" ? api.getJobs(kind, "failed", 50, "automatic", runtime) : Promise.resolve([]),
   );
 
   return (
     <div class="flex flex-col h-full w-full">
       <div class="flex-none h-[57px] px-6 border-b border-border bg-bg-dark flex justify-between items-center">
         <h2 class="text-[14px] font-bold text-black uppercase tracking-widest">
-          Recorded {benchmarkKind() === "js" ? "JavaScript" : "Zig"} Runs
+          Recorded {benchmarkKind() === "js" ? `${jsRuntimeFilter()} JavaScript` : "Zig"} Runs
         </h2>
       </div>
 

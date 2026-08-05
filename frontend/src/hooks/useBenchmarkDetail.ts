@@ -252,6 +252,17 @@ export function useBenchmarkDetail() {
     return main;
   });
 
+  const [runtimeTrendData] = createResource(
+    () => {
+      const resultId = selectedBenchmark()?.id;
+      const runtime = currentRun()?.js_runtime;
+      if (!resultId || currentRun()?.benchmark_kind !== "js" || !runtime) return null;
+      const baseline = firstSearchParam(searchParams.baseline_runtime) === "node" ? "node" : "bun";
+      return { resultId, baseline, compared: baseline === "bun" ? "node" : "bun" } as const;
+    },
+    ({ resultId, baseline, compared }) => api.getRuntimeTrend(resultId, baseline, compared, 100),
+  );
+
   // Check artifacts
   createEffect(async () => {
     const rid = currentRun()?.id;
@@ -294,6 +305,7 @@ export function useBenchmarkDetail() {
     selectBenchmark,
     selectedBenchmark,
     trendData: combinedTrendData,
+    runtimeTrendData: () => runtimeTrendData(),
     branchTrendData: () => undefined,
     isOnBranch,
     runBranch,

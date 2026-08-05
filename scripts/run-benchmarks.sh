@@ -49,6 +49,7 @@ readonly JS_BENCHMARK_SUITE="core-default"
 readonly JS_PROTOCOL_VERSION=1
 readonly JS_MANIFEST_HASH="sha256:eadd082d755c58b7e8a865bd5873802974881967a4edab1c79d0fb1cba482aa0"
 readonly JS_BUN_VERSION="1.3.14"
+readonly JS_NODE_VERSION="26.4.0"
 
 # API configuration - set these as environment variables
 : "${API_URL:=https://opentui-bench.fly.dev}"
@@ -57,7 +58,7 @@ readonly JS_BUN_VERSION="1.3.14"
 : "${ALERT_COOLDOWN:=3600}"
 
 # Export PATH to include necessary binaries
-export PATH="$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/anyzig:$HOME/.fly/bin:/usr/local/go/bin:$PATH"
+export PATH="$HOME/.bun/bin:$HOME/.local/node-v$JS_NODE_VERSION/bin:$HOME/.cargo/bin:$HOME/anyzig:$HOME/.fly/bin:/usr/local/go/bin:$PATH"
 
 # Global variables
 USE_COLOR=true
@@ -228,6 +229,23 @@ has_stable_javascript_bun() {
 	return 0
 }
 
+has_stable_javascript_node() {
+	local node_version
+	if ! command -v node &>/dev/null; then
+		info "Node is unavailable; Node benchmark work is disabled"
+		return 1
+	fi
+	if ! node_version=$(timeout --kill-after=1s 5s node --version 2>/dev/null); then
+		info "Unable to read Node version; Node benchmark work is disabled"
+		return 1
+	fi
+	if [[ "$node_version" != "v$JS_NODE_VERSION" ]]; then
+		info "Node must be $JS_NODE_VERSION for JavaScript benchmarks (found ${node_version:-unavailable})"
+		return 1
+	fi
+	return 0
+}
+
 setup_repos() {
 	log "Setting up repositories..."
 	mkdir -p "$REPOS_DIR"
@@ -333,14 +351,25 @@ run_benchmarks() {
 }
 
 schedule_javascript_main_job() {
+	local runtime=$1 runtime_version script
+	case "$runtime" in
+	bun) runtime_version=$JS_BUN_VERSION; script=bench:js ;;
+	node) runtime_version=$JS_NODE_VERSION; script=bench:js:node ;;
+	*) err "Unsupported JavaScript runtime: $runtime"; return 1 ;;
+	esac
 	cd "$OPENTUI_REPO"
 	if ! has_stable_javascript_bun; then
 		return 0
 	fi
+	if [[ "$runtime" == node ]] && ! has_stable_javascript_node; then
+		return 0
+	fi
 	local capabilities
 	if ! capabilities=$(curl --fail --silent --show-error --max-time 120 "$API_URL/api/capabilities") ||
-		! jq -e '.javascript_runs == 1' <<<"$capabilities" >/dev/null; then
-		info "Server does not advertise JavaScript run recording; skipping automatic scheduling"
+		! jq -e --arg runtime "$runtime" \
+			'.javascript_runs == 1 and .job_lease_protocol == 3 and (.javascript_runtimes | index($runtime) != null)' \
+			<<<"$capabilities" >/dev/null; then
+		info "Server does not advertise $runtime JavaScript scheduling support; skipping automatic scheduling"
 		return 0
 	fi
 
@@ -350,11 +379,13 @@ schedule_javascript_main_job() {
 		--data-urlencode 'requested_by=automatic' --data-urlencode 'benchmark_kind=js' \
 		--data-urlencode "benchmark_suite=$JS_BENCHMARK_SUITE" \
 		--data-urlencode "protocol_version=$JS_PROTOCOL_VERSION" \
-		--data-urlencode "manifest_hash=$JS_MANIFEST_HASH")
+		--data-urlencode "manifest_hash=$JS_MANIFEST_HASH" \
+		--data-urlencode "js_runtime=$runtime" \
+		--data-urlencode "runtime_version=$runtime_version")
 
 	# Do not queue ahead of an existing attempt or create a duplicate for it.
 	if jq -e 'any(.[]; .status != "completed" and .status != "failed" and .status != "cancelled")' <<<"$automatic_jobs" >/dev/null; then
-		info "Automatic JavaScript benchmark job is already outstanding"
+		info "Automatic $runtime JavaScript benchmark job is already outstanding"
 		return 0
 	fi
 
@@ -371,14 +402,16 @@ schedule_javascript_main_job() {
 	fi
 
 	if [[ -n "$latest_attempt" ]]; then
-		next_commit=$(git rev-list --reverse "${latest_attempt}..origin/main" | sed -n '1p')
+		for commit in $(git rev-list --reverse "${latest_attempt}..origin/main"); do
+			if javascript_harness_exists "$commit" "$script"; then
+				next_commit=$commit
+				break
+			fi
+		done
 	else
 		for commit in $(git log --reverse --format='%H' origin/main -- packages/core/package.json \
 			packages/core/src/benchmark/js-benchmark.ts packages/core/src/benchmark/js-benchmark-harness.ts); do
-			if git cat-file -e "${commit}:packages/core/src/benchmark/js-benchmark.ts" 2>/dev/null &&
-				git cat-file -e "${commit}:packages/core/src/benchmark/js-benchmark-harness.ts" 2>/dev/null &&
-				git show "${commit}:packages/core/package.json" 2>/dev/null |
-				jq -e '.scripts["bench:js"] == "bun src/benchmark/js-benchmark.ts"' >/dev/null; then
+			if javascript_harness_exists "$commit" "$script"; then
 				next_commit="$commit"
 				break
 			fi
@@ -391,7 +424,7 @@ schedule_javascript_main_job() {
 
 	did_work=true
 	if $dry_run; then
-		log "Dry run: would queue automatic JavaScript benchmark for ${next_commit:0:7}"
+		log "Dry run: would queue automatic $runtime JavaScript benchmark for ${next_commit:0:7}"
 		return 0
 	fi
 
@@ -401,6 +434,8 @@ schedule_javascript_main_job() {
 		--arg commit_hash "$next_commit" \
 		--arg suite "$JS_BENCHMARK_SUITE" \
 		--arg manifest "$JS_MANIFEST_HASH" \
+		--arg runtime "$runtime" \
+		--arg runtime_version "$runtime_version" \
 		--argjson protocol "$JS_PROTOCOL_VERSION" '
 		{
 			branch: $branch,
@@ -409,6 +444,8 @@ schedule_javascript_main_job() {
 			benchmark_suite: $suite,
 			protocol_version: $protocol,
 			manifest_hash: $manifest,
+			js_runtime: $runtime,
+			runtime_version: $runtime_version,
 			samples: 3,
 			profile: "none",
 			requested_by: "automatic"
@@ -418,7 +455,15 @@ schedule_javascript_main_job() {
 		-H "Authorization: Bearer $API_KEY" \
 		-H 'Content-Type: application/json' \
 		--data "$payload" >/dev/null
-	log "Queued automatic JavaScript benchmark for ${next_commit:0:7}"
+	log "Queued automatic $runtime JavaScript benchmark for ${next_commit:0:7}"
+}
+
+javascript_harness_exists() {
+	local commit=$1 script=$2
+	git cat-file -e "${commit}:packages/core/src/benchmark/js-benchmark.ts" 2>/dev/null &&
+		git cat-file -e "${commit}:packages/core/src/benchmark/js-benchmark-harness.ts" 2>/dev/null &&
+		git show "${commit}:packages/core/package.json" 2>/dev/null |
+		jq -e --arg script "$script" '.scripts[$script] | type == "string" and length > 0' >/dev/null
 }
 
 run_queued_jobs() {
@@ -523,7 +568,8 @@ main() {
 	while true; do
 		did_work=false
 		run_benchmarks
-		schedule_javascript_main_job
+		schedule_javascript_main_job bun
+		schedule_javascript_main_job node
 		run_queued_jobs
 
 		if ! $daemon_mode; then

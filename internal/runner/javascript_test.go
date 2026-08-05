@@ -15,6 +15,7 @@ import (
 type scriptedExecutor struct {
 	commands [][]string
 	dirs     []string
+	envs     [][]string
 	timeouts []time.Duration
 	outputs  int
 	bun      string
@@ -23,6 +24,7 @@ type scriptedExecutor struct {
 func (e *scriptedExecutor) CombinedOutput(_ context.Context, cmd *exec.Cmd) ([]byte, error) {
 	e.commands = append(e.commands, slices.Clone(cmd.Args))
 	e.dirs = append(e.dirs, cmd.Dir)
+	e.envs = append(e.envs, slices.Clone(cmd.Env))
 	gitOutputs := []string{"abc123", "abc123full", "message", "2026-08-04T00:00:00Z", "main"}
 	output := gitOutputs[e.outputs]
 	e.outputs++
@@ -32,6 +34,7 @@ func (e *scriptedExecutor) CombinedOutput(_ context.Context, cmd *exec.Cmd) ([]b
 func (e *scriptedExecutor) Output(ctx context.Context, cmd *exec.Cmd) ([]byte, []byte, error) {
 	e.commands = append(e.commands, slices.Clone(cmd.Args))
 	e.dirs = append(e.dirs, cmd.Dir)
+	e.envs = append(e.envs, slices.Clone(cmd.Env))
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		e.timeouts = append(e.timeouts, 0)
@@ -46,6 +49,8 @@ func (e *scriptedExecutor) Output(ctx context.Context, cmd *exec.Cmd) ([]byte, [
 		return []byte(e.bun + "\n"), nil, nil
 	case slices.Equal(cmd.Args, []string{"zig", "version"}):
 		return []byte(jsbench.ZigVersion + "\n"), nil, nil
+	case slices.Equal(cmd.Args, []string{"node", "--version"}):
+		return []byte("v" + jsbench.NodeVersion + "\n"), nil, nil
 	case len(cmd.Args) > 2 && cmd.Args[2] == "--cwd=packages/core" && cmd.Args[len(cmd.Args)-1] == "--format=json":
 		return nil, []byte("unstable case"), errors.New("exit status 1")
 	default:
@@ -103,6 +108,27 @@ func TestJavaScriptRejectsPrereleaseBun(t *testing.T) {
 	err := checkBunVersion(context.Background(), executor, "/repo")
 	if err == nil || !strings.Contains(err.Error(), "want stable "+jsbench.BunVersion) {
 		t.Fatalf("error = %v, want stable Bun rejection", err)
+	}
+}
+
+func TestNodeOrchestrationVerifiesPinAndUsesNodeScript(t *testing.T) {
+	executor := &scriptedExecutor{}
+	cfg := RunConfig{RepoPath: "/repo", BenchmarkKind: BenchmarkJS, JSRuntime: RuntimeNode, Samples: 3, Profile: ProfileNone}
+	_, _, err := RunAndCollectWithExecutor(context.Background(), cfg, executor)
+	if err == nil || !strings.Contains(err.Error(), "unstable case") {
+		t.Fatalf("error = %v", err)
+	}
+	if !slices.ContainsFunc(executor.commands, func(command []string) bool {
+		return slices.Equal(command, []string{"node", "--version"})
+	}) || !slices.ContainsFunc(executor.commands, func(command []string) bool {
+		return slices.Equal(command, []string{"bun", "--no-env-file", "--cwd=packages/core", "run", "bench:js:node", "--format=json"})
+	}) {
+		t.Fatalf("commands = %#v", executor.commands)
+	}
+	for i, command := range executor.commands {
+		if len(command) >= 2 && command[len(command)-2] == "bench:js:node" && !slices.Contains(executor.envs[i], "OTUI_BENCH_NATIVE_PREPARED=1") {
+			t.Fatalf("Node benchmark environment = %q", executor.envs[i])
+		}
 	}
 }
 
