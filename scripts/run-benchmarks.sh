@@ -362,18 +362,19 @@ schedule_javascript_main_job() {
 	terminal_commits=$(jq -r '.[] | select(.status == "completed" or .status == "failed" or .status == "cancelled") | .commit_hash | select(length > 0)' \
 		<<<"$automatic_jobs")
 	if [[ -n "$terminal_commits" ]]; then
-		while IFS= read -r commit; do
+		for commit in $(git rev-list origin/main); do
 			if grep -Fxq "$commit" <<<"$terminal_commits"; then
 				latest_attempt="$commit"
 				break
 			fi
-		done < <(git rev-list origin/main)
+		done
 	fi
 
 	if [[ -n "$latest_attempt" ]]; then
 		next_commit=$(git rev-list --reverse "${latest_attempt}..origin/main" | sed -n '1p')
 	else
-		while IFS= read -r commit; do
+		for commit in $(git log --reverse --format='%H' origin/main -- packages/core/package.json \
+			packages/core/src/benchmark/js-benchmark.ts packages/core/src/benchmark/js-benchmark-harness.ts); do
 			if git cat-file -e "${commit}:packages/core/src/benchmark/js-benchmark.ts" 2>/dev/null &&
 				git cat-file -e "${commit}:packages/core/src/benchmark/js-benchmark-harness.ts" 2>/dev/null &&
 				git show "${commit}:packages/core/package.json" 2>/dev/null |
@@ -381,8 +382,7 @@ schedule_javascript_main_job() {
 				next_commit="$commit"
 				break
 			fi
-		done < <(git log --reverse --format='%H' origin/main -- packages/core/package.json \
-			packages/core/src/benchmark/js-benchmark.ts packages/core/src/benchmark/js-benchmark-harness.ts)
+		done
 	fi
 	if [[ -z "$next_commit" ]]; then
 		info "JavaScript main history is caught up or has no canonical harness"
