@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	JavaScriptTimeout            = 75 * time.Second
+	JavaScriptTimeout            = 90 * time.Second
 	JavaScriptToolTimeout        = 10 * time.Second
 	JavaScriptPreparationTimeout = 10 * time.Minute
 )

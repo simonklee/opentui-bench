@@ -17,7 +17,7 @@ import (
 func canonicalJSRunBody(t *testing.T) []byte {
 	t.Helper()
 	cases := []any{
-		map[string]any{"category": "JS Layout", "name": "leaf-width-calculate", "workload_version": 1, "parameters": map[string]any{"width": 140, "height": 44, "nodes": 96}},
+		map[string]any{"category": "JS Layout", "name": "leaf-width-calculate", "workload_version": 2, "parameters": map[string]any{"width": 140, "height": 44, "nodes": 96}},
 		map[string]any{"category": "JS Render", "name": "yoga-layout-reads-100", "workload_version": 1, "parameters": map[string]any{"width": 140, "height": 44, "nodes": 100}},
 		map[string]any{"category": "JS Mouse", "name": "direct-bubble-depth-8", "workload_version": 1, "parameters": map[string]any{"width": 10, "height": 10, "depth": 8, "input": "direct"}},
 		map[string]any{"category": "JS Mouse", "name": "stdin-sgr-bubble-depth-8", "workload_version": 1, "parameters": map[string]any{"width": 10, "height": 10, "depth": 8, "input": "stdin-sgr"}},
@@ -32,7 +32,7 @@ func canonicalJSRunBody(t *testing.T) []byte {
 			"target_batch_ms": 200, "warmup_batches": 5,
 			"measured_batches": 20, "max_rsd_ppm": 50000,
 			"min_batch_iterations": 1, "max_batch_iterations": 1_000_000_000,
-			"max_case_ns": 15_000_000_000, "max_process_ns": 60_000_000_000,
+			"max_case_ns": 15_000_000_000, "max_process_ns": 75_000_000_000,
 		},
 		"cases": cases,
 	}

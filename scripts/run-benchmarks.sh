@@ -47,7 +47,7 @@ readonly LOG_FILE="$HOME/benchmark.log"
 readonly ALERT_STATE_FILE="$HOME/.cache/opentui-bench/last-alert"
 readonly JS_BENCHMARK_SUITE="core-default"
 readonly JS_PROTOCOL_VERSION=1
-readonly JS_MANIFEST_HASH="sha256:9f49f938973c8689c06166b6823cdeb96f1d1a224913565e5847969678f52d00"
+readonly JS_MANIFEST_HASH="sha256:eadd082d755c58b7e8a865bd5873802974881967a4edab1c79d0fb1cba482aa0"
 readonly JS_BUN_VERSION="1.3.14"
 
 # API configuration - set these as environment variables
