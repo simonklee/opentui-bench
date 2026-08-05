@@ -4,6 +4,7 @@ primary_region = 'ams'
 [build]
 
 [env]
+  BENCH_ENABLE_JAVASCRIPT_RUNS = '1'
   PORT = '8080'
 
 [http_service]
