@@ -151,6 +151,13 @@ func TestJavaScriptConfigRejectsNonCanonicalOptions(t *testing.T) {
 	}
 }
 
+func TestZigConfigRejectsJavaScriptIdentity(t *testing.T) {
+	cfg := normalizeRunConfig(RunConfig{BenchmarkKind: BenchmarkZig, JSRuntime: RuntimeBun})
+	if err := validateRunConfig(cfg); err == nil || !strings.Contains(err.Error(), "must not include JavaScript identity") {
+		t.Fatalf("validateRunConfig error = %v", err)
+	}
+}
+
 func TestJavaScriptPreparationKillsProcessGroupOnTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()

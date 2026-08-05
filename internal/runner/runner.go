@@ -232,6 +232,10 @@ func validateRunConfig(cfg RunConfig) error {
 	if cfg.BenchmarkKind != BenchmarkZig && cfg.BenchmarkKind != BenchmarkJS {
 		return fmt.Errorf("benchmark kind must be zig or js")
 	}
+	if cfg.BenchmarkKind == BenchmarkZig && (cfg.BunVersion != "" || cfg.JSRuntime != "" || cfg.RuntimeVersion != "" ||
+		cfg.ZigVersion != "" || cfg.ManifestHash != "") {
+		return fmt.Errorf("Zig benchmarks must not include JavaScript identity")
+	}
 	if cfg.BenchmarkKind == BenchmarkJS {
 		if !jsbench.MatchesIdentity(cfg.BenchmarkSuite, cfg.ProtocolVersion, string(cfg.JSRuntime), cfg.RuntimeVersion, cfg.ZigVersion, cfg.ManifestHash) {
 			return fmt.Errorf("JavaScript benchmark identity is not canonical")

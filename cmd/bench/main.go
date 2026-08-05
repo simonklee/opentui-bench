@@ -106,7 +106,9 @@ Remote usage:
 
 			cfg.Profile = runner.ProfileMode(profileStr)
 			cfg.BenchmarkKind = runner.BenchmarkKind(benchmarkKind)
-			cfg.JSRuntime = runner.JavaScriptRuntime(jsRuntime)
+			if cfg.BenchmarkKind == runner.BenchmarkJS {
+				cfg.JSRuntime = runner.JavaScriptRuntime(jsRuntime)
+			}
 			applyRecordDefaults(cmd, &cfg)
 			switch cfg.Profile {
 			case runner.ProfileNone, runner.ProfileCPU:
