@@ -21,6 +21,9 @@ func canonicalJSRunBody(t *testing.T) []byte {
 		map[string]any{"category": "JS Render", "name": "yoga-layout-reads-100", "workload_version": 1, "parameters": map[string]any{"width": 140, "height": 44, "nodes": 100}},
 		map[string]any{"category": "JS Mouse", "name": "direct-bubble-depth-8", "workload_version": 1, "parameters": map[string]any{"width": 10, "height": 10, "depth": 8, "input": "direct"}},
 		map[string]any{"category": "JS Mouse", "name": "stdin-sgr-bubble-depth-8", "workload_version": 1, "parameters": map[string]any{"width": 10, "height": 10, "depth": 8, "input": "stdin-sgr"}},
+		map[string]any{"category": "JS Text Table", "name": "proportional-column-widths", "workload_version": 1, "parameters": map[string]any{"allocations_per_operation": 1, "mix": "alternating", "min_width": 1, "ordinary_widths": "4,49,4,54,38", "ordinary_target_width": 104, "remainder_columns": 64, "remainder_width": 17, "remainder_target_width": 584}},
+		map[string]any{"category": "JS Text", "name": "text-buffer-word-wrap-measure", "workload_version": 1, "parameters": map[string]any{"width_method": "unicode", "wrap_mode": "word", "logical_lines": 64, "tokens_per_line": 128, "line_columns": 767, "text_bytes": 49_151, "width_a": 72, "width_b": 78, "measure_height": 2_048}},
+		map[string]any{"category": "JS Buffer", "name": "draw-box-titled-scissored", "workload_version": 1, "parameters": map[string]any{"buffer_width": 80, "buffer_height": 24, "width_method": "unicode", "box_x": 2, "box_y": 2, "box_width": 76, "box_height": 20, "scissor_x": 0, "scissor_y": 0, "scissor_width": 72, "scissor_height": 24, "border_style": "rounded", "should_fill": true, "titles_per_box": 2, "title_variants": 2, "visible_cells": 1_400}},
 	}
 	manifest := map[string]any{
 		"hash":             jsbench.ManifestDigest,
@@ -220,7 +223,8 @@ func TestCreateJavaScriptRunEnforcesProcessElapsedBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	maxCaseNS, maxProcessNS := int64(3_000), int64(7_500)
+	maxCaseNS := int64(3_000)
+	maxProcessNS := int64(len(request.Results)*2_400 - 500)
 	manifest.Measurement.MaxCaseNS = &maxCaseNS
 	manifest.Measurement.MaxProcessNS = &maxProcessNS
 	var processTotals [jsbench.Samples]int64

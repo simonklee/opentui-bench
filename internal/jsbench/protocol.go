@@ -15,7 +15,7 @@ const (
 	Protocol       = int64(1)
 	BunVersion     = "1.3.14"
 	ZigVersion     = "0.15.2"
-	ManifestDigest = "sha256:0fa487783682b1227bfd4bf735fe1a969ea03f045bb8a68f87c1e41174cb3794"
+	ManifestDigest = "sha256:9f49f938973c8689c06166b6823cdeb96f1d1a224913565e5847969678f52d00"
 	Samples        = 3
 	MaxSafeInteger = int64(1<<53 - 1)
 )
