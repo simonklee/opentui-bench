@@ -180,6 +180,17 @@ func migrateLegacySchema(tx *sql.Tx) error {
 			return err
 		}
 	}
+	jobColumns, err := tableColumns(tx, "jobs")
+	if err != nil {
+		return err
+	}
+	// schemaSQL creates the lease-token index even when the legacy jobs table
+	// already exists. Add its indexed column before applying the current schema.
+	if len(jobColumns) > 0 && !jobColumns["claim_token"] {
+		if _, err := tx.Exec(`ALTER TABLE jobs ADD COLUMN claim_token TEXT`); err != nil {
+			return err
+		}
+	}
 	resultsExists, err := tableExists(tx, "results")
 	if err != nil {
 		return err

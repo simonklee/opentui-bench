@@ -1591,6 +1591,12 @@ func TestMigrationPreservesHistoricalResultsWithoutFabricatingSamples(t *testing
 			max_ns INTEGER NOT NULL, std_dev_ns INTEGER NOT NULL DEFAULT 0, p50_ns INTEGER NOT NULL DEFAULT 0,
 			p95_ns INTEGER NOT NULL DEFAULT 0, p99_ns INTEGER NOT NULL DEFAULT 0, total_ns INTEGER NOT NULL,
 			iterations INTEGER NOT NULL, sample_count INTEGER NOT NULL DEFAULT 1);
+		CREATE TABLE jobs (id INTEGER PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending',
+			kind TEXT NOT NULL DEFAULT 'benchmark', branch TEXT NOT NULL, commit_hash TEXT,
+			repo_url TEXT NOT NULL DEFAULT 'origin', samples INTEGER NOT NULL DEFAULT 3,
+			profile TEXT NOT NULL DEFAULT 'cpu', notes TEXT, created_at TEXT NOT NULL,
+			started_at TEXT, completed_at TEXT, error TEXT, run_id INTEGER REFERENCES runs(id),
+			requested_by TEXT);
 		CREATE VIEW results_with_run AS
 			SELECT r.id AS result_id, r.avg_ns, ru.id AS run_id, ru.commit_hash
 			FROM results r JOIN runs ru ON r.run_id = ru.id;
