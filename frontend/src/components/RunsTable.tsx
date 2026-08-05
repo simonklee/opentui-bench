@@ -70,6 +70,11 @@ const RunsTable: Component<RunsTableProps> = (props) => {
           <div class="w-6 h-6 border-[2px] border-black border-t-transparent rounded-full animate-spin"></div>
         </div>
       </Show>
+      <Show when={!props.loading && props.runs?.length === 0}>
+        <div class="absolute inset-x-0 top-24 text-center text-[12px] text-text-muted">
+          No recorded {benchmarkKind() === "js" ? "JavaScript" : "Zig"} runs
+        </div>
+      </Show>
     </div>
   );
 };

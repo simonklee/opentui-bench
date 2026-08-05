@@ -8,7 +8,6 @@ interface TrendIndicatorProps {
   currentRunId: number;
   neutral?: boolean;
   fromCompare: boolean;
-  compareBaseRunId?: string;
   compareBaseResultId?: string;
 }
 
@@ -21,18 +20,25 @@ const TrendIndicator: Component<TrendIndicatorProps> = (props) => {
         // Find the current run in trend data (trend data is sorted most recent first)
         const currIndex = props.trendData!.findIndex((t) => t.run_id === props.currentRunId);
 
-        // If current run not found or it's the last one (oldest), show no comparison
-        if (currIndex < 0 || currIndex >= props.trendData!.length - 1) {
+        if (currIndex < 0) {
           return <span class="text-text-muted text-[12px]">No previous</span>;
         }
 
         const curr = props.trendData![currIndex]!;
-        const prev = props.trendData![currIndex + 1]!; // Previous is next in array (older)
-        const diff = curr.avg_ns - prev.avg_ns;
+        const compareBase = props.fromCompare
+          ? props.trendData!.find((point) => String(point.result_id) === props.compareBaseResultId)
+          : undefined;
+        const prev = compareBase ?? props.trendData![currIndex + 1];
+        if (!prev || (props.fromCompare && !compareBase)) {
+          return <span class="text-text-muted text-[12px]">No baseline</span>;
+        }
+        const currentValue = compareBase ? curr.median_ns : curr.avg_ns;
+        const previousValue = compareBase ? prev.median_ns : prev.avg_ns;
+        const diff = currentValue - previousValue;
 
         let pctStr = "0.0%";
-        if (prev.avg_ns > 0) {
-          const pct = (diff / prev.avg_ns) * 100;
+        if (previousValue > 0) {
+          const pct = (diff / previousValue) * 100;
           pctStr = pct.toFixed(1) + "%";
         }
 
@@ -44,13 +50,8 @@ const TrendIndicator: Component<TrendIndicatorProps> = (props) => {
               ? "text-success"
               : "text-text-muted";
 
-        const prevRunId =
-          props.fromCompare && props.compareBaseRunId ? props.compareBaseRunId : prev.run_id;
-
-        const prevResultId =
-          props.fromCompare && props.compareBaseRunId
-            ? props.compareBaseResultId
-            : String(prev.result_id);
+        const prevRunId = prev.run_id;
+        const prevResultId = String(prev.result_id);
         const prevUrl = prevResultId
           ? `/benchmarks/${prevRunId}?bench_id=${prevResultId}`
           : `/benchmarks/${prevRunId}`;
@@ -72,7 +73,7 @@ const TrendIndicator: Component<TrendIndicatorProps> = (props) => {
                 navigate(prevUrl);
               }}
             >
-              prev
+              {compareBase ? "base" : "prev"}
             </a>
           </div>
         );

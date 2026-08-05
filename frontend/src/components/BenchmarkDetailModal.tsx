@@ -242,7 +242,6 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                 currentRunId={props.runId}
                 neutral={isJavaScript()}
                 fromCompare={searchParams.from === "compare"}
-                compareBaseRunId={searchParams.compare_base as string | undefined}
                 compareBaseResultId={searchParams.compare_base_result as string | undefined}
               />
             </div>
@@ -501,11 +500,20 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
               </div>
             </div>
             <div class="h-[500px] md:h-auto md:flex-1 bg-white border border-border relative">
-              <FlamegraphViewer
-                runId={props.runId}
-                resultId={props.benchmark.id}
-                view={props.flamegraphView}
-              />
+              <Show
+                when={props.hasCpuProfile}
+                fallback={
+                  <div class="flex h-full items-center justify-center text-xs font-mono text-text-muted">
+                    No CPU profile recorded
+                  </div>
+                }
+              >
+                <FlamegraphViewer
+                  runId={props.runId}
+                  resultId={props.benchmark.id}
+                  view={props.flamegraphView}
+                />
+              </Show>
             </div>
           </div>
         </div>

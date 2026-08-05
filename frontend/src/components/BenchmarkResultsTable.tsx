@@ -1,4 +1,4 @@
-import { For } from "solid-js";
+import { For, Show } from "solid-js";
 import type { Component } from "solid-js";
 import { formatNs, formatBytes } from "../utils/format";
 import type { BenchmarkResult } from "../services/api";
@@ -17,7 +17,7 @@ const BenchmarkResultsTable: Component<BenchmarkResultsTableProps> = (props) => 
     "px-4 py-3 font-bold cursor-pointer hover:bg-black hover:text-white transition-colors select-none whitespace-nowrap border-r border-transparent last:border-0 hover:border-black";
 
   return (
-    <div class="flex-1 overflow-auto bg-bg-dark">
+    <div class="flex-1 overflow-auto bg-bg-dark relative">
       <table class="w-full text-left border-collapse text-[12px] font-mono">
         <thead class="bg-bg-dark sticky top-0 z-10 border-b-2 border-black font-ui text-[10px] uppercase tracking-widest text-text-main">
           <tr>
@@ -128,6 +128,11 @@ const BenchmarkResultsTable: Component<BenchmarkResultsTableProps> = (props) => 
           </For>
         </tbody>
       </table>
+      <Show when={props.results.length === 0}>
+        <div class="absolute inset-x-0 top-24 text-center text-[12px] text-text-muted">
+          No benchmark results match the current filters
+        </div>
+      </Show>
     </div>
   );
 };

@@ -60,7 +60,7 @@ export function useBenchmarkDetail() {
   const navigate = useNavigate();
   useFilterParams(searchParams, setSearchParams);
 
-  const [run] = createResource(
+  const [run, { refetch: refetchRun }] = createResource(
     () => {
       if (!params.id) return undefined;
       const id = parseInt(params.id);
@@ -86,6 +86,7 @@ export function useBenchmarkDetail() {
       return details;
     },
   );
+  const currentRun = () => (run.error ? undefined : run());
 
   const [selectedBenchmarkId, setSelectedBenchmarkId] = createSignal<number | null>(null);
   const [sortBy, setSortBy] = createSignal<keyof BenchmarkResult | "mem_stats">("avg_ns");
@@ -120,7 +121,9 @@ export function useBenchmarkDetail() {
     }
   });
 
-  const { filteredResults: filteredData, categories } = useFilteredBenchmarks(() => run()?.results);
+  const { filteredResults: filteredData, categories } = useFilteredBenchmarks(
+    () => currentRun()?.results,
+  );
 
   const filteredResults = createMemo(() => {
     const data = filteredData();
@@ -156,13 +159,13 @@ export function useBenchmarkDetail() {
     setSelectedBenchmarkId(id);
     setSearchParams({
       ...searchParams,
-      benchmark_kind: run()?.benchmark_kind ?? benchmarkKind(),
+      benchmark_kind: currentRun()?.benchmark_kind ?? benchmarkKind(),
       bench_id: id,
     });
   };
 
   const closeDetail = () => {
-    const kind = run()?.benchmark_kind ?? benchmarkKind();
+    const kind = currentRun()?.benchmark_kind ?? benchmarkKind();
     if (searchParams.from === "compare") {
       const base = firstSearchParam(searchParams.compare_base);
       const curr = firstSearchParam(searchParams.compare_curr);
@@ -189,7 +192,7 @@ export function useBenchmarkDetail() {
 
   const navigateToBenchmark = (runId: number, resultId: number) => {
     const query = buildSearchString({
-      benchmark_kind: run()?.benchmark_kind ?? benchmarkKind(),
+      benchmark_kind: currentRun()?.benchmark_kind ?? benchmarkKind(),
       bench_id: resultId,
     });
     navigate(`/benchmarks/${runId}${query ? `?${query}` : ""}`);
@@ -224,11 +227,11 @@ export function useBenchmarkDetail() {
   });
 
   const selectedBenchmark = createMemo(() => {
-    return run()?.results.find((r) => r.id === selectedBenchmarkId());
+    return currentRun()?.results.find((r) => r.id === selectedBenchmarkId());
   });
 
   // The branch of the current run (empty/null/"main" = main branch)
-  const runBranch = createMemo(() => run()?.branch ?? "");
+  const runBranch = createMemo(() => currentRun()?.branch ?? "");
   const isOnBranch = createMemo(() => isBranchRun(runBranch()));
 
   // The server derives exact identity and the compatible cohort from this result.
@@ -236,7 +239,7 @@ export function useBenchmarkDetail() {
     () => {
       const resultId = selectedBenchmark()?.id;
       if (!resultId) return null;
-      return { resultId, limit: 100, kind: run()!.benchmark_kind };
+      return { resultId, limit: 100, kind: currentRun()!.benchmark_kind };
     },
     async ({ resultId, limit, kind }) => {
       return api.getTrend(resultId, limit, kind);
@@ -251,7 +254,7 @@ export function useBenchmarkDetail() {
 
   // Check artifacts
   createEffect(async () => {
-    const rid = run()?.id;
+    const rid = currentRun()?.id;
     const bid = selectedBenchmarkId();
     if (!rid || !bid || benchmarkKind() === "js") {
       setHasCpuProfile(false);
@@ -274,7 +277,10 @@ export function useBenchmarkDetail() {
   });
 
   return {
-    run,
+    run: currentRun,
+    runLoading: () => run.loading,
+    runError: () => run.error,
+    refetchRun,
     filter: globalFilter,
     setFilter: setGlobalFilter,
     category: globalCategory,

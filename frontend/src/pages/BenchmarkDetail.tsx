@@ -7,10 +7,15 @@ import BenchmarkFilterBar from "../components/BenchmarkFilterBar";
 import BenchmarkResultsTable from "../components/BenchmarkResultsTable";
 import BenchmarkDetailModal from "../components/BenchmarkDetailModal";
 import { useBenchmarkDetail } from "../hooks/useBenchmarkDetail";
+import { ApiError } from "../services/api";
+import { Button } from "../components/Button";
 
 const BenchmarkDetail: Component = () => {
   const {
     run,
+    runLoading,
+    runError,
+    refetchRun,
     filter,
     setFilter,
     category,
@@ -94,54 +99,84 @@ const BenchmarkDetail: Component = () => {
 
   return (
     <div class="flex flex-col h-full relative font-ui">
-      <BenchmarkFilterBar
-        run={run()}
-        filter={filter()}
-        setFilter={setFilter}
-        category={category()}
-        setCategory={setCategory}
-        categories={categories()}
-        resultCount={filteredResults().length}
-        onCopy={copyBenchmarkResults}
-        hasResults={filteredResults().length > 0}
-      />
+      <Show
+        when={!runLoading()}
+        fallback={
+          <div class="flex flex-1 items-center justify-center text-[13px] text-text-muted">
+            Loading benchmark run...
+          </div>
+        }
+      >
+        <Show
+          when={!runError()}
+          fallback={
+            <div class="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+              <div class="text-[14px] font-bold uppercase tracking-widest">
+                {runError() instanceof ApiError && runError().status === 404
+                  ? "Benchmark run not found"
+                  : "Unable to load benchmark run"}
+              </div>
+              <p class="max-w-md text-[12px] text-text-muted">
+                {runError() instanceof ApiError && runError().status === 404
+                  ? "This run does not exist or is no longer available."
+                  : "Check your connection and try again."}
+              </p>
+              <Show when={!(runError() instanceof ApiError && runError().status === 404)}>
+                <Button onClick={() => void refetchRun()}>Retry</Button>
+              </Show>
+            </div>
+          }
+        >
+          <BenchmarkFilterBar
+            run={run()}
+            filter={filter()}
+            setFilter={setFilter}
+            category={category()}
+            setCategory={setCategory}
+            categories={categories()}
+            resultCount={filteredResults().length}
+            onCopy={copyBenchmarkResults}
+            hasResults={filteredResults().length > 0}
+          />
 
-      <BenchmarkResultsTable
-        results={filteredResults()}
-        selectedId={selectedBenchmarkId()}
-        onSelect={selectBenchmark}
-        sortBy={sortBy()}
-        sortDesc={sortDesc()}
-        onSort={handleSort}
-      />
+          <BenchmarkResultsTable
+            results={filteredResults()}
+            selectedId={selectedBenchmarkId()}
+            onSelect={selectBenchmark}
+            sortBy={sortBy()}
+            sortDesc={sortDesc()}
+            onSort={handleSort}
+          />
 
-      <Show when={selectedBenchmark()}>
-        <BenchmarkDetailModal
-          benchmark={selectedBenchmark()!}
-          runId={run()!.id}
-          commitHash={run()!.commit_hash}
-          branch={runBranch()}
-          runIdentity={run()!}
-          trendData={trendData()}
-          branchTrendData={isOnBranch() ? branchTrendData() : undefined}
-          flamegraphView={flamegraphView()}
-          setFlamegraphView={setFlamegraphView}
-          hasCpuProfile={hasCpuProfile()}
-          chartRange={chartRange()}
-          setChartRange={setChartRange}
-          regressionContext={regressionContext()}
-          onClose={closeDetail}
-          onDownloadCpu={downloadCpuProfile}
-          onOpenPProf={openPProfUI}
-          onTrendClick={handleTrendClick}
-        />
-      </Show>
+          <Show when={selectedBenchmark()}>
+            <BenchmarkDetailModal
+              benchmark={selectedBenchmark()!}
+              runId={run()!.id}
+              commitHash={run()!.commit_hash}
+              branch={runBranch()}
+              runIdentity={run()!}
+              trendData={trendData()}
+              branchTrendData={isOnBranch() ? branchTrendData() : undefined}
+              flamegraphView={flamegraphView()}
+              setFlamegraphView={setFlamegraphView}
+              hasCpuProfile={hasCpuProfile()}
+              chartRange={chartRange()}
+              setChartRange={setChartRange}
+              regressionContext={regressionContext()}
+              onClose={closeDetail}
+              onDownloadCpu={downloadCpuProfile}
+              onOpenPProf={openPProfUI}
+              onTrendClick={handleTrendClick}
+            />
+          </Show>
 
-      {/* Toast notification */}
-      <Show when={copyToast()}>
-        <div class="fixed bottom-6 right-6 bg-success text-white px-6 py-3 rounded-md font-medium shadow-lg z-[100]">
-          Copied to clipboard
-        </div>
+          {/* Toast notification */}
+          <Show when={copyToast()}>
+            <div class="fixed bottom-6 right-6 bg-success text-white px-6 py-3 rounded-md font-medium shadow-lg z-[100]">
+              Copied to clipboard
+            </div>
+          </Show>
+        </Show>
       </Show>
     </div>
   );
