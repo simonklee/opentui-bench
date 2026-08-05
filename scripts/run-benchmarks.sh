@@ -48,6 +48,7 @@ readonly ALERT_STATE_FILE="$HOME/.cache/opentui-bench/last-alert"
 readonly JS_BENCHMARK_SUITE="core-default"
 readonly JS_PROTOCOL_VERSION=1
 readonly JS_MANIFEST_HASH="sha256:0fa487783682b1227bfd4bf735fe1a969ea03f045bb8a68f87c1e41174cb3794"
+readonly JS_BUN_VERSION="1.3.14"
 
 # API configuration - set these as environment variables
 : "${API_URL:=https://opentui-bench.fly.dev}"
@@ -209,6 +210,24 @@ check_dependencies() {
 	return 0
 }
 
+has_stable_javascript_bun() {
+	local bun_revision bun_version
+	if ! command -v bun &>/dev/null; then
+		info "Bun is unavailable; JavaScript benchmark work is disabled"
+		return 1
+	fi
+	if ! bun_revision=$(timeout --kill-after=1s 5s bun --revision 2>/dev/null); then
+		info "Unable to read Bun revision; JavaScript benchmark work is disabled"
+		return 1
+	fi
+	bun_version=${bun_revision%%+*}
+	if [[ "$bun_revision" != *+* || "$bun_version" != "$JS_BUN_VERSION" ]]; then
+		info "Bun must be stable $JS_BUN_VERSION for JavaScript benchmarks (found ${bun_revision:-unavailable})"
+		return 1
+	fi
+	return 0
+}
+
 setup_repos() {
 	log "Setting up repositories..."
 	mkdir -p "$REPOS_DIR"
@@ -223,7 +242,7 @@ setup_repos() {
 	cd "$BENCH_REPO"
 	git fetch origin
 	git reset --hard origin/main
-	make build
+	make backend-build
 
 	# opentui
 	if [[ ! -d "$OPENTUI_REPO" ]]; then
@@ -315,28 +334,32 @@ run_benchmarks() {
 
 schedule_javascript_main_job() {
 	cd "$OPENTUI_REPO"
+	if ! has_stable_javascript_bun; then
+		return 0
+	fi
+	local capabilities
+	if ! capabilities=$(curl --fail --silent --show-error --max-time 120 "$API_URL/api/capabilities") ||
+		! jq -e '.javascript_runs == 1' <<<"$capabilities" >/dev/null; then
+		info "Server does not advertise JavaScript run recording; skipping automatic scheduling"
+		return 0
+	fi
 
-	local jobs_response automatic_jobs
-	jobs_response=$(curl --fail --silent --show-error --max-time 120 \
-		"$API_URL/api/jobs?branch=main&limit=1000000")
-	automatic_jobs=$(jq -ce --arg suite "$JS_BENCHMARK_SUITE" --arg manifest "$JS_MANIFEST_HASH" \
-		--argjson protocol "$JS_PROTOCOL_VERSION" '
-		[.[] | select(
-			.requested_by == "automatic" and
-			.benchmark_kind == "js" and
-			.benchmark_suite == $suite and
-			.protocol_version == $protocol and
-			.manifest_hash == $manifest
-		)]' <<<"$jobs_response")
+	local automatic_jobs
+	automatic_jobs=$(curl --fail --silent --show-error --max-time 120 --get "$API_URL/api/jobs" \
+		--data-urlencode 'branch=main' --data-urlencode 'limit=1000000' \
+		--data-urlencode 'requested_by=automatic' --data-urlencode 'benchmark_kind=js' \
+		--data-urlencode "benchmark_suite=$JS_BENCHMARK_SUITE" \
+		--data-urlencode "protocol_version=$JS_PROTOCOL_VERSION" \
+		--data-urlencode "manifest_hash=$JS_MANIFEST_HASH")
 
 	# Do not queue ahead of an existing attempt or create a duplicate for it.
-	if jq -e 'any(.[]; .status != "completed" and .status != "failed")' <<<"$automatic_jobs" >/dev/null; then
+	if jq -e 'any(.[]; .status != "completed" and .status != "failed" and .status != "cancelled")' <<<"$automatic_jobs" >/dev/null; then
 		info "Automatic JavaScript benchmark job is already outstanding"
 		return 0
 	fi
 
 	local terminal_commits latest_attempt="" next_commit=""
-	terminal_commits=$(jq -r '.[] | select(.status == "completed" or .status == "failed") | .commit_hash | select(length > 0)' \
+	terminal_commits=$(jq -r '.[] | select(.status == "completed" or .status == "failed" or .status == "cancelled") | .commit_hash | select(length > 0)' \
 		<<<"$automatic_jobs")
 	if [[ -n "$terminal_commits" ]]; then
 		while IFS= read -r commit; do
@@ -350,10 +373,19 @@ schedule_javascript_main_job() {
 	if [[ -n "$latest_attempt" ]]; then
 		next_commit=$(git rev-list --reverse "${latest_attempt}..origin/main" | sed -n '1p')
 	else
-		next_commit=$(git rev-parse origin/main)
+		while IFS= read -r commit; do
+			if git cat-file -e "${commit}:packages/core/src/benchmark/js-benchmark.ts" 2>/dev/null &&
+				git cat-file -e "${commit}:packages/core/src/benchmark/js-benchmark-harness.ts" 2>/dev/null &&
+				git show "${commit}:packages/core/package.json" 2>/dev/null |
+				jq -e '.scripts["bench:js"] == "bun src/benchmark/js-benchmark.ts"' >/dev/null; then
+				next_commit="$commit"
+				break
+			fi
+		done < <(git log --reverse --format='%H' origin/main -- packages/core/package.json \
+			packages/core/src/benchmark/js-benchmark.ts packages/core/src/benchmark/js-benchmark-harness.ts)
 	fi
 	if [[ -z "$next_commit" ]]; then
-		info "JavaScript main history is caught up"
+		info "JavaScript main history is caught up or has no canonical harness"
 		return 0
 	fi
 
@@ -393,28 +425,27 @@ run_queued_jobs() {
 	log "Checking for queued jobs..."
 	cd "$BENCH_REPO"
 
-	local pending_jobs
-	pending_jobs=$(curl --fail --silent --show-error \
-		"$API_URL/api/jobs?status=pending&limit=1" | jq 'length')
-	if ((pending_jobs == 0)); then
-		log "No pending jobs"
-		return 0
-	fi
-	did_work=true
-
 	# Process one queued job between main commits.
 	if $dry_run; then
 		log "Dry run: would exec ./bench worker --once ..."
 		return 0
 	fi
 
+	local -a worker_args=(--repo "$OPENTUI_REPO" --api-url "$API_URL" --api-key "$API_KEY" --once)
+	if ! has_stable_javascript_bun; then
+		# Still recover stale jobs through the claim endpoint, but never claim JS.
+		worker_args+=(--kind zig)
+	fi
+
 	local worker_output worker_status
 	set +o errexit
-	worker_output=$(./bench worker --repo "$OPENTUI_REPO" \
-		--api-url "$API_URL" --api-key "$API_KEY" --once 2>&1)
+	worker_output=$(./bench worker "${worker_args[@]}" 2>&1)
 	worker_status=$?
 	set -o errexit
 	printf '%s\n' "$worker_output" | tee -a "$LOG_FILE"
+	if [[ "$worker_output" != *"No pending jobs"* ]]; then
+		did_work=true
+	fi
 	if [[ "$worker_output" == *" failed: "* ]] && ((worker_status == 0)); then
 		worker_status=1
 	fi

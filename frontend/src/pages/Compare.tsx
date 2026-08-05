@@ -1,7 +1,7 @@
 import { createResource, createSignal, For, Show, createMemo, createEffect } from "solid-js";
 import type { Component } from "solid-js";
 import { useSearchParams, useNavigate } from "@solidjs/router";
-import { api } from "../services/api";
+import { api, ApiError } from "../services/api";
 import type { Run } from "../services/api";
 import { formatDate, formatNs } from "../utils/format";
 import { Button } from "../components/Button";
@@ -42,6 +42,12 @@ function formatRunOption(r: Run): string {
   return `#${r.commit_hash.substring(0, 7)} · ${r.commit_message?.substring(0, 50)}${r.commit_message?.length > 50 ? "..." : ""}`;
 }
 
+const RunOption: Component<{ run: Run; disabled: boolean }> = (props) => (
+  <option value={String(props.run.id)} disabled={props.disabled}>
+    {formatRunOption(props.run)}
+  </option>
+);
+
 function hasSameIdentity(a: Run, b: Run): boolean {
   return (
     a.benchmark_kind === b.benchmark_kind &&
@@ -68,12 +74,136 @@ function findDefaultPair(runs: Run[], preferredRunId: number | null) {
   return null;
 }
 
+function mergeRuns(...lists: Run[][]): Run[] {
+  const seen = new Set<number>();
+  return lists.flat().filter((run) => {
+    if (seen.has(run.id)) return false;
+    seen.add(run.id);
+    return true;
+  });
+}
+
+function parseRunId(value: string): number | null {
+  if (!/^[1-9]\d*$/.test(value)) return null;
+  const id = Number(value);
+  return Number.isSafeInteger(id) ? id : null;
+}
+
 const Compare: Component = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   useFilterParams(searchParams, setSearchParams);
-  const [runs] = createResource(benchmarkKind, (kind) => api.getRuns(100, kind));
+  const [loadedRecentRuns] = createResource(benchmarkKind, (kind) => api.getRuns(100, kind));
+  const recentRuns = createMemo(() => {
+    const loaded = loadedRecentRuns();
+    return loaded?.every((run) => run.benchmark_kind === benchmarkKind()) ? loaded : undefined;
+  });
   const [copyToast, setCopyToast] = createSignal(false);
+
+  // Keep as strings to match select option values
+  const baseId = createMemo(() => {
+    const val = searchParams.base;
+    return typeof val === "string" ? val : "";
+  });
+  const currId = createMemo(() => {
+    const val = searchParams.curr;
+    return typeof val === "string" ? val : "";
+  });
+
+  const bookmarkRequest = createMemo(() => {
+    const recent = recentRuns();
+    if (!recent) return null;
+    const kind = benchmarkKind();
+    const ids = [baseId(), currId()]
+      .map(parseRunId)
+      .filter((id): id is number => id !== null && !recent.some((run) => run.id === id))
+      .filter((id, index, all) => all.indexOf(id) === index)
+      .sort((a, b) => a - b);
+    return ids.length ? { ids, kind, key: `${kind}:${ids.join(",")}` } : null;
+  });
+  const [loadedBookmarkedRuns, { refetch: retryBookmarkedRuns }] = createResource(
+    bookmarkRequest,
+    async (request) => {
+      const settled = await Promise.allSettled(
+        request.ids.map((id) => api.getRunDetails(id, request.kind)),
+      );
+      const runs: Run[] = [];
+      const missingIds: number[] = [];
+      let loadFailed = false;
+
+      settled.forEach((result, index) => {
+        const id = request.ids[index]!;
+        if (result.status === "rejected") {
+          if (result.reason instanceof ApiError && result.reason.status === 404) {
+            missingIds.push(id);
+          } else {
+            loadFailed = true;
+          }
+          return;
+        }
+
+        const run = result.value;
+        if (run.id === id && run.benchmark_kind === request.kind) {
+          runs.push(run);
+        } else {
+          loadFailed = true;
+        }
+      });
+
+      return { key: request.key, runs, missingIds, loadFailed };
+    },
+  );
+  const bookmarkedRuns = createMemo(() => {
+    const loaded = loadedBookmarkedRuns();
+    const selectedIds = new Set([parseRunId(baseId()), parseRunId(currId())]);
+    return (loaded?.runs ?? []).filter(
+      (run) => run.benchmark_kind === benchmarkKind() && selectedIds.has(run.id),
+    );
+  });
+  const bookmarkLoadFailed = createMemo(() => {
+    const request = bookmarkRequest();
+    const loaded = loadedBookmarkedRuns();
+    return !!request && loaded?.key === request.key && loaded.loadFailed;
+  });
+
+  const [loadedPeerRuns] = createResource(
+    () => {
+      const anchors = bookmarkedRuns()
+        .filter((run) => run.benchmark_kind === "js")
+        .filter((run, index, all) =>
+          all.slice(0, index).every((previous) => !hasSameIdentity(previous, run)),
+        );
+      return anchors.length ? { anchors, kind: benchmarkKind() } : null;
+    },
+    async ({ anchors, kind }) =>
+      (await Promise.all(anchors.map((identity) => api.getRuns(100, kind, identity)))).flat(),
+  );
+  const peerRuns = createMemo(() => {
+    const loaded = loadedPeerRuns();
+    const anchors = bookmarkedRuns().filter((run) => run.benchmark_kind === "js");
+    return (loaded ?? []).filter((run) => anchors.some((anchor) => hasSameIdentity(run, anchor)));
+  });
+
+  const runs = createMemo(() => {
+    const recent = recentRuns();
+    return recent ? mergeRuns(recent, bookmarkedRuns(), peerRuns()) : undefined;
+  });
+  const selectedRun = (id: string) => runs()?.find((run) => run.id === parseRunId(id)) ?? null;
+  const selectedBaseRun = () => selectedRun(baseId());
+  const selectedCurrRun = () => selectedRun(currId());
+
+  createEffect(() => {
+    const request = bookmarkRequest();
+    const loaded = loadedBookmarkedRuns();
+    if (!request || loaded?.key !== request.key) return;
+
+    const updates: Record<string, string | null> = {};
+
+    if (loaded.missingIds.includes(parseRunId(baseId()) ?? -1)) updates.base = null;
+    if (loaded.missingIds.includes(parseRunId(currId()) ?? -1)) updates.curr = null;
+
+    if (Object.keys(updates).length) setSearchParams(updates, { replace: true });
+  });
 
   // Group runs by branch for <optgroup> display
   const grouped = createMemo(() => {
@@ -91,7 +221,6 @@ const Compare: Component = () => {
     if (kind === previousKind) return;
     previousKind = kind;
     setDidAutoSelect(false);
-    setSearchParams({ benchmark_kind: kind, base: null, curr: null }, { replace: true });
   });
 
   // Auto-select runs only on first load with no URL params.
@@ -120,74 +249,65 @@ const Compare: Component = () => {
     }
   });
 
-  // Keep as strings to match select option values
-  const baseId = createMemo(() => {
-    const val = searchParams.base;
-    return typeof val === "string" ? val : "";
-  });
-  const currId = createMemo(() => {
-    const val = searchParams.curr;
-    return typeof val === "string" ? val : "";
-  });
-
-  // Discard bookmarked selections that do not belong to the active kind before
-  // the normal auto-selection effect chooses a compatible pair.
-  createEffect(() => {
-    const list = runs();
-    const base = Number(baseId());
-    const current = Number(currId());
-    if (!list || (!base && !current)) return;
+  const compareRequest = createMemo(() => {
+    const baseline = selectedBaseRun();
+    const current = selectedCurrRun();
+    const kind = benchmarkKind();
     if (
-      (base && !list.some((run) => run.id === base)) ||
-      (current && !list.some((run) => run.id === current))
+      !baseline ||
+      !current ||
+      baseline.benchmark_kind !== kind ||
+      current.benchmark_kind !== kind ||
+      !hasSameIdentity(baseline, current)
     ) {
-      setDidAutoSelect(false);
-      setSearchParams(
-        { benchmark_kind: benchmarkKind(), base: null, curr: null },
-        { replace: true },
-      );
+      return null;
     }
+    return {
+      baseId: baseline.id,
+      currId: current.id,
+      kind,
+      key: `${kind}:${baseline.id}:${current.id}`,
+    };
   });
-
-  const [compareData] = createResource(
-    () => {
-      const b = baseId();
-      const c = currId();
-      const list = runs();
-      if (!b || !c || !list) return null;
-      const baseIdValue = parseInt(b);
-      const currIdValue = parseInt(c);
-      if (
-        !list.some((run) => run.id === baseIdValue) ||
-        !list.some((run) => run.id === currIdValue)
-      ) {
-        return null;
-      }
-      return { baseId: baseIdValue, currId: currIdValue, kind: benchmarkKind() };
-    },
-    ({ baseId, currId, kind }) => api.getCompare(baseId, currId, kind),
+  const [loadedCompareData, { refetch: retryCompareData }] = createResource(
+    compareRequest,
+    async (request) => ({
+      key: request.key,
+      data: await api.getCompare(request.baseId, request.currId, request.kind),
+    }),
   );
+  const compareFailure = createMemo(() => {
+    if (!compareRequest() || loadedCompareData.loading) return;
+    const error = loadedCompareData.error;
+    if (!error) return;
+    const unavailable = error instanceof ApiError && (error.status === 400 || error.status === 404);
+    return {
+      message: unavailable
+        ? "These runs are unavailable or incompatible."
+        : "Could not load comparison.",
+      retryable: !(error instanceof ApiError) || error.status >= 500,
+    };
+  });
+  const compareData = createMemo(() => {
+    const request = compareRequest();
+    if (!request || loadedCompareData.loading || compareFailure()) return;
+
+    const loaded = loadedCompareData();
+    return loaded?.key === request.key ? loaded.data : undefined;
+  });
   const { filteredResults: filteredComparisons, categories } = useFilteredBenchmarks(
     () => compareData()?.comparisons ?? [],
   );
 
-  const selectedBaseRun = createMemo(() => {
-    const list = runs();
-    const base = baseId();
-    if (!list || !base) return null;
-    const baseNum = parseInt(base, 10);
-    if (Number.isNaN(baseNum)) return null;
-    return list.find((run) => run.id === baseNum) ?? null;
-  });
+  const isBaseOptionDisabled = (run: Run) => {
+    const current = selectedCurrRun();
+    return current !== null && !hasSameIdentity(run, current);
+  };
 
-  const selectedCurrRun = createMemo(() => {
-    const list = runs();
-    const curr = currId();
-    if (!list || !curr) return null;
-    const currNum = parseInt(curr, 10);
-    if (Number.isNaN(currNum)) return null;
-    return list.find((run) => run.id === currNum) ?? null;
-  });
+  const isCurrOptionDisabled = (run: Run) => {
+    const baseline = selectedBaseRun();
+    return baseline !== null && !hasSameIdentity(run, baseline);
+  };
 
   const handleBaseChange = (e: Event) => {
     const val = (e.target as HTMLSelectElement).value;
@@ -224,18 +344,17 @@ const Compare: Component = () => {
   };
 
   const handleBenchmarkClick = (resultId: number, baselineResultId: number) => {
-    const curr = currId();
-    const base = baseId();
-    if (curr) {
-      const params = new URLSearchParams();
-      params.set("bench_id", String(resultId));
-      params.set("benchmark_kind", benchmarkKind());
-      params.set("from", "compare");
-      if (base) params.set("compare_base", String(base));
-      params.set("compare_base_result", String(baselineResultId));
-      if (curr) params.set("compare_curr", String(curr));
-      navigate(`/benchmarks/${curr}?${params.toString()}`);
-    }
+    const request = compareRequest();
+    if (!request || !compareData()) return;
+
+    const params = new URLSearchParams();
+    params.set("bench_id", String(resultId));
+    params.set("benchmark_kind", request.kind);
+    params.set("from", "compare");
+    params.set("compare_base", String(request.baseId));
+    params.set("compare_base_result", String(baselineResultId));
+    params.set("compare_curr", String(request.currId));
+    navigate(`/benchmarks/${request.currId}?${params.toString()}`);
   };
 
   const copyCompareResults = () => {
@@ -309,7 +428,7 @@ const Compare: Component = () => {
                       when={hasMultipleBranches()}
                       fallback={
                         <For each={runs()}>
-                          {(r) => <option value={String(r.id)}>{formatRunOption(r)}</option>}
+                          {(r) => <RunOption run={r} disabled={isBaseOptionDisabled(r)} />}
                         </For>
                       }
                     >
@@ -317,7 +436,7 @@ const Compare: Component = () => {
                         {(group) => (
                           <optgroup label={group.branch}>
                             <For each={group.runs}>
-                              {(r) => <option value={String(r.id)}>{formatRunOption(r)}</option>}
+                              {(r) => <RunOption run={r} disabled={isBaseOptionDisabled(r)} />}
                             </For>
                           </optgroup>
                         )}
@@ -378,7 +497,7 @@ const Compare: Component = () => {
                     when={hasMultipleBranches()}
                     fallback={
                       <For each={runs()}>
-                        {(r) => <option value={String(r.id)}>{formatRunOption(r)}</option>}
+                        {(r) => <RunOption run={r} disabled={isCurrOptionDisabled(r)} />}
                       </For>
                     }
                   >
@@ -386,7 +505,7 @@ const Compare: Component = () => {
                       {(group) => (
                         <optgroup label={group.branch}>
                           <For each={group.runs}>
-                            {(r) => <option value={String(r.id)}>{formatRunOption(r)}</option>}
+                            {(r) => <RunOption run={r} disabled={isCurrOptionDisabled(r)} />}
                           </For>
                         </optgroup>
                       )}
@@ -418,6 +537,12 @@ const Compare: Component = () => {
             </div>
           </div>
         </Show>
+        <Show when={bookmarkLoadFailed()}>
+          <div class="mt-3 flex items-center justify-between gap-3 border border-warning px-3 py-2 text-[11px] text-text-main">
+            <span>Could not load a bookmarked run. Check your connection and retry.</span>
+            <Button onClick={() => void retryBookmarkedRuns()}>Retry</Button>
+          </div>
+        </Show>
       </div>
 
       <BenchmarkFilterBar
@@ -434,12 +559,34 @@ const Compare: Component = () => {
         showCopy={false}
       />
 
+      <Show when={benchmarkKind() === "js"}>
+        <div class="flex-none border-b border-border bg-bg-panel px-4 py-2 text-[11px] text-text-muted sm:px-6">
+          JavaScript statistical inference is disabled; deltas are descriptive.
+        </div>
+      </Show>
+
       <div class="flex-1 overflow-auto bg-bg-dark">
         <Show
-          when={!compareData.loading && compareData()}
+          when={compareData()}
           fallback={
             <div class="p-8 text-center text-text-muted text-[13px]">
-              {baseId() && currId() ? "Loading comparison..." : "Select two runs to compare"}
+              <Show
+                when={compareFailure()}
+                fallback={
+                  compareRequest() && loadedCompareData.loading
+                    ? "Loading comparison..."
+                    : "Select two compatible runs to compare"
+                }
+              >
+                {(failure) => (
+                  <div class="inline-flex items-center gap-3">
+                    <span>{failure().message}</span>
+                    <Show when={failure().retryable}>
+                      <Button onClick={() => void retryCompareData()}>Retry</Button>
+                    </Show>
+                  </div>
+                )}
+              </Show>
             </div>
           }
         >
@@ -477,11 +624,14 @@ const Compare: Component = () => {
                 {(c) => {
                   const isPos = c.change_percent > 0;
                   const isNeg = c.change_percent < 0;
-                  const colorClass = isPos
-                    ? "text-danger"
-                    : isNeg
-                      ? "text-success"
-                      : "text-text-muted";
+                  const colorClass =
+                    benchmarkKind() === "js"
+                      ? "text-text-main"
+                      : isPos
+                        ? "text-danger"
+                        : isNeg
+                          ? "text-success"
+                          : "text-text-muted";
 
                   return (
                     <tr

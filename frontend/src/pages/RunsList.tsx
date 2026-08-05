@@ -1,4 +1,4 @@
-import { createMemo, createResource, For, Show } from "solid-js";
+import { createResource, For, Show } from "solid-js";
 import type { Component } from "solid-js";
 import { api } from "../services/api";
 import StatsBar from "../components/StatsBar";
@@ -8,10 +8,7 @@ import { benchmarkKind } from "../store";
 const RunsList: Component = () => {
   const [runs] = createResource(benchmarkKind, (kind) => api.getRuns(100, kind));
   const [failedJobs] = createResource(benchmarkKind, (kind) =>
-    kind === "js" ? api.getJobs(kind, "failed", 50) : Promise.resolve([]),
-  );
-  const failedAutomaticJobs = createMemo(() =>
-    (failedJobs() ?? []).filter((job) => job.requested_by === "automatic"),
+    kind === "js" ? api.getJobs(kind, "failed", 50, "automatic") : Promise.resolve([]),
   );
 
   return (
@@ -22,24 +19,26 @@ const RunsList: Component = () => {
         </h2>
       </div>
 
-      <Show when={benchmarkKind() === "js" && failedAutomaticJobs().length > 0}>
-        <div class="flex-none border-b border-danger/30 bg-red-50 px-4 sm:px-6 py-3">
-          <div class="text-[10px] font-bold uppercase tracking-widest text-danger mb-1">
-            Failed automatic JavaScript jobs
+      <Show when={benchmarkKind() === "js" && (failedJobs()?.length ?? 0) > 0}>
+        <details class="flex-none border-b border-danger/30 bg-red-50">
+          <summary class="cursor-pointer px-4 py-2.5 sm:px-6 text-[10px] font-bold uppercase tracking-widest text-danger">
+            Failed automatic JavaScript jobs ({failedJobs()?.length})
+          </summary>
+          <div class="max-h-32 overflow-y-auto border-t border-danger/20 px-4 py-2 sm:px-6">
+            <For each={failedJobs()}>
+              {(job) => (
+                <div class="flex flex-col gap-0.5 py-1 text-[11px] font-mono sm:flex-row sm:items-baseline sm:gap-3">
+                  <span class="font-bold whitespace-nowrap">
+                    #{job.id} {job.branch}
+                  </span>
+                  <span class="text-text-muted truncate" title={job.error}>
+                    {job.error || "Unknown error"}
+                  </span>
+                </div>
+              )}
+            </For>
           </div>
-          <For each={failedAutomaticJobs()}>
-            {(job) => (
-              <div class="flex flex-col sm:flex-row sm:items-baseline gap-1 sm:gap-3 text-[11px] font-mono">
-                <span class="font-bold">
-                  #{job.id} {job.branch}
-                </span>
-                <span class="text-text-muted truncate" title={job.error}>
-                  {job.error || "Unknown error"}
-                </span>
-              </div>
-            )}
-          </For>
-        </div>
+        </details>
       </Show>
 
       <StatsBar runs={runs()} loading={runs.loading} />

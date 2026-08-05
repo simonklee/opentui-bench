@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"opentui-bench/internal/db"
+	"opentui-bench/internal/jsbench"
 	"opentui-bench/internal/record"
 )
 
@@ -21,7 +22,7 @@ const (
 	ProfileNone  ProfileMode   = "none"
 	ProfileCPU   ProfileMode   = "cpu"
 	BenchmarkZig BenchmarkKind = "zig"
-	BenchmarkJS  BenchmarkKind = "js"
+	BenchmarkJS  BenchmarkKind = jsbench.Kind
 )
 
 type RunConfig struct {
@@ -195,20 +196,20 @@ func normalizeRunConfig(cfg RunConfig) RunConfig {
 		cfg.BenchmarkKind = BenchmarkZig
 	}
 	if cfg.BenchmarkSuite == "" {
-		cfg.BenchmarkSuite = JavaScriptSuite
+		cfg.BenchmarkSuite = jsbench.Suite
 	}
 	if cfg.ProtocolVersion == 0 {
-		cfg.ProtocolVersion = JavaScriptProtocol
+		cfg.ProtocolVersion = jsbench.Protocol
 	}
 	if cfg.BenchmarkKind == BenchmarkJS {
 		if cfg.BunVersion == "" {
-			cfg.BunVersion = JavaScriptBunVersion
+			cfg.BunVersion = jsbench.BunVersion
 		}
 		if cfg.ZigVersion == "" {
-			cfg.ZigVersion = JavaScriptZigVersion
+			cfg.ZigVersion = jsbench.ZigVersion
 		}
 		if cfg.ManifestHash == "" {
-			cfg.ManifestHash = JavaScriptManifestHash
+			cfg.ManifestHash = jsbench.ManifestDigest
 		}
 	}
 	return cfg
@@ -219,11 +220,10 @@ func validateRunConfig(cfg RunConfig) error {
 		return fmt.Errorf("benchmark kind must be zig or js")
 	}
 	if cfg.BenchmarkKind == BenchmarkJS {
-		if cfg.BenchmarkSuite != JavaScriptSuite || cfg.ProtocolVersion != JavaScriptProtocol ||
-			cfg.BunVersion != JavaScriptBunVersion || cfg.ZigVersion != JavaScriptZigVersion || cfg.ManifestHash != JavaScriptManifestHash {
+		if !jsbench.MatchesIdentity(cfg.BenchmarkSuite, cfg.ProtocolVersion, cfg.BunVersion, cfg.ZigVersion, cfg.ManifestHash) {
 			return fmt.Errorf("JavaScript benchmark identity is not canonical")
 		}
-		if cfg.Samples != JavaScriptSamples || cfg.Profile != ProfileNone || cfg.Filter != "" ||
+		if cfg.Samples != jsbench.Samples || cfg.Profile != ProfileNone || cfg.Filter != "" ||
 			cfg.FilterBenchmark != "" || len(cfg.Benchmarks) != 0 {
 			return fmt.Errorf("JavaScript benchmarks require samples=3, profile=none, and no filters")
 		}

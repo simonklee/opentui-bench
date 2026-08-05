@@ -6,15 +6,7 @@ import (
 	"strconv"
 
 	"opentui-bench/internal/db"
-)
-
-const (
-	canonicalJSKind         = "js"
-	canonicalJSSuite        = "core-default"
-	canonicalJSProtocol     = int64(1)
-	canonicalJSBunVersion   = "1.3.14"
-	canonicalJSZigVersion   = "0.15.2"
-	canonicalJSManifestHash = "sha256:0fa487783682b1227bfd4bf735fe1a969ea03f045bb8a68f87c1e41174cb3794"
+	"opentui-bench/internal/jsbench"
 )
 
 type runIdentityResponse struct {
@@ -39,42 +31,28 @@ func identityResponse(run *db.Run) runIdentityResponse {
 }
 
 func runFilterFromRequest(r *http.Request) (db.RunFilter, error) {
-	q := r.URL.Query()
-	kind := q.Get("benchmark_kind")
-	if kind == "" {
-		kind = "zig"
+	filter, err := explicitRunFilterFromRequest(r)
+	if err != nil {
+		return db.RunFilter{}, err
 	}
-	if kind != "zig" && kind != canonicalJSKind {
-		return db.RunFilter{}, fmt.Errorf("benchmark_kind must be 'zig' or 'js'")
+	if filter.BenchmarkKind == "" {
+		filter.BenchmarkKind = "zig"
 	}
-	filter := db.RunFilter{
-		BenchmarkKind: kind, BenchmarkSuite: q.Get("benchmark_suite"),
-		BunVersion: q.Get("bun_version"), ZigVersion: q.Get("zig_version"),
-		ManifestHash: q.Get("manifest_hash"), MachineID: q.Get("machine_id"),
-		ZigOptimize: q.Get("zig_optimize"),
-	}
-	if raw := q.Get("protocol_version"); raw != "" {
-		value, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil || value <= 0 {
-			return db.RunFilter{}, fmt.Errorf("protocol_version must be a positive integer")
-		}
-		filter.ProtocolVersion = value
-	}
-	if kind == canonicalJSKind {
+	if filter.BenchmarkKind == jsbench.Kind {
 		if filter.BenchmarkSuite == "" {
-			filter.BenchmarkSuite = canonicalJSSuite
+			filter.BenchmarkSuite = jsbench.Suite
 		}
 		if filter.ProtocolVersion == 0 {
-			filter.ProtocolVersion = canonicalJSProtocol
+			filter.ProtocolVersion = jsbench.Protocol
 		}
 		if filter.BunVersion == "" {
-			filter.BunVersion = canonicalJSBunVersion
+			filter.BunVersion = jsbench.BunVersion
 		}
 		if filter.ZigVersion == "" {
-			filter.ZigVersion = canonicalJSZigVersion
+			filter.ZigVersion = jsbench.ZigVersion
 		}
 		if filter.ManifestHash == "" {
-			filter.ManifestHash = canonicalJSManifestHash
+			filter.ManifestHash = jsbench.ManifestDigest
 		}
 	} else {
 		if filter.BenchmarkSuite == "" {
@@ -94,7 +72,7 @@ func explicitRunFilterFromRequest(r *http.Request) (db.RunFilter, error) {
 		BunVersion: q.Get("bun_version"), ZigVersion: q.Get("zig_version"),
 		ManifestHash: q.Get("manifest_hash"), MachineID: q.Get("machine_id"), ZigOptimize: q.Get("zig_optimize"),
 	}
-	if filter.BenchmarkKind != "" && filter.BenchmarkKind != "zig" && filter.BenchmarkKind != canonicalJSKind {
+	if filter.BenchmarkKind != "" && filter.BenchmarkKind != "zig" && filter.BenchmarkKind != jsbench.Kind {
 		return db.RunFilter{}, fmt.Errorf("benchmark_kind must be 'zig' or 'js'")
 	}
 	if raw := q.Get("protocol_version"); raw != "" {
@@ -105,22 +83,4 @@ func explicitRunFilterFromRequest(r *http.Request) (db.RunFilter, error) {
 		filter.ProtocolVersion = value
 	}
 	return filter, nil
-}
-
-func sameRunIdentity(a, b *db.Run) bool {
-	return a.BenchmarkKind == b.BenchmarkKind && a.BenchmarkSuite == b.BenchmarkSuite &&
-		a.ProtocolVersion == b.ProtocolVersion && a.BunVersion == b.BunVersion &&
-		a.ZigVersion == b.ZigVersion && a.ManifestHash == b.ManifestHash &&
-		a.MachineID == b.MachineID && (a.BenchmarkKind != "zig" || a.ZigOptimize == b.ZigOptimize)
-}
-
-func runMatchesFilter(run *db.Run, filter db.RunFilter) bool {
-	return (filter.BenchmarkKind == "" || run.BenchmarkKind == filter.BenchmarkKind) &&
-		(filter.BenchmarkSuite == "" || run.BenchmarkSuite == filter.BenchmarkSuite) &&
-		(filter.ProtocolVersion == 0 || run.ProtocolVersion == filter.ProtocolVersion) &&
-		(filter.BunVersion == "" || run.BunVersion == filter.BunVersion) &&
-		(filter.ZigVersion == "" || run.ZigVersion == filter.ZigVersion) &&
-		(filter.ManifestHash == "" || run.ManifestHash == filter.ManifestHash) &&
-		(filter.MachineID == "" || run.MachineID == filter.MachineID) &&
-		(filter.ZigOptimize == "" || run.ZigOptimize == filter.ZigOptimize)
 }

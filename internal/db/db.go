@@ -17,6 +17,9 @@ import (
 	"unicode/utf8"
 
 	"modernc.org/sqlite"
+
+	"opentui-bench/internal/joblease"
+	"opentui-bench/internal/jsbench"
 )
 
 func timeNow() string {
@@ -139,6 +142,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     error         TEXT,
     run_id        INTEGER REFERENCES runs(id),
     requested_by  TEXT,
+    claim_token   TEXT, -- SHA-256 digest; the raw bearer token is held only by its claimant
+    legacy_tokenless INTEGER NOT NULL DEFAULT 0,
     benchmark_kind TEXT NOT NULL DEFAULT 'zig',
     benchmark_suite TEXT NOT NULL DEFAULT 'core-default',
     protocol_version INTEGER NOT NULL DEFAULT 1,
@@ -146,6 +151,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_claim_token ON jobs(claim_token) WHERE claim_token IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS regression_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,7 +181,7 @@ FROM results r JOIN runs ru ON r.run_id = ru.id;
 `
 
 const (
-	CurrentSchemaVersion     = 6
+	CurrentSchemaVersion     = 7
 	CurrentSampleDataVersion = 1
 	CurrentSummaryVersion    = 2
 	DefaultProfileRunsMax    = 256
@@ -319,8 +325,11 @@ func OpenReadOnly(dbPath string) (*DB, error) {
 		_ = sqlDB.Close()
 		return nil, err
 	}
-	if version > CurrentSchemaVersion {
+	if version != CurrentSchemaVersion {
 		_ = sqlDB.Close()
+		if version < CurrentSchemaVersion {
+			return nil, fmt.Errorf("database schema version %d is older than required version %d; open it writable to migrate", version, CurrentSchemaVersion)
+		}
 		return nil, fmt.Errorf("database schema version %d is newer than supported version %d", version, CurrentSchemaVersion)
 	}
 	return &DB{DB: sqlDB, path: dbPath}, nil
@@ -367,6 +376,17 @@ type RunFilter struct {
 	ZigOptimize     string
 }
 
+func (filter RunFilter) Matches(run *Run) bool {
+	return (filter.BenchmarkKind == "" || run.BenchmarkKind == filter.BenchmarkKind) &&
+		(filter.BenchmarkSuite == "" || run.BenchmarkSuite == filter.BenchmarkSuite) &&
+		(filter.ProtocolVersion == 0 || run.ProtocolVersion == filter.ProtocolVersion) &&
+		(filter.BunVersion == "" || run.BunVersion == filter.BunVersion) &&
+		(filter.ZigVersion == "" || run.ZigVersion == filter.ZigVersion) &&
+		(filter.ManifestHash == "" || run.ManifestHash == filter.ManifestHash) &&
+		(filter.MachineID == "" || run.MachineID == filter.MachineID) &&
+		(filter.ZigOptimize == "" || run.ZigOptimize == filter.ZigOptimize)
+}
+
 func appendRunFilter(query string, args []interface{}, alias string, filter RunFilter) (string, []interface{}) {
 	prefix := ""
 	if alias != "" {
@@ -395,6 +415,25 @@ func appendRunFilter(query string, args []interface{}, alias string, filter RunF
 		args = append(args, filter.ProtocolVersion)
 	}
 	return query, args
+}
+
+func runCohortFilter(run *Run) RunFilter {
+	return RunFilter{
+		BenchmarkKind: run.BenchmarkKind, BenchmarkSuite: run.BenchmarkSuite,
+		ProtocolVersion: run.ProtocolVersion, BunVersion: run.BunVersion,
+		ZigVersion: run.ZigVersion, ManifestHash: run.ManifestHash, MachineID: run.MachineID,
+		ZigOptimize: relevantOptimize(run),
+	}
+}
+
+// SameRunCohort reports whether two runs have the same measurement identity.
+// Zig optimization is relevant only to Zig runs; the remaining identity fields
+// include the machine and pinned runtime/manifest values used by JavaScript.
+func SameRunCohort(a, b *Run) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return runCohortFilter(a) == runCohortFilter(b)
 }
 
 type scanner interface {
@@ -1229,8 +1268,9 @@ func (db *DB) GetTrend(resultID int64, limit int) ([]struct {
 	Result Result
 }, error,
 ) {
-	refResult, err := db.GetResult(resultID)
-	if err != nil {
+	var refResult Result
+	if err := db.QueryRow(`SELECT id, run_id, category, name FROM results WHERE id = ?`, resultID).Scan(
+		&refResult.ID, &refResult.RunID, &refResult.Category, &refResult.Name); err != nil {
 		return nil, err
 	}
 	refRun, err := db.GetRun(refResult.RunID)
@@ -1254,11 +1294,7 @@ func (db *DB) GetTrend(resultID int64, limit int) ([]struct {
 		query += " AND ru.id = ?"
 		args = append(args, refRun.ID)
 	} else {
-		query += ` AND ru.machine_id = ? AND ru.benchmark_kind = ? AND ru.benchmark_suite = ?
-			AND ru.protocol_version = ? AND ru.bun_version = ? AND ru.zig_version = ? AND ru.manifest_hash = ?
-			AND (ru.benchmark_kind <> 'zig' OR ru.zig_optimize = ?)`
-		args = append(args, refRun.MachineID, refRun.BenchmarkKind, refRun.BenchmarkSuite,
-			refRun.ProtocolVersion, refRun.BunVersion, refRun.ZigVersion, refRun.ManifestHash, refRun.ZigOptimize)
+		query, args = appendRunFilter(query, args, "ru", runCohortFilter(refRun))
 		if refRun.Branch == "" || refRun.Branch == "main" {
 			query += " AND (ru.branch = 'main' OR ru.branch IS NULL OR ru.branch = '')"
 		} else {
@@ -1919,11 +1955,7 @@ func (db *DB) GetComparableRunsWindow(runID int64, window int) ([]Run, error) {
 		query += ` AND id = ?`
 		args = append(args, refRun.ID)
 	} else {
-		query += ` AND machine_id = ? AND benchmark_kind = ? AND benchmark_suite = ?
-			AND protocol_version = ? AND bun_version = ? AND zig_version = ? AND manifest_hash = ?
-			AND (benchmark_kind <> 'zig' OR zig_optimize = ?)`
-		args = append(args, refRun.MachineID, refRun.BenchmarkKind, refRun.BenchmarkSuite,
-			refRun.ProtocolVersion, refRun.BunVersion, refRun.ZigVersion, refRun.ManifestHash, refRun.ZigOptimize)
+		query, args = appendRunFilter(query, args, "", runCohortFilter(refRun))
 	}
 	query += `
 		  AND (julianday(run_date) < julianday(?) OR (julianday(run_date) = julianday(?) AND id <= ?))
@@ -1963,19 +1995,17 @@ func (db *DB) GetComparableMainRunsWindow(runID int64, window int) ([]Run, error
 		return []Run{}, nil
 	}
 
-	rows, err := db.Query(`
+	query := `
 		SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
 		       benchmark_kind, benchmark_suite, protocol_version, bun_version, zig_version, manifest_hash, manifest_json
 		FROM runs
-		WHERE (branch = 'main' OR branch IS NULL OR branch = '')
-		  AND machine_id = ? AND benchmark_kind = ? AND benchmark_suite = ? AND protocol_version = ?
-		  AND bun_version = ? AND zig_version = ? AND manifest_hash = ?
-		  AND (benchmark_kind <> 'zig' OR zig_optimize = ?)
-		  AND (julianday(run_date) < julianday(?) OR (julianday(run_date) = julianday(?) AND id <= ?))
+		WHERE (branch = 'main' OR branch IS NULL OR branch = '')`
+	query, args := appendRunFilter(query, nil, "", runCohortFilter(refRun))
+	query += ` AND (julianday(run_date) < julianday(?) OR (julianday(run_date) = julianday(?) AND id <= ?))
 		ORDER BY julianday(run_date) DESC, id DESC
-		LIMIT ?`, refRun.MachineID, refRun.BenchmarkKind, refRun.BenchmarkSuite, refRun.ProtocolVersion,
-		refRun.BunVersion, refRun.ZigVersion, refRun.ManifestHash, refRun.ZigOptimize,
-		refRun.RunDate, refRun.RunDate, refRun.ID, window)
+		LIMIT ?`
+	args = append(args, refRun.RunDate, refRun.RunDate, refRun.ID, window)
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2056,6 +2086,7 @@ type Job struct {
 	Error           string
 	RunID           *int64 // links to resulting benchmark run
 	RequestedBy     string
+	ClaimToken      string // populated only by ClaimNextPendingJob
 	BenchmarkKind   string
 	BenchmarkSuite  string
 	ProtocolVersion int64
@@ -2072,12 +2103,11 @@ func (db *DB) InsertJob(job *Job) (int64, error) {
 	if job.ProtocolVersion == 0 {
 		job.ProtocolVersion = 1
 	}
-	if job.BenchmarkKind != "zig" && job.BenchmarkKind != "js" {
+	if job.BenchmarkKind != "zig" && job.BenchmarkKind != jsbench.Kind {
 		return 0, fmt.Errorf("benchmark kind must be zig or js")
 	}
-	if job.BenchmarkKind == "js" && (job.BenchmarkSuite != "core-default" || job.ProtocolVersion != 1 ||
-		job.ManifestHash != "sha256:0fa487783682b1227bfd4bf735fe1a969ea03f045bb8a68f87c1e41174cb3794" ||
-		job.Samples != 3 || job.Profile != "none") {
+	if job.BenchmarkKind == jsbench.Kind && !jsbench.MatchesJob(job.BenchmarkSuite, job.ProtocolVersion,
+		job.ManifestHash, job.Samples, job.Profile) {
 		return 0, fmt.Errorf("JavaScript jobs require canonical suite, protocol, manifest, three samples, and no profile")
 	}
 	var commitHash, notes, requestedBy *string
@@ -2221,28 +2251,111 @@ func (db *DB) ListJobsFiltered(limit int, status string, branch string, benchmar
 	return jobs, rows.Err()
 }
 
-// ClaimNextPendingJob atomically finds the oldest pending job and sets it to running.
-// Returns nil, nil if no pending jobs exist.
-func (db *DB) ClaimNextPendingJob() (*Job, error) {
+// JobLeaseDuration bounds how long an unresponsive worker can retain a job.
+// Benchmark jobs normally finish well within a day, including profiling runs.
+const JobLeaseDuration = 24 * time.Hour
+
+var (
+	ErrJobClaimLost   = errors.New("job claim is no longer active")
+	ErrJobRunMismatch = errors.New("run does not match job commit and benchmark identity")
+)
+
+func hashJobClaimToken(token string) string {
+	return joblease.HashToken(token)
+}
+
+// Empty credentials are reserved for workers that were already running when
+// claim tokens were introduced. Every job claimed under the new protocol has a
+// non-empty digest, including legacy jobs after stale recovery.
+func storedJobClaimCredential(token string) string {
+	if token == "" {
+		return ""
+	}
+	return hashJobClaimToken(token)
+}
+
+// ClaimNextPendingJob atomically recovers expired running jobs, then finds the
+// oldest matching pending job and sets it to running. An empty benchmark kind
+// matches either kind. Returns nil, nil if no matching pending jobs exist.
+func (db *DB) ClaimNextPendingJob(benchmarkKind string) (*Job, error) {
+	claimToken, err := joblease.NewToken()
+	if err != nil {
+		return nil, fmt.Errorf("generate job claim token: %w", err)
+	}
+	return db.ClaimNextPendingJobWithToken(benchmarkKind, claimToken)
+}
+
+// ClaimNextPendingJobWithToken uses a caller-owned bearer token so a repeated
+// remote claim can recover the lease after its first response was lost.
+func (db *DB) ClaimNextPendingJobWithToken(benchmarkKind, claimToken string) (*Job, error) {
+	if benchmarkKind != "" && benchmarkKind != "zig" && benchmarkKind != jsbench.Kind {
+		return nil, fmt.Errorf("benchmark kind must be zig or js")
+	}
+	if err := joblease.ValidateToken(claimToken); err != nil {
+		return nil, err
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	nowTime := time.Now().UTC()
+	now := nowTime.Format(time.RFC3339)
+	staleBefore := nowTime.Add(-JobLeaseDuration).Format(time.RFC3339)
+	if _, err := tx.Exec(`
+		UPDATE jobs SET status = 'pending', started_at = NULL, claim_token = NULL, legacy_tokenless = 0
+		WHERE status = 'running'
+		  AND (started_at IS NULL OR julianday(started_at) <= julianday(?))`, staleBefore); err != nil {
+		return nil, err
+	}
+
+	claimDigest := hashJobClaimToken(claimToken)
+	var existingID int64
+	var existingKind string
+	err = tx.QueryRow(`SELECT id, benchmark_kind FROM jobs WHERE status = 'running' AND claim_token = ?`, claimDigest).
+		Scan(&existingID, &existingKind)
+	if err == nil {
+		if benchmarkKind != "" && benchmarkKind != existingKind {
+			return nil, fmt.Errorf("claim token already owns a %s job", existingKind)
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		job, err := db.GetJob(existingID)
+		if err != nil {
+			return nil, err
+		}
+		job.ClaimToken = claimToken
+		return job, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+
+	query := `SELECT id FROM jobs WHERE status = 'pending'`
+	args := []interface{}{}
+	if benchmarkKind != "" {
+		query += ` AND benchmark_kind = ?`
+		args = append(args, benchmarkKind)
+	}
+	query += ` ORDER BY created_at ASC LIMIT 1`
 	var jobID int64
-	err = tx.QueryRow(`
-		SELECT id FROM jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1`).Scan(&jobID)
+	err = tx.QueryRow(query, args...).Scan(&jobID)
 	if err == sql.ErrNoRows {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-
-	now := timeNow()
-	_, err = tx.Exec(`UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?`, now, jobID)
+	res, err := tx.Exec(`UPDATE jobs SET status = 'running', started_at = ?, claim_token = ?, legacy_tokenless = 0 WHERE id = ? AND status = 'pending'`, now, claimDigest, jobID)
 	if err != nil {
+		return nil, err
+	}
+	if err := requireActiveJobClaim(res, jobID); err != nil {
 		return nil, err
 	}
 
@@ -2250,20 +2363,57 @@ func (db *DB) ClaimNextPendingJob() (*Job, error) {
 		return nil, err
 	}
 
-	return db.GetJob(jobID)
+	job, err := db.GetJob(jobID)
+	if err != nil {
+		return nil, err
+	}
+	job.ClaimToken = claimToken
+	return job, nil
 }
 
-// CompleteJob marks a job as completed and links the resulting run.
-func (db *DB) CompleteJob(jobID int64, runID int64) error {
-	now := timeNow()
-	_, err := db.Exec(`
-		UPDATE jobs SET status = 'completed', completed_at = ?, run_id = ?, error = NULL WHERE id = ?`,
-		now, runID, jobID)
-	return err
+// CompleteJob marks the actively claimed job as completed and links the resulting run.
+func (db *DB) CompleteJob(ctx context.Context, jobID int64, claimToken string, runID int64) error {
+	result, err := db.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = 'completed', completed_at = ?, run_id = ?, error = NULL, claim_token = NULL, legacy_tokenless = 0
+		WHERE id = ? AND status = 'running' AND COALESCE(claim_token, '') = ?
+		  AND (? <> '' OR legacy_tokenless = 1) AND jobs.commit_hash <> ''
+		  AND EXISTS (
+			SELECT 1 FROM runs
+			WHERE runs.id = ?
+			  AND COALESCE(NULLIF(runs.commit_hash_full, ''), runs.commit_hash) = jobs.commit_hash
+			  AND runs.benchmark_kind = jobs.benchmark_kind
+			  AND runs.benchmark_suite = jobs.benchmark_suite
+			  AND runs.protocol_version = jobs.protocol_version
+			  AND runs.manifest_hash = jobs.manifest_hash
+		  )`, timeNow(), runID, jobID, storedJobClaimCredential(claimToken), claimToken, runID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 1 {
+		return nil
+	}
+
+	var active bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM jobs WHERE id = ? AND status = 'running' AND COALESCE(claim_token, '') = ?
+			  AND (? <> '' OR legacy_tokenless = 1)
+		)`, jobID, storedJobClaimCredential(claimToken), claimToken).Scan(&active); err != nil {
+		return err
+	}
+	if active {
+		return fmt.Errorf("%w for job %d and run %d", ErrJobRunMismatch, jobID, runID)
+	}
+	return fmt.Errorf("%w for job %d", ErrJobClaimLost, jobID)
 }
 
-// FailJob marks a job as failed with an error message.
-func (db *DB) FailJob(jobID int64, errMsg string) error {
+// FailJob marks the actively claimed job as failed with an error message.
+func (db *DB) FailJob(ctx context.Context, jobID int64, claimToken, errMsg string) error {
 	const maxJobErrorBytes = 4096
 	if len(errMsg) > maxJobErrorBytes {
 		errMsg = errMsg[:maxJobErrorBytes]
@@ -2271,11 +2421,14 @@ func (db *DB) FailJob(jobID int64, errMsg string) error {
 			errMsg = errMsg[:len(errMsg)-1]
 		}
 	}
-	now := timeNow()
-	_, err := db.Exec(`
-		UPDATE jobs SET status = 'failed', completed_at = ?, error = ? WHERE id = ?`,
-		now, errMsg, jobID)
-	return err
+	return db.updateClaimedJob(ctx, jobID, claimToken,
+		`status = 'failed', completed_at = ?, error = ?, claim_token = NULL, legacy_tokenless = 0`, timeNow(), errMsg)
+}
+
+// ReleaseJob returns the actively claimed job to the queue for another worker.
+func (db *DB) ReleaseJob(ctx context.Context, jobID int64, claimToken string) error {
+	return db.updateClaimedJob(ctx, jobID, claimToken,
+		`status = 'pending', started_at = NULL, claim_token = NULL, legacy_tokenless = 0`)
 }
 
 // CancelJob cancels a pending job. Returns an error if the job is not pending.
@@ -2294,10 +2447,31 @@ func (db *DB) CancelJob(jobID int64) error {
 	return nil
 }
 
-// UpdateJobCommitHash sets the resolved commit hash on a job (used by worker when resolving branch HEAD).
-func (db *DB) UpdateJobCommitHash(jobID int64, commitHash string) error {
-	_, err := db.Exec(`UPDATE jobs SET commit_hash = ? WHERE id = ?`, commitHash, jobID)
-	return err
+// UpdateJobCommitHash sets the resolved commit hash on the actively claimed job.
+func (db *DB) UpdateJobCommitHash(ctx context.Context, jobID int64, claimToken, commitHash string) error {
+	return db.updateClaimedJob(ctx, jobID, claimToken, `commit_hash = ?`, commitHash)
+}
+
+func (db *DB) updateClaimedJob(ctx context.Context, jobID int64, claimToken, setClause string, args ...any) error {
+	args = append(args, jobID, storedJobClaimCredential(claimToken), claimToken)
+	result, err := db.ExecContext(ctx, `UPDATE jobs SET `+setClause+
+		` WHERE id = ? AND status = 'running' AND COALESCE(claim_token, '') = ?
+		  AND (? <> '' OR legacy_tokenless = 1)`, args...)
+	if err != nil {
+		return err
+	}
+	return requireActiveJobClaim(result, jobID)
+}
+
+func requireActiveJobClaim(result sql.Result, jobID int64) error {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("%w for job %d", ErrJobClaimLost, jobID)
+	}
+	return nil
 }
 
 func (db *DB) GetRegressionCache(key RegressionCacheKey, generationKey string) (*RegressionCacheEntry, error) {

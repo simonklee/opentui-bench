@@ -1,10 +1,16 @@
 import { createSignal } from "solid-js";
 import type { BenchmarkKind } from "./services/api";
 
-const urlKind = new URLSearchParams(window.location.search).get("benchmark_kind");
+export function benchmarkKindForLocation(pathname: string, search: string): BenchmarkKind | null {
+  const urlKind = new URLSearchParams(search).get("benchmark_kind");
+  if (urlKind === "js" || urlKind === "zig") return urlKind;
+  return pathname === "/" || pathname === "/compare" ? "zig" : null;
+}
+
 const storedKind = window.localStorage.getItem("benchmark_kind");
 const initialKind: BenchmarkKind =
-  urlKind === "js" || urlKind === "zig" ? urlKind : storedKind === "js" ? "js" : "zig";
+  benchmarkKindForLocation(window.location.pathname, window.location.search) ??
+  (storedKind === "js" ? "js" : "zig");
 
 export const [lastViewedRunId, setLastViewedRunId] = createSignal<number | null>(null);
 export const [benchmarkKind, setBenchmarkKindSignal] = createSignal<BenchmarkKind>(initialKind);

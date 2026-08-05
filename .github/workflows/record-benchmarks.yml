@@ -14,6 +14,15 @@ jobs:
           username: ${{ secrets.BENCH_USER }}
           key: ${{ secrets.BENCH_SSH_KEY }}
           script: |
+            set -euo pipefail
+            git -C "$HOME/repos/opentui-bench" fetch origin
+            git -C "$HOME/repos/opentui-bench" reset --hard origin/main
+            libexec="$HOME/.local/libexec/opentui-bench"
+            mkdir -p "$libexec"
+            scheduler_tmp=$(mktemp "$libexec/.run-benchmarks.sh.XXXXXX")
+            trap 'rm -f "$scheduler_tmp"' EXIT
+            install -m 755 "$HOME/repos/opentui-bench/scripts/run-benchmarks.sh" "$scheduler_tmp"
+            mv -f "$scheduler_tmp" "$libexec/run-benchmarks.sh"
             systemctl --user restart opentui-bench-worker.service
             sleep 15
             if ! systemctl --user is-active --quiet opentui-bench-worker.service; then

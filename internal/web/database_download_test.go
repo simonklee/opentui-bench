@@ -1,6 +1,8 @@
 package web
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +17,16 @@ func TestDatabaseDownloadReturnsConsistentSnapshot(t *testing.T) {
 	database := openRegressionHistoryTestDB(t)
 	runID := insertRegressionHistoryTestRun(t, database, "main", testTime, "export")
 	insertRegressionHistoryTestResult(t, database, runID, 123_456)
+	jobID, err := database.InsertJob(&db.Job{
+		Status: "pending", Kind: "benchmark", Branch: "main", CreatedAt: testTime.Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := database.ClaimNextPendingJob("")
+	if err != nil || claimed == nil || claimed.ID != jobID {
+		t.Fatalf("claim job: job=%+v err=%v", claimed, err)
+	}
 	server := &Server{db: database, databaseDownloadSem: make(chan struct{}, 1)}
 
 	request := httptest.NewRequest(http.MethodPost, "/api/database/download", nil)
@@ -42,6 +54,16 @@ func TestDatabaseDownloadReturnsConsistentSnapshot(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("exported result count = %d, want 1", count)
+	}
+	var exportedToken string
+	if err := exported.QueryRow(`SELECT claim_token FROM jobs WHERE id = ?`, jobID).Scan(&exportedToken); err != nil {
+		t.Fatal(err)
+	}
+	if exportedToken == "" || exportedToken == claimed.ClaimToken {
+		t.Fatalf("export contains a bearer credential: %q", exportedToken)
+	}
+	if err := database.FailJob(context.Background(), jobID, exportedToken, "stolen"); !errors.Is(err, db.ErrJobClaimLost) {
+		t.Fatalf("exported token digest was usable: %v", err)
 	}
 }
 

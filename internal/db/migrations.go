@@ -17,6 +17,38 @@ var migrations = []migration{
 	migrateStoragePrecision,
 	purgeRegressionCacheForCalibrationRollout,
 	migrateJavaScriptStorage,
+	migrateJobClaimTokens,
+}
+
+func migrateJobClaimTokens(tx *sql.Tx) error {
+	columns, err := tableColumns(tx, "jobs")
+	if err != nil {
+		return err
+	}
+	if !columns["claim_token"] {
+		if _, err := tx.Exec(`ALTER TABLE jobs ADD COLUMN claim_token TEXT`); err != nil {
+			return err
+		}
+	}
+	if !columns["legacy_tokenless"] {
+		if _, err := tx.Exec(`ALTER TABLE jobs ADD COLUMN legacy_tokenless INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	// Version 6 workers may still be executing running rows. Mark only those rows
+	// as tokenless without requeueing them; ordinary lease recovery clears the
+	// marker after 24 hours. A missing start time begins that window now.
+	_, err = tx.Exec(`
+		UPDATE jobs
+		SET started_at = COALESCE(started_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+		    claim_token = NULL,
+		    legacy_tokenless = 1
+		WHERE status = 'running';
+		UPDATE jobs SET claim_token = NULL, legacy_tokenless = 0 WHERE status != 'running';
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_claim_token ON jobs(claim_token)
+			WHERE claim_token IS NOT NULL;
+	`)
+	return err
 }
 
 func migrateJavaScriptStorage(tx *sql.Tx) error {

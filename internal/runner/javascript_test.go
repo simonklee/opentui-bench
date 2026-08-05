@@ -8,12 +8,16 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"opentui-bench/internal/jsbench"
 )
 
 type scriptedExecutor struct {
 	commands [][]string
 	dirs     []string
+	timeouts []time.Duration
 	outputs  int
+	bun      string
 }
 
 func (e *scriptedExecutor) CombinedOutput(_ context.Context, cmd *exec.Cmd) ([]byte, error) {
@@ -25,15 +29,24 @@ func (e *scriptedExecutor) CombinedOutput(_ context.Context, cmd *exec.Cmd) ([]b
 	return []byte(output), nil
 }
 
-func (e *scriptedExecutor) Output(_ context.Context, cmd *exec.Cmd) ([]byte, []byte, error) {
+func (e *scriptedExecutor) Output(ctx context.Context, cmd *exec.Cmd) ([]byte, []byte, error) {
 	e.commands = append(e.commands, slices.Clone(cmd.Args))
 	e.dirs = append(e.dirs, cmd.Dir)
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		e.timeouts = append(e.timeouts, 0)
+	} else {
+		e.timeouts = append(e.timeouts, time.Until(deadline))
+	}
 	switch {
-	case slices.Equal(cmd.Args, []string{"bun", "--version"}):
-		return []byte(JavaScriptBunVersion + "\n"), nil, nil
+	case slices.Equal(cmd.Args, []string{"bun", "--revision"}):
+		if e.bun == "" {
+			e.bun = jsbench.BunVersion + "+test"
+		}
+		return []byte(e.bun + "\n"), nil, nil
 	case slices.Equal(cmd.Args, []string{"zig", "version"}):
-		return []byte(JavaScriptZigVersion + "\n"), nil, nil
-	case len(cmd.Args) > 1 && cmd.Args[1] == "--cwd=packages/core" && cmd.Args[len(cmd.Args)-1] == "--format=json":
+		return []byte(jsbench.ZigVersion + "\n"), nil, nil
+	case len(cmd.Args) > 2 && cmd.Args[2] == "--cwd=packages/core" && cmd.Args[len(cmd.Args)-1] == "--format=json":
 		return nil, []byte("unstable case"), errors.New("exit status 1")
 	default:
 		return nil, nil, nil
@@ -53,19 +66,43 @@ func TestJavaScriptOrchestrationUsesCanonicalCommandsAndSeparateDiagnostics(t *t
 		{"git", "log", "-1", "--format=%s"},
 		{"git", "log", "-1", "--format=%cI"},
 		{"git", "branch", "--show-current"},
-		{"bun", "--version"},
+		{"bun", "--revision"},
 		{"zig", "version"},
 		{"bun", "install", "--frozen-lockfile"},
-		{"bun", "--cwd=packages/core", "run", "build:native"},
-		{"bun", "--cwd=packages/core", "run", "bench:js", "--format=json"},
+		{"bun", "--no-env-file", "--cwd=packages/core", "run", "build:native"},
+		{"bun", "--no-env-file", "--cwd=packages/core", "run", "bench:js", "--format=json"},
 	}
 	if !slices.EqualFunc(executor.commands, want, func(a, b []string) bool { return slices.Equal(a, b) }) {
 		t.Fatalf("commands = %#v, want %#v", executor.commands, want)
 	}
-	for _, dir := range executor.dirs {
-		if dir != "/repo" {
-			t.Fatalf("command directory = %q, want /repo", dir)
+	for i, dir := range executor.dirs {
+		wantDir := "/repo"
+		if slices.Equal(executor.commands[i], []string{"zig", "version"}) {
+			wantDir = "/repo/packages/core/src/zig"
 		}
+		if dir != wantDir {
+			t.Fatalf("command %q directory = %q, want %q", executor.commands[i], dir, wantDir)
+		}
+	}
+	timeouts := []time.Duration{
+		JavaScriptToolTimeout,
+		JavaScriptToolTimeout,
+		JavaScriptPreparationTimeout,
+		JavaScriptPreparationTimeout,
+		JavaScriptTimeout,
+	}
+	for i, timeout := range timeouts {
+		if executor.timeouts[i] <= 0 || executor.timeouts[i] > timeout {
+			t.Fatalf("command %q timeout = %s, want within %s", executor.commands[i+5], executor.timeouts[i], timeout)
+		}
+	}
+}
+
+func TestJavaScriptRejectsPrereleaseBun(t *testing.T) {
+	executor := &scriptedExecutor{bun: jsbench.BunVersion + "-canary.1+test"}
+	err := checkBunVersion(context.Background(), executor, "/repo")
+	if err == nil || !strings.Contains(err.Error(), "want stable "+jsbench.BunVersion) {
+		t.Fatalf("error = %v, want stable Bun rejection", err)
 	}
 }
 
@@ -88,11 +125,11 @@ func TestJavaScriptConfigRejectsNonCanonicalOptions(t *testing.T) {
 	}
 }
 
-func TestOSRunnerOutputKillsProcessGroupOnTimeout(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+func TestJavaScriptPreparationKillsProcessGroupOnTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, _, err := (OSRunner{}).Output(ctx, exec.Command("sh", "-c", "sleep 30 & wait"))
+	err := runPreparation(ctx, OSRunner{}, t.TempDir(), "sh", "-c", "sleep 30 & wait")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error = %v, want deadline exceeded", err)
 	}

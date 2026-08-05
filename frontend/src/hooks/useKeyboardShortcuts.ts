@@ -24,31 +24,33 @@ export const useKeyboardShortcuts = () => {
       }
       if (location.pathname.startsWith("/benchmarks/")) {
         const search = new URLSearchParams(location.search);
+        const kind = search.get("benchmark_kind") ?? benchmarkKind();
         // If we came from compare, go back there
         if (search.get("from") === "compare") {
           const base = search.get("compare_base");
           const curr = search.get("compare_curr");
           const params = new URLSearchParams();
+          params.set("benchmark_kind", kind);
           if (base) params.set("base", base);
           if (curr) params.set("curr", curr);
           navigate(`/compare?${params.toString()}`);
           return;
         }
         if (search.get("from") === "regressions") {
-          const params = new URLSearchParams();
+          const params = new URLSearchParams({ benchmark_kind: kind });
           const branch = search.get("regression_branch");
           if (branch && branch !== "main") params.set("branch", branch);
-          const target = params.toString();
-          navigate(target ? `/?${target}` : "/");
+          navigate(`/?${params.toString()}`);
           return;
         }
         if (location.search.includes("bench_id=")) {
           search.delete("bench_id");
+          search.set("benchmark_kind", kind);
           const newSearch = search.toString();
           navigate(`${location.pathname}${newSearch ? `?${newSearch}` : ""}`);
           return;
         }
-        navigate("/runs");
+        navigate(`/runs?benchmark_kind=${kind}`);
         return;
       }
     }

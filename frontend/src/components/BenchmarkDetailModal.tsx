@@ -57,6 +57,17 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
     props.benchmark.samples
       .map((sample) => sample.inner_rsd_ppm)
       .filter((value): value is number => value !== undefined);
+  const processSampleRSD = () => {
+    const values = props.benchmark.samples.map((sample) => sample.avg_ns);
+    if (values.length < 2) return undefined;
+
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    if (mean <= 0) return undefined;
+
+    const variance =
+      values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
+    return (Math.sqrt(variance) / mean) * 100;
+  };
   const formatRSD = (ppm: number) => `${(ppm / 10_000).toFixed(2)}%`;
 
   const isViewingLatestRegression = () => props.regressionContext?.latestRunId === props.runId;
@@ -199,6 +210,13 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
             sub={formatNs(props.benchmark.max_ns)}
           />
           <StatBlock label="Std Dev" value={formatNs(props.benchmark.std_dev_ns)} />
+          <Show when={isJavaScript() && processSampleRSD() !== undefined}>
+            <StatBlock
+              label="Process-Sample RSD"
+              value={`${processSampleRSD()!.toFixed(2)}%`}
+              sub={`Across ${props.benchmark.samples.length} samples`}
+            />
+          </Show>
           <Show when={isJavaScript() && innerRSDValues().length > 0}>
             <StatBlock
               label="Max Inner RSD"
@@ -222,6 +240,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
               <TrendIndicator
                 trendData={props.trendData?.points}
                 currentRunId={props.runId}
+                neutral={isJavaScript()}
                 fromCompare={searchParams.from === "compare"}
                 compareBaseRunId={searchParams.compare_base as string | undefined}
                 compareBaseResultId={searchParams.compare_base_result as string | undefined}
@@ -376,6 +395,11 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                 </div>
               </div>
             </div>
+            <Show when={isJavaScript()}>
+              <div class="mb-3 text-[11px] text-text-muted">
+                JavaScript statistical inference is disabled; trend deltas are descriptive.
+              </div>
+            </Show>
             <div class="h-[300px] relative border border-border p-4">
               <Show
                 when={props.trendData}

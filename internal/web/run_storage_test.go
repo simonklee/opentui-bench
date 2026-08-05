@@ -126,3 +126,31 @@ func TestCreateRunSerializesIdempotencyWithInsertion(t *testing.T) {
 		t.Fatalf("run count = %d, want 1", count)
 	}
 }
+
+func TestCreateRunLostResponseRetryReturnsSameRun(t *testing.T) {
+	server, database := newAPIStorageServer(t)
+	body := `{"commit_hash":"abc","commit_hash_full":"abcdef","machine_id":"runner","zig_optimize":"ReleaseFast","results":[{"category":"cat","name":"bench","min_ns":1,"avg_ns":2,"max_ns":3,"total_ns":2,"iterations":1,"sample_count":1}]}`
+	post := func() (int, int64) {
+		recorder := httptest.NewRecorder()
+		server.handleCreateRun(recorder, httptest.NewRequest(http.MethodPost, "/api/runs", strings.NewReader(body)))
+		var response struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+		return recorder.Code, response.ID
+	}
+	firstStatus, firstID := post()
+	secondStatus, secondID := post()
+	if firstStatus != http.StatusCreated || secondStatus != http.StatusOK || firstID == 0 || secondID != firstID {
+		t.Fatalf("responses = %d/%d, %d/%d", firstStatus, firstID, secondStatus, secondID)
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM runs`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("run count = %d, want 1", count)
+	}
+}

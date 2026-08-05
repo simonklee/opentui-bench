@@ -21,6 +21,8 @@ import (
 
 	"opentui-bench/internal/broadshift"
 	"opentui-bench/internal/db"
+	"opentui-bench/internal/joblease"
+	"opentui-bench/internal/jsbench"
 	"opentui-bench/internal/stats"
 )
 
@@ -116,7 +118,7 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !runMatchesFilter(run, filter) {
+	if !filter.Matches(run) {
 		http.Error(w, "run does not match requested benchmark identity", http.StatusNotFound)
 		return
 	}
@@ -210,15 +212,19 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
-	filter, err := runFilterFromRequest(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
 	idAStr := r.URL.Query().Get("id_a")
 	idBStr := r.URL.Query().Get("id_b")
 	commitA := r.URL.Query().Get("a")
 	commitB := r.URL.Query().Get("b")
+	filterFromRequest := runFilterFromRequest
+	if idAStr != "" && idBStr != "" && r.URL.Query().Get("benchmark_kind") == jsbench.Kind {
+		filterFromRequest = explicitRunFilterFromRequest
+	}
+	filter, err := filterFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	var resultsA, resultsB []db.Result
 	var selectedA, selectedB *db.Run
@@ -249,7 +255,7 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if !runMatchesFilter(runA, filter) || !runMatchesFilter(runB, filter) {
+		if !filter.Matches(runA) || !filter.Matches(runB) {
 			http.Error(w, "run does not match requested benchmark identity", http.StatusBadRequest)
 			return
 		}
@@ -300,7 +306,7 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "provide either id_a & id_b or a & b parameters", http.StatusBadRequest)
 		return
 	}
-	if !sameRunIdentity(selectedA, selectedB) {
+	if !db.SameRunCohort(selectedA, selectedB) {
 		http.Error(w, "runs have different benchmark identities", http.StatusBadRequest)
 		return
 	}
@@ -372,30 +378,11 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "valid result_id parameter required", http.StatusBadRequest)
 		return
 	}
-	filter, err := runFilterFromRequest(r)
+	filter, err := explicitRunFilterFromRequest(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	result, err := s.db.GetResult(resultID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			http.Error(w, "result not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	referenceRun, err := s.db.GetRun(result.RunID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if !runMatchesFilter(referenceRun, filter) {
-		http.Error(w, "result does not match requested benchmark identity", http.StatusBadRequest)
-		return
-	}
-
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 {
@@ -420,23 +407,21 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 
 	type trendPoint struct {
 		runIdentityResponse
-		RunID          int64             `json:"run_id"`
-		ResultID       int64             `json:"result_id"`
-		CommitHash     string            `json:"commit_hash"`
-		CommitMessage  string            `json:"commit_message,omitempty"`
-		Branch         string            `json:"branch"`
-		RunDate        string            `json:"run_date"`
-		AvgNs          int64             `json:"avg_ns"`
-		MedianNs       int64             `json:"median_ns"`
-		MinNs          int64             `json:"min_ns"`
-		MaxNs          int64             `json:"max_ns"`
-		StdDevNs       int64             `json:"std_dev_ns"`
-		SampleCount    int64             `json:"sample_count"`
-		CiLowerNs      int64             `json:"ci_lower_ns"`
-		CiUpperNs      int64             `json:"ci_upper_ns"`
-		SemNs          int64             `json:"sem_ns"`
-		MaxInnerRSDPPM *int64            `json:"max_inner_rsd_ppm,omitempty"`
-		Samples        []db.ResultSample `json:"samples,omitempty"`
+		RunID         int64  `json:"run_id"`
+		ResultID      int64  `json:"result_id"`
+		CommitHash    string `json:"commit_hash"`
+		CommitMessage string `json:"commit_message,omitempty"`
+		Branch        string `json:"branch"`
+		RunDate       string `json:"run_date"`
+		AvgNs         int64  `json:"avg_ns"`
+		MedianNs      int64  `json:"median_ns"`
+		MinNs         int64  `json:"min_ns"`
+		MaxNs         int64  `json:"max_ns"`
+		StdDevNs      int64  `json:"std_dev_ns"`
+		SampleCount   int64  `json:"sample_count"`
+		CiLowerNs     int64  `json:"ci_lower_ns"`
+		CiUpperNs     int64  `json:"ci_upper_ns"`
+		SemNs         int64  `json:"sem_ns"`
 	}
 
 	type trendResponse struct {
@@ -458,7 +443,7 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 
 	var observations []stats.OrderedRunStat
 	var target stats.OrderedRunStat
-	var targetFound bool
+	var referenceRun *db.Run
 	for _, t := range trends {
 		runDate, err := time.Parse(time.RFC3339Nano, t.Run.RunDate)
 		if err != nil {
@@ -471,8 +456,16 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		observations = append(observations, observation)
 		if t.Result.ID == resultID {
 			target = observation
-			targetFound = true
+			referenceRun = &t.Run
 		}
+	}
+	if referenceRun == nil {
+		http.Error(w, "result not found", http.StatusNotFound)
+		return
+	}
+	if !filter.Matches(referenceRun) {
+		http.Error(w, "result does not match requested benchmark identity", http.StatusBadRequest)
+		return
 	}
 
 	var points []trendPoint
@@ -481,13 +474,8 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		ciLower, ciUpper, sem := stats.CI95(t.Result.AvgNs, t.Result.StdDevNs, t.Result.SampleCount)
-		samples, err := s.db.GetResultSamples(t.Result.ID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
 
-		point := trendPoint{
+		points = append(points, trendPoint{
 			runIdentityResponse: identityResponse(&t.Run),
 			RunID:               t.Run.ID,
 			ResultID:            t.Result.ID,
@@ -504,16 +492,7 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 			CiLowerNs:           ciLower,
 			CiUpperNs:           ciUpper,
 			SemNs:               sem,
-			Samples:             samples,
-		}
-		for _, sample := range samples {
-			if sample.InnerRSDPPM != nil && (point.MaxInnerRSDPPM == nil || *sample.InnerRSDPPM > *point.MaxInnerRSDPPM) {
-				value := *sample.InnerRSDPPM
-				point.MaxInnerRSDPPM = &value
-			}
-		}
-
-		points = append(points, point)
+		})
 	}
 
 	response := trendResponse{
@@ -522,19 +501,17 @@ func (s *Server) handleTrend(w http.ResponseWriter, r *http.Request) {
 		FamilyDefinition: regressionFamilyDefinition, CalibrationStatus: regressionCalibrationStatus,
 		CalibrationCaveat: regressionCalibrationCaveat, FDRLevel: defaultFDR,
 	}
-	if targetFound {
-		response.CurrentStatus.RunID = target.Stat.RunID
-		if referenceRun.BenchmarkKind == canonicalJSKind {
-			response.CurrentStatus.Status = "disabled"
-			response.CurrentStatus.Reason = "javascript_regressions_disabled"
-		} else {
-			evaluation := stats.EvaluateSnapshot(target, observations, stats.SnapshotConfig{
-				Window: defaultWindow, MinPoints: defaultMinPoints, BaselineOffset: defaultBaselineOffset,
-			})
-			response.CurrentStatus.Status = evaluation.Result.Status
-			if evaluation.Result.Status == "insufficient" {
-				response.CurrentStatus.Reason = "insufficient_baseline_history"
-			}
+	response.CurrentStatus.RunID = target.Stat.RunID
+	if referenceRun.BenchmarkKind == jsbench.Kind {
+		response.CurrentStatus.Status = "disabled"
+		response.CurrentStatus.Reason = "javascript_regressions_disabled"
+	} else {
+		evaluation := stats.EvaluateSnapshot(target, observations, stats.SnapshotConfig{
+			Window: defaultWindow, MinPoints: defaultMinPoints, BaselineOffset: defaultBaselineOffset,
+		})
+		response.CurrentStatus.Status = evaluation.Result.Status
+		if evaluation.Result.Status == "insufficient" {
+			response.CurrentStatus.Reason = "insufficient_baseline_history"
 		}
 	}
 
@@ -572,7 +549,7 @@ func (s *Server) handleBenchmarks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if runMatchesFilter(&run, filter) {
+		if filter.Matches(&run) {
 			keys = append(keys, benchmarkResponse{BenchmarkKey: key, runIdentityResponse: identityResponse(&run)})
 		}
 	}
@@ -1897,13 +1874,17 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		req.BenchmarkKind = "zig"
 	}
 	if req.BenchmarkSuite == "" {
-		req.BenchmarkSuite = canonicalJSSuite
+		req.BenchmarkSuite = jsbench.Suite
 	}
 	if req.ProtocolVersion == 0 {
 		req.ProtocolVersion = 1
 	}
-	if req.BenchmarkKind != "zig" && req.BenchmarkKind != canonicalJSKind {
+	if req.BenchmarkKind != "zig" && req.BenchmarkKind != jsbench.Kind {
 		http.Error(w, "benchmark_kind must be 'zig' or 'js'", http.StatusBadRequest)
+		return
+	}
+	if req.BenchmarkKind == jsbench.Kind && !s.javascriptRuns {
+		http.Error(w, "JavaScript benchmark runs are disabled", http.StatusForbidden)
 		return
 	}
 
@@ -1911,7 +1892,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		req.Samples = 3
 	}
 	if req.Profile == "" {
-		if req.BenchmarkKind == canonicalJSKind {
+		if req.BenchmarkKind == jsbench.Kind {
 			req.Profile = "none"
 		} else {
 			req.Profile = "cpu"
@@ -1921,9 +1902,8 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "profile must be 'none' or 'cpu'", http.StatusBadRequest)
 		return
 	}
-	if req.BenchmarkKind == canonicalJSKind && (req.BenchmarkSuite != canonicalJSSuite ||
-		req.ProtocolVersion != canonicalJSProtocol || req.ManifestHash != canonicalJSManifestHash ||
-		req.Samples != 3 || req.Profile != "none") {
+	if req.BenchmarkKind == jsbench.Kind && !jsbench.MatchesJob(req.BenchmarkSuite, req.ProtocolVersion,
+		req.ManifestHash, req.Samples, req.Profile) {
 		http.Error(w, "JavaScript jobs require canonical suite, protocol, manifest_hash, samples=3, and profile='none'", http.StatusBadRequest)
 		return
 	}
@@ -2159,6 +2139,10 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 
 	if req.BenchmarkKind == "" {
 		req.BenchmarkKind = "zig"
+	}
+	if req.BenchmarkKind == jsbench.Kind && !s.javascriptRuns {
+		writeJSONError(w, "JavaScript benchmark runs are disabled", http.StatusForbidden)
+		return
 	}
 	if req.BenchmarkKind == "zig" && req.ZigOptimize == "" {
 		req.ZigOptimize = "ReleaseFast"
@@ -2507,8 +2491,40 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if r.URL.Query().Get(joblease.QueryParameter) != strconv.Itoa(joblease.Protocol) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var claimRequest struct {
+		ClaimToken string `json:"claim_token"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&claimRequest); err != nil {
+		writeJSONError(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeJSONError(w, "request body must contain exactly one JSON value", http.StatusBadRequest)
+		return
+	}
+	if err := joblease.ValidateToken(claimRequest.ClaimToken); err != nil {
+		writeJSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
-	job, err := s.db.ClaimNextPendingJob()
+	benchmarkKind := r.URL.Query().Get("benchmark_kind")
+	if !s.javascriptRuns {
+		if benchmarkKind == jsbench.Kind {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if benchmarkKind == "" {
+			benchmarkKind = "zig"
+		}
+	}
+	job, err := s.db.ClaimNextPendingJobWithToken(benchmarkKind, claimRequest.ClaimToken)
 	if err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2528,6 +2544,7 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 // handleUpdateJob handles PATCH /api/jobs/{id} - update job status/commit/run_id.
 func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request, id int64) {
 	var req struct {
+		ClaimToken string  `json:"claim_token"`
 		Status     *string `json:"status"`
 		CommitHash *string `json:"commit_hash"`
 		RunID      *int64  `json:"run_id"`
@@ -2538,7 +2555,6 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request, id int6
 		writeJSONError(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
 	// Get current job
 	job, err := s.db.GetJob(id)
 	if err != nil {
@@ -2552,8 +2568,7 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request, id int6
 
 	// Handle commit_hash update (no status change required)
 	if req.CommitHash != nil {
-		if err := s.db.UpdateJobCommitHash(id, *req.CommitHash); err != nil {
-			writeJSONError(w, "update commit hash: "+err.Error(), http.StatusInternalServerError)
+		if writeJobMutationError(w, "update commit hash", s.db.UpdateJobCommitHash(r.Context(), id, req.ClaimToken, *req.CommitHash)) {
 			return
 		}
 	}
@@ -2569,22 +2584,7 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request, id int6
 				writeJSONError(w, "run_id required for completed status", http.StatusBadRequest)
 				return
 			}
-			completedRun, err := s.db.GetRun(*req.RunID)
-			if err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					writeJSONError(w, "run not found", http.StatusBadRequest)
-					return
-				}
-				writeJSONError(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if completedRun.BenchmarkKind != job.BenchmarkKind || completedRun.BenchmarkSuite != job.BenchmarkSuite ||
-				completedRun.ProtocolVersion != job.ProtocolVersion || completedRun.ManifestHash != job.ManifestHash {
-				writeJSONError(w, "run benchmark identity does not match job", http.StatusBadRequest)
-				return
-			}
-			if err := s.db.CompleteJob(id, *req.RunID); err != nil {
-				writeJSONError(w, "complete job: "+err.Error(), http.StatusInternalServerError)
+			if writeJobMutationError(w, "complete job", s.db.CompleteJob(r.Context(), id, req.ClaimToken, *req.RunID)) {
 				return
 			}
 		case currentStatus == "running" && newStatus == "failed":
@@ -2592,8 +2592,11 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request, id int6
 			if req.Error != nil {
 				errMsg = *req.Error
 			}
-			if err := s.db.FailJob(id, errMsg); err != nil {
-				writeJSONError(w, "fail job: "+err.Error(), http.StatusInternalServerError)
+			if writeJobMutationError(w, "fail job", s.db.FailJob(r.Context(), id, req.ClaimToken, errMsg)) {
+				return
+			}
+		case currentStatus == "running" && newStatus == "pending":
+			if writeJobMutationError(w, "release job", s.db.ReleaseJob(r.Context(), id, req.ClaimToken)) {
 				return
 			}
 		case currentStatus == "running" && newStatus == "running":
@@ -2615,6 +2618,20 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request, id int6
 	if err := json.NewEncoder(w).Encode(jobToResponse(updated)); err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func writeJobMutationError(w http.ResponseWriter, action string, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, db.ErrJobClaimLost) {
+		writeJSONError(w, err.Error(), http.StatusConflict)
+	} else if errors.Is(err, db.ErrJobRunMismatch) {
+		writeJSONError(w, err.Error(), http.StatusBadRequest)
+	} else {
+		writeJSONError(w, action+": "+err.Error(), http.StatusInternalServerError)
+	}
+	return true
 }
 
 // writeJSONError writes a JSON error response in the standard format.

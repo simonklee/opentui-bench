@@ -25,9 +25,12 @@ chmod 600 "$ENV_FILE"
 
 install -m 644 "$REPO_DIR/deploy/systemd/opentui-bench-worker.service" \
 	"$SYSTEMD_DIR/opentui-bench-worker.service"
-install -m 755 "$REPO_DIR/scripts/run-benchmarks.sh" \
-	"$LIBEXEC_DIR/run-benchmarks.sh"
+worker_script_tmp=$(mktemp "$LIBEXEC_DIR/.run-benchmarks.sh.XXXXXX")
+trap 'rm -f "$worker_script_tmp"' EXIT
+install -m 755 "$REPO_DIR/scripts/run-benchmarks.sh" "$worker_script_tmp"
+mv -f "$worker_script_tmp" "$LIBEXEC_DIR/run-benchmarks.sh"
 sudo loginctl enable-linger "$USER"
 systemctl --user daemon-reload
-systemctl --user enable --now opentui-bench-worker.service
+systemctl --user enable opentui-bench-worker.service
+systemctl --user restart opentui-bench-worker.service
 systemctl --user --no-pager --full status opentui-bench-worker.service

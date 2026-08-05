@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os/exec"
 	"syscall"
 )
@@ -23,7 +24,12 @@ type OSRunner struct{}
 
 // CombinedOutput runs the command and returns combined stdout and stderr.
 func (OSRunner) CombinedOutput(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
-	return cmd.CombinedOutput()
+	output, err := cmd.CombinedOutput()
+	var exitError *exec.ExitError
+	if err != nil && errors.As(err, &exitError) && ctx.Err() != nil {
+		err = errors.Join(err, ctx.Err())
+	}
+	return output, err
 }
 
 // Output runs a command in its own process group. Cancelling ctx kills the

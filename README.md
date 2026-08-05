@@ -52,6 +52,18 @@ reached first; generated SVGs use a five-run filesystem cache instead of SQLite.
 Override the server limits with `PROFILE_RETENTION_RUNS`,
 `PROFILE_RETENTION_MIB`, and `SVG_CACHE_MAX_RUNS`.
 
+JavaScript run recording and automatic scheduling remain disabled until the
+benchmark protocol is qualified. Set `BENCH_ENABLE_JAVASCRIPT_RUNS=1` on the
+server only after qualification to advertise the capability to workers.
+
+Remote job claims use the independently advertised `job_lease_protocol`
+capability. During rollout, incompatible server and worker versions refuse to
+claim work, so the Fly server and Hetzner worker can be upgraded in either order.
+Workers generate the lease token before claiming, allowing a lost claim response
+to be retried without consuming another job. The server stores only its SHA-256
+digest; jobs already running during the v7 migration remain leased until the
+normal 24-hour stale recovery window expires.
+
 Prune an existing database and optionally return free pages to the filesystem:
 
 ```bash

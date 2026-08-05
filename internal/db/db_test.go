@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"opentui-bench/internal/jsbench"
 )
 
 func insertTestResult(t *testing.T, database *DB, runID int64, category, name string) int64 {
@@ -428,8 +431,8 @@ func TestListJobs(t *testing.T) {
 func TestListJobsFiltersBeforeLimit(t *testing.T) {
 	database := openTestDB(t)
 	_, err := database.InsertJob(&Job{Status: "failed", Kind: "benchmark", Branch: "main", Samples: 3, Profile: "none",
-		CreatedAt: "2026-08-03T00:00:00Z", RequestedBy: "worker", BenchmarkKind: "js", BenchmarkSuite: "core-default",
-		ProtocolVersion: 1, ManifestHash: "sha256:0fa487783682b1227bfd4bf735fe1a969ea03f045bb8a68f87c1e41174cb3794"})
+		CreatedAt: "2026-08-03T00:00:00Z", RequestedBy: "worker", BenchmarkKind: "js", BenchmarkSuite: jsbench.Suite,
+		ProtocolVersion: jsbench.Protocol, ManifestHash: jsbench.ManifestDigest})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,8 +441,8 @@ func TestListJobsFiltersBeforeLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobs, err := database.ListJobsFiltered(1, "failed", "", "js", "worker", "core-default", 1,
-		"sha256:0fa487783682b1227bfd4bf735fe1a969ea03f045bb8a68f87c1e41174cb3794")
+	jobs, err := database.ListJobsFiltered(1, "failed", "", "js", "worker", jsbench.Suite, jsbench.Protocol,
+		jsbench.ManifestDigest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +455,7 @@ func TestClaimNextPendingJob(t *testing.T) {
 	db := openTestDB(t)
 
 	t.Run("returns nil when no jobs", func(t *testing.T) {
-		job, err := db.ClaimNextPendingJob()
+		job, err := db.ClaimNextPendingJob("")
 		if err != nil {
 			t.Fatalf("claim: %v", err)
 		}
@@ -474,7 +477,7 @@ func TestClaimNextPendingJob(t *testing.T) {
 	})
 
 	t.Run("claims oldest first", func(t *testing.T) {
-		job, err := db.ClaimNextPendingJob()
+		job, err := db.ClaimNextPendingJob("")
 		if err != nil {
 			t.Fatalf("claim: %v", err)
 		}
@@ -490,10 +493,30 @@ func TestClaimNextPendingJob(t *testing.T) {
 		if job.StartedAt == "" {
 			t.Error("started_at should be set")
 		}
+		if len(job.ClaimToken) != 64 {
+			t.Errorf("claim token length = %d, want 64", len(job.ClaimToken))
+		}
+		var storedToken string
+		if err := db.QueryRow(`SELECT claim_token FROM jobs WHERE id = ?`, job.ID).Scan(&storedToken); err != nil {
+			t.Fatal(err)
+		}
+		if len(storedToken) != 64 || storedToken == job.ClaimToken {
+			t.Fatalf("stored claim credential = %q, want a distinct SHA-256 digest", storedToken)
+		}
+		storedJob, err := db.GetJob(job.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if storedJob.ClaimToken != "" {
+			t.Fatalf("GetJob exposed stored claim digest: %q", storedJob.ClaimToken)
+		}
+		if err := db.ReleaseJob(context.Background(), job.ID, storedToken); !errors.Is(err, ErrJobClaimLost) {
+			t.Fatalf("stored digest used as bearer token: %v", err)
+		}
 	})
 
 	t.Run("skips running jobs", func(t *testing.T) {
-		job, err := db.ClaimNextPendingJob()
+		job, err := db.ClaimNextPendingJob("")
 		if err != nil {
 			t.Fatalf("claim: %v", err)
 		}
@@ -506,7 +529,7 @@ func TestClaimNextPendingJob(t *testing.T) {
 	})
 
 	t.Run("returns nil when all claimed", func(t *testing.T) {
-		job, err := db.ClaimNextPendingJob()
+		job, err := db.ClaimNextPendingJob("")
 		if err != nil {
 			t.Fatalf("claim: %v", err)
 		}
@@ -516,30 +539,148 @@ func TestClaimNextPendingJob(t *testing.T) {
 	})
 }
 
+func insertStartedTestJob(t *testing.T, database *DB, job Job, startedAt string) int64 {
+	t.Helper()
+	job.Kind = "benchmark"
+	job.Branch = "main"
+	job.Samples = 3
+	job.CreatedAt = timeNow()
+	jobID, err := database.InsertJob(&job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET started_at = ? WHERE id = ?`, startedAt, jobID); err != nil {
+		t.Fatal(err)
+	}
+	return jobID
+}
+
+func claimTestJob(t *testing.T, database *DB) *Job {
+	t.Helper()
+	jobID, err := database.InsertJob(&Job{
+		Status: "pending", Kind: "benchmark", Branch: "main", RepoURL: "origin",
+		Samples: 3, Profile: "cpu", CreatedAt: timeNow(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := database.ClaimNextPendingJob("")
+	if err != nil || claimed == nil || claimed.ID != jobID {
+		t.Fatalf("claim job: job=%+v err=%v", claimed, err)
+	}
+	return claimed
+}
+
+func TestClaimNextPendingJobRecoversExpiredRunningJobWithoutPendingJobs(t *testing.T) {
+	database := openTestDB(t)
+	startedAt := time.Now().UTC().Add(-JobLeaseDuration - time.Hour).Format(time.RFC3339)
+	jobID := insertStartedTestJob(t, database, Job{Status: "running", Profile: "cpu"}, startedAt)
+
+	job, err := database.ClaimNextPendingJob("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job == nil || job.ID != jobID || job.Status != "running" || job.StartedAt == startedAt {
+		t.Fatalf("recovered job = %+v, want newly leased job %d", job, jobID)
+	}
+}
+
+func TestClaimNextPendingJobDoesNotStealNormalLongRunningJob(t *testing.T) {
+	database := openTestDB(t)
+	startedAt := time.Now().UTC().Add(-JobLeaseDuration + time.Hour).Format(time.RFC3339)
+	jobID := insertStartedTestJob(t, database, Job{Status: "running", Profile: "cpu"}, startedAt)
+
+	job, err := database.ClaimNextPendingJob("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job != nil {
+		t.Fatalf("claimed active long-running job: %+v", job)
+	}
+	stored, err := database.GetJob(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "running" || stored.StartedAt != startedAt {
+		t.Fatalf("active job changed: %+v", stored)
+	}
+}
+
+func TestClaimNextPendingJobKeepsCancelledJobTerminal(t *testing.T) {
+	database := openTestDB(t)
+	jobID := insertStartedTestJob(t, database, Job{Status: "cancelled", Profile: "cpu"},
+		time.Now().UTC().Add(-2*JobLeaseDuration).Format(time.RFC3339))
+
+	job, err := database.ClaimNextPendingJob("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job != nil {
+		t.Fatalf("claimed cancelled job: %+v", job)
+	}
+	stored, err := database.GetJob(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "cancelled" {
+		t.Fatalf("cancelled job status = %q", stored.Status)
+	}
+}
+
+func TestClaimNextPendingJobFiltersKindAfterRecoveringStaleJobs(t *testing.T) {
+	database := openTestDB(t)
+	jsID := insertStartedTestJob(t, database, Job{
+		Status: "running", Profile: "none",
+		BenchmarkKind: "js", BenchmarkSuite: jsbench.Suite, ProtocolVersion: jsbench.Protocol, ManifestHash: jsbench.ManifestDigest,
+	}, time.Now().UTC().Add(-2*JobLeaseDuration).Format(time.RFC3339))
+	zigID, err := database.InsertJob(&Job{
+		Status: "pending", Kind: "benchmark", Branch: "main", Samples: 3, Profile: "cpu", CreatedAt: timeNow(),
+		BenchmarkKind: "zig",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := database.ClaimNextPendingJob("zig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job == nil || job.ID != zigID {
+		t.Fatalf("claimed job = %+v, want Zig job %d", job, zigID)
+	}
+	javascript, err := database.GetJob(jsID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if javascript.Status != "pending" || javascript.StartedAt != "" {
+		t.Fatalf("recovered JavaScript job = %+v, want pending", javascript)
+	}
+}
+
 func TestCompleteJob(t *testing.T) {
 	db := openTestDB(t)
 
 	// Insert a run to reference
 	runID, err := db.InsertRun(&Run{
-		CommitHash: "abc1234",
-		RunDate:    time.Now().UTC().Format(time.RFC3339),
+		CommitHash:     "abc1234",
+		CommitHashFull: "abc1234-full",
+		RunDate:        time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
 
-	jobID, _ := db.InsertJob(&Job{
-		Status: "running", Kind: "benchmark", Branch: "main",
-		RepoURL: "origin", Samples: 3, Profile: "cpu",
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-	})
+	claimed := claimTestJob(t, db)
+	if err := db.UpdateJobCommitHash(context.Background(), claimed.ID, claimed.ClaimToken, "abc1234-full"); err != nil {
+		t.Fatal(err)
+	}
 
-	err = db.CompleteJob(jobID, runID)
+	err = db.CompleteJob(context.Background(), claimed.ID, claimed.ClaimToken, runID)
 	if err != nil {
 		t.Fatalf("complete job: %v", err)
 	}
 
-	got, err := db.GetJob(jobID)
+	got, err := db.GetJob(claimed.ID)
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
@@ -557,21 +698,70 @@ func TestCompleteJob(t *testing.T) {
 	}
 }
 
+func TestCompleteJobRejectsWrongCommitOrBenchmarkIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  Run
+	}{
+		{name: "commit", run: Run{CommitHash: "other", CommitHashFull: "other"}},
+		{name: "kind", run: Run{CommitHash: "wanted", CommitHashFull: "wanted", BenchmarkKind: "js"}},
+		{name: "suite", run: Run{CommitHash: "wanted", CommitHashFull: "wanted", BenchmarkSuite: "other"}},
+		{name: "protocol", run: Run{CommitHash: "wanted", CommitHashFull: "wanted", ProtocolVersion: 2}},
+		{name: "manifest", run: Run{CommitHash: "wanted", CommitHashFull: "wanted", ManifestHash: "other"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database := openTestDB(t)
+			claimed := claimTestJob(t, database)
+			if err := database.UpdateJobCommitHash(context.Background(), claimed.ID, claimed.ClaimToken, "wanted"); err != nil {
+				t.Fatal(err)
+			}
+			test.run.RunDate = timeNow()
+			runID, err := database.InsertRun(&test.run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CompleteJob(context.Background(), claimed.ID, claimed.ClaimToken, runID); !errors.Is(err, ErrJobRunMismatch) {
+				t.Fatalf("CompleteJob error = %v, want ErrJobRunMismatch", err)
+			}
+			stored, err := database.GetJob(claimed.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status != "running" || stored.RunID != nil {
+				t.Fatalf("mismatched run completed job: %+v", stored)
+			}
+		})
+	}
+}
+
+func TestClaimedJobTransitionsHonorContextCancellation(t *testing.T) {
+	database := openTestDB(t)
+	claimed := claimTestJob(t, database)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := database.FailJob(ctx, claimed.ID, claimed.ClaimToken, "cancelled"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("FailJob error = %v, want context.Canceled", err)
+	}
+	stored, err := database.GetJob(claimed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "running" {
+		t.Fatalf("cancelled transition changed job: %+v", stored)
+	}
+}
+
 func TestFailJob(t *testing.T) {
 	db := openTestDB(t)
 
-	jobID, _ := db.InsertJob(&Job{
-		Status: "running", Kind: "benchmark", Branch: "main",
-		RepoURL: "origin", Samples: 3, Profile: "cpu",
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-	})
+	claimed := claimTestJob(t, db)
 
-	err := db.FailJob(jobID, "zig build failed: exit code 1")
+	err := db.FailJob(context.Background(), claimed.ID, claimed.ClaimToken, "zig build failed: exit code 1")
 	if err != nil {
 		t.Fatalf("fail job: %v", err)
 	}
 
-	got, err := db.GetJob(jobID)
+	got, err := db.GetJob(claimed.ID)
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
@@ -621,23 +811,119 @@ func TestCancelJob(t *testing.T) {
 func TestUpdateJobCommitHash(t *testing.T) {
 	db := openTestDB(t)
 
-	jobID, _ := db.InsertJob(&Job{
-		Status: "running", Kind: "benchmark", Branch: "main",
-		RepoURL: "origin", Samples: 3, Profile: "cpu",
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-	})
+	claimed := claimTestJob(t, db)
 
-	err := db.UpdateJobCommitHash(jobID, "deadbeef12345678")
+	err := db.UpdateJobCommitHash(context.Background(), claimed.ID, claimed.ClaimToken, "deadbeef12345678")
 	if err != nil {
 		t.Fatalf("update commit hash: %v", err)
 	}
 
-	got, err := db.GetJob(jobID)
+	got, err := db.GetJob(claimed.ID)
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
 	if got.CommitHash != "deadbeef12345678" {
 		t.Errorf("commit_hash = %q, want deadbeef12345678", got.CommitHash)
+	}
+}
+
+func TestStaleJobClaimCannotMutateReclaimedJob(t *testing.T) {
+	database := openTestDB(t)
+	jobID, err := database.InsertJob(&Job{
+		Status: "pending", Kind: "benchmark", Branch: "main", RepoURL: "origin",
+		Samples: 3, Profile: "cpu", CreatedAt: timeNow(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldClaim, err := database.ClaimNextPendingJob("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET started_at = ? WHERE id = ?`,
+		time.Now().UTC().Add(-JobLeaseDuration-time.Hour).Format(time.RFC3339), jobID); err != nil {
+		t.Fatal(err)
+	}
+	newClaim, err := database.ClaimNextPendingJob("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newClaim == nil || newClaim.ID != jobID || newClaim.ClaimToken == oldClaim.ClaimToken {
+		t.Fatalf("reclaimed job = %+v, old token = %q", newClaim, oldClaim.ClaimToken)
+	}
+
+	runID, err := database.InsertRun(&Run{CommitHash: "abc", RunDate: timeNow()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for name, mutate := range map[string]func() error{
+		"commit hash": func() error {
+			return database.UpdateJobCommitHash(ctx, jobID, oldClaim.ClaimToken, "stale")
+		},
+		"complete": func() error { return database.CompleteJob(ctx, jobID, oldClaim.ClaimToken, runID) },
+		"fail":     func() error { return database.FailJob(ctx, jobID, oldClaim.ClaimToken, "stale") },
+		"release":  func() error { return database.ReleaseJob(ctx, jobID, oldClaim.ClaimToken) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := mutate(); !errors.Is(err, ErrJobClaimLost) {
+				t.Fatalf("error = %v, want ErrJobClaimLost", err)
+			}
+		})
+	}
+	stored, err := database.GetJob(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "running" || stored.ClaimToken != "" || stored.CommitHash != "" || stored.RunID != nil {
+		t.Fatalf("stale worker mutated reclaimed job: %+v", stored)
+	}
+	if err := database.ReleaseJob(ctx, jobID, newClaim.ClaimToken); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := database.ClaimNextPendingJob("")
+	if err != nil || reclaimed == nil || reclaimed.ClaimToken == newClaim.ClaimToken {
+		t.Fatalf("claim after release = %+v, err=%v", reclaimed, err)
+	}
+}
+
+func TestLegacyTokenlessJobTransitionsEndAfterReclaim(t *testing.T) {
+	database := openTestDB(t)
+	unmarkedID := insertStartedTestJob(t, database, Job{Status: "running", Profile: "cpu"}, timeNow())
+	if err := database.FailJob(context.Background(), unmarkedID, "", "not migrated"); !errors.Is(err, ErrJobClaimLost) {
+		t.Fatalf("unmarked tokenless update = %v, want ErrJobClaimLost", err)
+	}
+	jobID := insertStartedTestJob(t, database, Job{Status: "running", Profile: "cpu"}, timeNow())
+	if _, err := database.Exec(`UPDATE jobs SET legacy_tokenless = 1 WHERE id = ?`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := database.UpdateJobCommitHash(ctx, jobID, "", "wanted"); err != nil {
+		t.Fatalf("legacy commit update: %v", err)
+	}
+
+	runID, err := database.InsertRun(&Run{CommitHash: "wanted", CommitHashFull: "wanted", RunDate: timeNow()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteJob(ctx, jobID, "", runID); err != nil {
+		t.Fatalf("legacy completion: %v", err)
+	}
+
+	reclaimedID := insertStartedTestJob(t, database, Job{Status: "running", Profile: "cpu"},
+		time.Now().UTC().Add(-JobLeaseDuration-time.Hour).Format(time.RFC3339))
+	if _, err := database.Exec(`UPDATE jobs SET legacy_tokenless = 1 WHERE id = ?`, reclaimedID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := database.ClaimNextPendingJob("")
+	if err != nil || reclaimed == nil || reclaimed.ID != reclaimedID || reclaimed.ClaimToken == "" {
+		t.Fatalf("reclaimed legacy job = %+v, err=%v", reclaimed, err)
+	}
+	if err := database.FailJob(ctx, reclaimedID, "", "old worker"); !errors.Is(err, ErrJobClaimLost) {
+		t.Fatalf("tokenless update after reclaim = %v, want ErrJobClaimLost", err)
+	}
+	if err := database.FailJob(ctx, reclaimedID, reclaimed.ClaimToken, "new worker"); err != nil {
+		t.Fatalf("claimed failure: %v", err)
 	}
 }
 
@@ -1440,6 +1726,26 @@ func TestOpenRejectsNewerSchemaVersion(t *testing.T) {
 	}
 }
 
+func TestOpenReadOnlyRejectsOlderSchemaVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-read-only.db")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, CurrentSchemaVersion-1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if database, err := OpenReadOnly(path); err == nil {
+		_ = database.Close()
+		t.Fatal("expected older read-only schema rejection")
+	} else if !strings.Contains(err.Error(), "older") || !strings.Contains(err.Error(), "writable") {
+		t.Fatalf("error = %q, want clear migration guidance", err)
+	}
+}
+
 func TestInsertRunWithResultsRollsBackOnSampleConstraint(t *testing.T) {
 	database := openTestDB(t)
 	_, _, err := database.InsertRunWithResults(&Run{CommitHash: "bad", RunDate: "2026-01-01T00:00:00Z"}, []Result{{
@@ -1614,6 +1920,96 @@ func TestVersion5MigrationPreservesDuplicateRunsForRemoteIdempotency(t *testing.
 	}
 }
 
+func TestVersion6ClaimTokenMigrationLeavesRunningRowsLeased(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		dropColumn bool
+	}{
+		{name: "existing claim column"},
+		{name: "missing claim column", dropColumn: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "version-6.db")
+			database, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			jobID, err := database.InsertJob(&Job{
+				Status: "running", Kind: "benchmark", Branch: "main", Samples: 3,
+				Profile: "cpu", CreatedAt: timeNow(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reclaimID, err := database.InsertJob(&Job{
+				Status: "running", Kind: "benchmark", Branch: "main", Samples: 3,
+				Profile: "cpu", CreatedAt: timeNow(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Exec(`UPDATE jobs SET started_at = ?, claim_token = 'preexisting-' || id WHERE id IN (?, ?)`,
+				timeNow(), jobID, reclaimID); err != nil {
+				t.Fatal(err)
+			}
+			if test.dropColumn {
+				if _, err := database.Exec(`DROP INDEX idx_jobs_claim_token; ALTER TABLE jobs DROP COLUMN claim_token; ALTER TABLE jobs DROP COLUMN legacy_tokenless`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := database.Exec(`PRAGMA user_version = 6`); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			database, err = Open(path)
+			if err != nil {
+				t.Fatalf("migrate v6 database: %v", err)
+			}
+			defer func() { _ = database.Close() }()
+			job, err := database.GetJob(jobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.Status != "running" || job.StartedAt == "" || job.ClaimToken != "" {
+				t.Fatalf("migrated running job = %+v, want active job without token material", job)
+			}
+			claimed, err := database.ClaimNextPendingJob("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if claimed != nil {
+				t.Fatalf("migration immediately requeued active job: %+v", claimed)
+			}
+			if err := database.UpdateJobCommitHash(context.Background(), jobID, "", "legacy-commit"); err != nil {
+				t.Fatalf("migrated worker commit update: %v", err)
+			}
+			runID, err := database.InsertRun(&Run{
+				CommitHash: "legacy-commit", CommitHashFull: "legacy-commit", RunDate: timeNow(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CompleteJob(context.Background(), jobID, "", runID); err != nil {
+				t.Fatalf("migrated worker completion: %v", err)
+			}
+			if _, err := database.Exec(`UPDATE jobs SET started_at = ? WHERE id = ?`,
+				time.Now().UTC().Add(-JobLeaseDuration-time.Hour).Format(time.RFC3339), reclaimID); err != nil {
+				t.Fatal(err)
+			}
+			claimed, err = database.ClaimNextPendingJob("")
+			if err != nil || claimed == nil || claimed.ID != reclaimID {
+				t.Fatalf("stale migrated job claim = %+v, err=%v", claimed, err)
+			}
+			if err := database.FailJob(context.Background(), reclaimID, "", "legacy worker"); !errors.Is(err, ErrJobClaimLost) {
+				t.Fatalf("tokenless mutation after migrated job reclaim = %v, want ErrJobClaimLost", err)
+			}
+		})
+	}
+}
+
 func TestConcurrentIdenticalRunSubmissionsCreateOneCompleteRun(t *testing.T) {
 	database := openTestDB(t)
 	concurrent, err := Open(database.Path())
@@ -1699,13 +2095,54 @@ func TestJavaScriptComparableRunsRequireCompleteIdentityMatch(t *testing.T) {
 	}
 }
 
+func TestSameRunCohortUsesMachineAndKindSpecificIdentity(t *testing.T) {
+	base := &Run{
+		MachineID: "runner", BenchmarkKind: "js", BenchmarkSuite: "core-default", ProtocolVersion: 1,
+		BunVersion: "1.3.14", ZigVersion: "0.15.2", ManifestHash: "sha256:a", ZigOptimize: "ignored",
+	}
+	same := *base
+	same.ZigOptimize = "also-ignored"
+	if !SameRunCohort(base, &same) {
+		t.Fatal("JavaScript cohort treated Zig optimization as identity")
+	}
+
+	for name, mutate := range map[string]func(*Run){
+		"machine":  func(run *Run) { run.MachineID = "other" },
+		"kind":     func(run *Run) { run.BenchmarkKind = "zig" },
+		"suite":    func(run *Run) { run.BenchmarkSuite = "other" },
+		"protocol": func(run *Run) { run.ProtocolVersion++ },
+		"bun":      func(run *Run) { run.BunVersion = "1.3.15" },
+		"zig":      func(run *Run) { run.ZigVersion = "0.15.3" },
+		"manifest": func(run *Run) { run.ManifestHash = "sha256:b" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			other := *base
+			mutate(&other)
+			if SameRunCohort(base, &other) {
+				t.Fatalf("different %s accepted as same cohort", name)
+			}
+		})
+	}
+
+	zig := &Run{MachineID: "runner", BenchmarkKind: "zig", BenchmarkSuite: "core-default", ProtocolVersion: 1, ZigOptimize: "ReleaseFast"}
+	otherOptimize := *zig
+	otherOptimize.ZigOptimize = "ReleaseSafe"
+	if SameRunCohort(zig, &otherOptimize) {
+		t.Fatal("different Zig optimization accepted as same cohort")
+	}
+}
+
 func TestFailJobBoundsPersistedError(t *testing.T) {
 	database := openTestDB(t)
-	jobID, err := database.InsertJob(&Job{Status: "running", Kind: "benchmark", Branch: "main", Samples: 3, Profile: "none", CreatedAt: timeNow()})
+	jobID, err := database.InsertJob(&Job{Status: "pending", Kind: "benchmark", Branch: "main", Samples: 3, Profile: "none", CreatedAt: timeNow()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.FailJob(jobID, strings.Repeat("x", 5000)); err != nil {
+	claimed, err := database.ClaimNextPendingJob("")
+	if err != nil || claimed == nil || claimed.ID != jobID {
+		t.Fatalf("claim job: job=%+v err=%v", claimed, err)
+	}
+	if err := database.FailJob(context.Background(), jobID, claimed.ClaimToken, strings.Repeat("x", 5000)); err != nil {
 		t.Fatal(err)
 	}
 	job, err := database.GetJob(jobID)

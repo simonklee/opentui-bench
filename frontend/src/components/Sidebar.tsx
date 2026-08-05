@@ -19,7 +19,10 @@ import {
 const Sidebar: Component = () => {
   const location = useLocation();
   const navigate = useNavigate();
-  const [runs] = createResource(benchmarkKind, (kind) => api.getRuns(1, kind));
+  const [loadedRuns] = createResource(benchmarkKind, async (kind) => ({
+    kind,
+    runs: await api.getRuns(1, kind),
+  }));
 
   const navItemClass =
     "nav-item flex w-full items-center border-0 bg-transparent p-3 text-left text-[13px] font-medium transition-all duration-150 cursor-pointer text-text-muted hover:text-black group border-r-2 border-transparent hover:bg-bg-hover";
@@ -30,9 +33,12 @@ const Sidebar: Component = () => {
     `overflow-hidden whitespace-nowrap transition-all duration-300 ease-in-out font-ui tracking-wide ${isSidebarExpanded() ? "max-w-[150px] opacity-100 ml-3" : "max-w-0 opacity-0"}`;
 
   const handleBenchmarksClick = () => {
-    const id = lastViewedRunId() || (runs() && runs()![0]?.id);
+    const kind = benchmarkKind();
+    const loaded = loadedRuns();
+    const latestRunId = !loadedRuns.loading && loaded?.kind === kind ? loaded.runs[0]?.id : null;
+    const id = lastViewedRunId() || latestRunId;
     if (id) {
-      navigate(`/benchmarks/${id}?benchmark_kind=${benchmarkKind()}`);
+      navigate(`/benchmarks/${id}?benchmark_kind=${kind}`);
     }
   };
 

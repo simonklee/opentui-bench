@@ -79,6 +79,8 @@ export function useBenchmarkDetail() {
 
       if (details.benchmark_kind !== kind) {
         setBenchmarkKind(details.benchmark_kind);
+      }
+      if (firstSearchParam(searchParams.benchmark_kind) !== details.benchmark_kind) {
         setSearchParams({ benchmark_kind: details.benchmark_kind }, { replace: true });
       }
       return details;
@@ -152,34 +154,44 @@ export function useBenchmarkDetail() {
 
   const selectBenchmark = (id: number) => {
     setSelectedBenchmarkId(id);
-    setSearchParams({ ...searchParams, bench_id: id });
+    setSearchParams({
+      ...searchParams,
+      benchmark_kind: run()?.benchmark_kind ?? benchmarkKind(),
+      bench_id: id,
+    });
   };
 
   const closeDetail = () => {
+    const kind = run()?.benchmark_kind ?? benchmarkKind();
     if (searchParams.from === "compare") {
-      const base = searchParams.compare_base;
-      const curr = searchParams.compare_curr;
+      const base = firstSearchParam(searchParams.compare_base);
+      const curr = firstSearchParam(searchParams.compare_curr);
       const params = new URLSearchParams();
-      if (base) params.set("base", base as string);
-      if (curr) params.set("curr", curr as string);
+      params.set("benchmark_kind", kind);
+      if (base) params.set("base", base);
+      if (curr) params.set("curr", curr);
       navigate(`/compare?${params.toString()}`);
       return;
     }
     if (searchParams.from === "regressions") {
       const params = new URLSearchParams();
+      params.set("benchmark_kind", kind);
       const branch = firstSearchParam(searchParams.regression_branch);
       if (branch && branch !== "main") {
         params.set("branch", branch);
       }
-      navigate(params.toString() ? `/?${params.toString()}` : "/");
+      navigate(`/?${params.toString()}`);
       return;
     }
     setSelectedBenchmarkId(null);
-    setSearchParams({ ...searchParams, bench_id: null });
+    setSearchParams({ ...searchParams, benchmark_kind: kind, bench_id: null });
   };
 
   const navigateToBenchmark = (runId: number, resultId: number) => {
-    const query = buildSearchString({ bench_id: resultId });
+    const query = buildSearchString({
+      benchmark_kind: run()?.benchmark_kind ?? benchmarkKind(),
+      bench_id: resultId,
+    });
     navigate(`/benchmarks/${runId}${query ? `?${query}` : ""}`);
   };
 
@@ -224,7 +236,7 @@ export function useBenchmarkDetail() {
     () => {
       const resultId = selectedBenchmark()?.id;
       if (!resultId) return null;
-      return { resultId, limit: 100, kind: benchmarkKind() };
+      return { resultId, limit: 100, kind: run()!.benchmark_kind };
     },
     async ({ resultId, limit, kind }) => {
       return api.getTrend(resultId, limit, kind);

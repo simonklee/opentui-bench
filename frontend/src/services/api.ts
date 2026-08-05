@@ -238,8 +238,20 @@ async function fetchJson<T>(url: string): Promise<T> {
 }
 
 export const api = {
-  getRuns: async (limit = 100, kind: BenchmarkKind = "zig") => {
-    return fetchJson<Run[]>(withBenchmarkKind(`/api/runs?limit=${limit}`, kind));
+  getRuns: async (limit = 100, kind: BenchmarkKind = "zig", identity?: RunIdentity) => {
+    const params = new URLSearchParams({ benchmark_kind: kind, limit: String(limit) });
+    if (identity) {
+      params.set("benchmark_suite", identity.benchmark_suite);
+      params.set("protocol_version", String(identity.protocol_version));
+      params.set("bun_version", identity.bun_version);
+      params.set("zig_version", identity.zig_version);
+      params.set("manifest_hash", identity.manifest_hash);
+      params.set("machine_id", identity.machine_id);
+      if (identity.benchmark_kind === "zig") {
+        params.set("zig_optimize", identity.zig_optimize);
+      }
+    }
+    return fetchJson<Run[]>(`/api/runs?${params}`);
   },
   getRunDetails: async (id: number, kind: BenchmarkKind = "zig") => {
     return fetchJson<RunDetails>(withBenchmarkKind(`/api/runs/${id}`, kind));
@@ -328,9 +340,10 @@ export const api = {
   getBranches: async (kind: BenchmarkKind = "zig") => {
     return fetchJson<string[]>(withBenchmarkKind("/api/branches", kind));
   },
-  getJobs: async (kind: BenchmarkKind, status?: string, limit = 50) => {
+  getJobs: async (kind: BenchmarkKind, status?: string, limit = 50, requestedBy?: string) => {
     const params = new URLSearchParams({ benchmark_kind: kind, limit: String(limit) });
     if (status) params.set("status", status);
+    if (requestedBy) params.set("requested_by", requestedBy);
     return fetchJson<Job[]>(`/api/jobs?${params}`);
   },
 };

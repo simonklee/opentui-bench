@@ -1,6 +1,6 @@
-import { onCleanup, onMount } from "solid-js";
+import { createEffect, onCleanup, onMount } from "solid-js";
 import type { Component, ParentComponent } from "solid-js";
-import { Router, Route } from "@solidjs/router";
+import { Router, Route, useLocation, useNavigate } from "@solidjs/router";
 import Sidebar from "./components/Sidebar";
 import Regressions from "./pages/Regressions";
 import RunsList from "./pages/RunsList";
@@ -8,11 +8,29 @@ import BenchmarkDetail from "./pages/BenchmarkDetail";
 import Compare from "./pages/Compare";
 import HelpModal from "./components/HelpModal";
 import { isHelpOpen, toggleHelp } from "./shortcuts";
-import { isSidebarExpanded, setIsSidebarExpanded } from "./store";
+import {
+  benchmarkKind,
+  benchmarkKindForLocation,
+  isSidebarExpanded,
+  setBenchmarkKind,
+  setIsSidebarExpanded,
+} from "./store";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 
 const Layout: ParentComponent = (props) => {
   useKeyboardShortcuts();
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  createEffect(() => {
+    const kind = benchmarkKindForLocation(location.pathname, location.search);
+    if (kind && kind !== benchmarkKind()) {
+      setBenchmarkKind(kind);
+    }
+    if (location.pathname === "/" && kind === "js") {
+      navigate("/runs?benchmark_kind=js", { replace: true });
+    }
+  });
 
   // Handle window resize to auto-collapse/expand
   const handleResize = () => {

@@ -10,37 +10,34 @@ import (
 	"strings"
 	"time"
 
+	"opentui-bench/internal/jsbench"
 	"opentui-bench/internal/record"
 )
 
 const (
-	JavaScriptSuite        = "core-default"
-	JavaScriptProtocol     = int64(1)
-	JavaScriptBunVersion   = "1.3.14"
-	JavaScriptZigVersion   = "0.15.2"
-	JavaScriptManifestHash = "sha256:0fa487783682b1227bfd4bf735fe1a969ea03f045bb8a68f87c1e41174cb3794"
-	JavaScriptSamples      = 3
-	JavaScriptTimeout      = 75 * time.Second
+	JavaScriptTimeout            = 75 * time.Second
+	JavaScriptToolTimeout        = 10 * time.Second
+	JavaScriptPreparationTimeout = 10 * time.Minute
 )
 
 func runJavaScript(ctx context.Context, cfg RunConfig, meta record.RunMetadata, executor Executor) (*record.ParsedRun, error) {
-	if err := checkToolVersion(ctx, executor, cfg.RepoPath, "bun", "--version", JavaScriptBunVersion); err != nil {
+	if err := checkBunVersion(ctx, executor, cfg.RepoPath); err != nil {
 		return nil, err
 	}
-	if err := checkToolVersion(ctx, executor, cfg.RepoPath, "zig", "version", JavaScriptZigVersion); err != nil {
+	if err := checkToolVersion(ctx, executor, ZigDir(cfg.RepoPath), "zig", "version", jsbench.ZigVersion); err != nil {
 		return nil, err
 	}
 	if err := runPreparation(ctx, executor, cfg.RepoPath, "bun", "install", "--frozen-lockfile"); err != nil {
 		return nil, fmt.Errorf("bun install: %w", err)
 	}
-	if err := runPreparation(ctx, executor, cfg.RepoPath, "bun", "--cwd=packages/core", "run", "build:native"); err != nil {
+	if err := runPreparation(ctx, executor, cfg.RepoPath, "bun", "--no-env-file", "--cwd=packages/core", "run", "build:native"); err != nil {
 		return nil, fmt.Errorf("build native: %w", err)
 	}
 
-	outputs := make([][]byte, 0, JavaScriptSamples)
-	for i := 0; i < JavaScriptSamples; i++ {
+	outputs := make([][]byte, 0, jsbench.Samples)
+	for i := 0; i < jsbench.Samples; i++ {
 		processCtx, cancel := context.WithTimeout(ctx, JavaScriptTimeout)
-		cmd := exec.Command("bun", "--cwd=packages/core", "run", "bench:js", "--format=json")
+		cmd := exec.Command("bun", "--no-env-file", "--cwd=packages/core", "run", "bench:js", "--format=json")
 		cmd.Dir = cfg.RepoPath
 		cmd.Env = canonicalJavaScriptEnv(os.Environ())
 		stdout, stderr, err := executor.Output(processCtx, cmd)
@@ -62,10 +59,29 @@ func runJavaScript(ctx context.Context, cfg RunConfig, meta record.RunMetadata, 
 	return parsed, nil
 }
 
-func checkToolVersion(ctx context.Context, executor Executor, dir, name, arg, want string) error {
-	cmd := exec.CommandContext(ctx, name, arg)
+func checkBunVersion(ctx context.Context, executor Executor, dir string) error {
+	checkCtx, cancel := context.WithTimeout(ctx, JavaScriptToolTimeout)
+	defer cancel()
+	cmd := exec.Command("bun", "--revision")
 	cmd.Dir = dir
-	stdout, stderr, err := executor.Output(ctx, cmd)
+	stdout, stderr, err := executor.Output(checkCtx, cmd)
+	if err != nil {
+		return fmt.Errorf("check bun version: %w: %s", err, strings.TrimSpace(string(stderr)))
+	}
+	revision := strings.TrimSpace(string(stdout))
+	version, _, hasRevision := strings.Cut(revision, "+")
+	if !hasRevision || version != jsbench.BunVersion {
+		return fmt.Errorf("bun revision = %q, want stable %s", revision, jsbench.BunVersion)
+	}
+	return nil
+}
+
+func checkToolVersion(ctx context.Context, executor Executor, dir, name, arg, want string) error {
+	checkCtx, cancel := context.WithTimeout(ctx, JavaScriptToolTimeout)
+	defer cancel()
+	cmd := exec.Command(name, arg)
+	cmd.Dir = dir
+	stdout, stderr, err := executor.Output(checkCtx, cmd)
 	if err != nil {
 		return fmt.Errorf("check %s version: %w: %s", name, err, strings.TrimSpace(string(stderr)))
 	}
@@ -76,9 +92,11 @@ func checkToolVersion(ctx context.Context, executor Executor, dir, name, arg, wa
 }
 
 func runPreparation(ctx context.Context, executor Executor, dir, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+	preparationCtx, cancel := context.WithTimeout(ctx, JavaScriptPreparationTimeout)
+	defer cancel()
+	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	stdout, stderr, err := executor.Output(ctx, cmd)
+	stdout, stderr, err := executor.Output(preparationCtx, cmd)
 	if err != nil {
 		diagnostics := strings.TrimSpace(string(stderr))
 		if diagnostics == "" {

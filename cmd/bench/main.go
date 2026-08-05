@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,12 +10,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"opentui-bench/internal/cache"
 	"opentui-bench/internal/db"
+	"opentui-bench/internal/jsbench"
 	"opentui-bench/internal/runner"
 	"opentui-bench/internal/web"
 )
@@ -102,6 +105,7 @@ Remote usage:
 
 			cfg.Profile = runner.ProfileMode(profileStr)
 			cfg.BenchmarkKind = runner.BenchmarkKind(benchmarkKind)
+			applyRecordDefaults(cmd, &cfg)
 			switch cfg.Profile {
 			case runner.ProfileNone, runner.ProfileCPU:
 			default:
@@ -156,6 +160,12 @@ Remote usage:
 	return cmd
 }
 
+func applyRecordDefaults(cmd *cobra.Command, cfg *runner.RunConfig) {
+	if cfg.BenchmarkKind == runner.BenchmarkJS && !cmd.Flags().Changed("samples") {
+		cfg.Samples = jsbench.Samples
+	}
+}
+
 func recordRemote(ctx context.Context, cfg runner.RunConfig, apiURL, apiKey string) error {
 	parsed, artifacts, err := runner.RunAndCollect(ctx, cfg)
 	if err != nil {
@@ -167,7 +177,7 @@ func recordRemote(ctx context.Context, cfg runner.RunConfig, apiURL, apiKey stri
 		APIKey:  apiKey,
 	}
 
-	runID, resultIDs, err := remote.RecordRun(parsed)
+	runID, resultIDs, err := remote.RecordRun(ctx, parsed)
 	if err != nil {
 		return fmt.Errorf("post results to API: %w", err)
 	}
@@ -182,7 +192,7 @@ func recordRemote(ctx context.Context, cfg runner.RunConfig, apiURL, apiKey stri
 			uploadErrors = append(uploadErrors, fmt.Sprintf("no result ID for artifact %s/%s", art.Benchmark.Category, art.Benchmark.Name))
 			continue
 		}
-		if err := remote.UploadArtifact(runID, resultID, art); err != nil {
+		if err := remote.UploadArtifact(ctx, runID, resultID, art); err != nil {
 			uploadErrors = append(uploadErrors, fmt.Sprintf("upload %s/%s: %v", art.Benchmark.Category, art.Benchmark.Name, err))
 			continue
 		}
@@ -194,7 +204,7 @@ func recordRemote(ctx context.Context, cfg runner.RunConfig, apiURL, apiKey stri
 	}
 
 	if len(artifacts) > 0 {
-		if err := remote.FinalizeArtifacts(runID); err != nil {
+		if err := remote.FinalizeArtifacts(ctx, runID); err != nil {
 			uploadErrors = append(uploadErrors, err.Error())
 		}
 	}
@@ -205,9 +215,16 @@ func recordRemote(ctx context.Context, cfg runner.RunConfig, apiURL, apiKey stri
 	return nil
 }
 
+func benchmarkRunFilter(kind string) (db.RunFilter, error) {
+	if kind != string(runner.BenchmarkZig) && kind != string(runner.BenchmarkJS) {
+		return db.RunFilter{}, fmt.Errorf("kind must be 'zig' or 'js'")
+	}
+	return db.RunFilter{BenchmarkKind: kind}, nil
+}
+
 func listCmd() *cobra.Command {
 	var limit int
-	var branch, since string
+	var branch, since, benchmarkKind string
 
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -219,7 +236,11 @@ func listCmd() *cobra.Command {
 			}
 			defer cleanup()
 
-			runs, err := database.ListRuns(limit, branch, since)
+			filter, err := benchmarkRunFilter(benchmarkKind)
+			if err != nil {
+				return err
+			}
+			runs, err := database.ListRunsFiltered(limit, branch, since, filter)
 			if err != nil {
 				return err
 			}
@@ -255,11 +276,13 @@ func listCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 10, "max runs to show")
 	cmd.Flags().StringVar(&branch, "branch", "", "filter by branch")
 	cmd.Flags().StringVar(&since, "since", "", "filter runs since date (YYYY-MM-DD)")
+	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
 
 	return cmd
 }
 
 func showCmd() *cobra.Command {
+	var benchmarkKind string
 	cmd := &cobra.Command{
 		Use:   "show [run_id or commit]",
 		Short: "Show details of a run",
@@ -270,6 +293,10 @@ func showCmd() *cobra.Command {
 				return err
 			}
 			defer cleanup()
+			filter, err := benchmarkRunFilter(benchmarkKind)
+			if err != nil {
+				return err
+			}
 
 			var run *db.Run
 			if id, err := strconv.ParseInt(args[0], 10, 64); err == nil {
@@ -277,11 +304,19 @@ func showCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("run not found: %w", err)
 				}
+				if run.BenchmarkKind != filter.BenchmarkKind {
+					return fmt.Errorf("run not found for kind %s", filter.BenchmarkKind)
+				}
 			} else {
-				run, err = database.GetRunByCommit(args[0])
+				run, err = database.GetRunByCommitFiltered(args[0], filter)
 				if err != nil {
 					return fmt.Errorf("run not found for commit: %w", err)
 				}
+			}
+
+			results, err := database.GetResultsForRun(run.ID)
+			if err != nil {
+				return err
 			}
 
 			fmt.Printf("Run #%d\n", run.ID)
@@ -292,24 +327,23 @@ func showCmd() *cobra.Command {
 			if run.Notes != "" {
 				fmt.Printf("Notes:   %s\n", run.Notes)
 			}
-			fmt.Println()
-
-			results, err := database.GetResultsForRun(run.ID)
-			if err != nil {
-				return err
+			if benchmarkKind == string(runner.BenchmarkJS) {
+				printJavaScriptRunDetails(run, results)
 			}
+			fmt.Println()
 
 			printResults(results)
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
 
 	return cmd
 }
 
 func compareCmd() *cobra.Command {
 	var threshold float64
-	var filter string
+	var filter, benchmarkKind string
 
 	cmd := &cobra.Command{
 		Use:   "compare [commit1] [commit2]",
@@ -321,27 +355,34 @@ func compareCmd() *cobra.Command {
 				return err
 			}
 			defer cleanup()
+			runFilter, err := benchmarkRunFilter(benchmarkKind)
+			if err != nil {
+				return err
+			}
 
 			var run1, run2 *db.Run
 
 			if len(args) == 1 {
-				run2, err = database.GetLatestRun()
+				run2, err = database.GetLatestRunFiltered("", runFilter)
 				if err != nil {
 					return fmt.Errorf("no runs found: %w", err)
 				}
-				run1, err = database.GetRunByCommit(args[0])
+				run1, err = database.GetRunByCommitFiltered(args[0], runFilter)
 				if err != nil {
 					return fmt.Errorf("baseline not found: %w", err)
 				}
 			} else {
-				run1, err = database.GetRunByCommit(args[0])
+				run1, err = database.GetRunByCommitFiltered(args[0], runFilter)
 				if err != nil {
 					return fmt.Errorf("run1 not found: %w", err)
 				}
-				run2, err = database.GetRunByCommit(args[1])
+				run2, err = database.GetRunByCommitFiltered(args[1], runFilter)
 				if err != nil {
 					return fmt.Errorf("run2 not found: %w", err)
 				}
+			}
+			if !db.SameRunCohort(run1, run2) {
+				return fmt.Errorf("runs have different benchmark cohorts")
 			}
 
 			results1, err := database.GetResultsForRun(run1.ID)
@@ -356,7 +397,11 @@ func compareCmd() *cobra.Command {
 			fmt.Printf("Comparing %s vs %s\n", run1.CommitHash, run2.CommitHash)
 			fmt.Printf("Baseline: %s (%s)\n", run1.CommitHash, shortDate(run1.RunDate))
 			fmt.Printf("Current:  %s (%s)\n", run2.CommitHash, shortDate(run2.RunDate))
-			fmt.Printf("Threshold: %.1f%%\n\n", threshold)
+			if benchmarkKind == string(runner.BenchmarkZig) {
+				fmt.Printf("Threshold: %.1f%%\n\n", threshold)
+			} else {
+				fmt.Print("Inference/regression classification is disabled pending qualification.\n\n")
+			}
 
 			results2Map := make(map[db.BenchmarkKey]db.Result)
 			for _, r := range results2 {
@@ -400,15 +445,15 @@ func compareCmd() *cobra.Command {
 					continue
 				}
 
-				indicator := ""
-				if change > threshold {
-					indicator = fmt.Sprintf("+%.1f%% REGRESSION", change)
-					regressions++
-				} else if change < -5 {
-					indicator = fmt.Sprintf("%.1f%%", change)
-					improvements++
-				} else {
-					indicator = fmt.Sprintf("%+.1f%%", change)
+				indicator := fmt.Sprintf("%+.1f%%", change)
+				if benchmarkKind == string(runner.BenchmarkZig) {
+					if change > threshold {
+						indicator = fmt.Sprintf("+%.1f%% REGRESSION", change)
+						regressions++
+					} else if change < -5 {
+						indicator = fmt.Sprintf("%.1f%%", change)
+						improvements++
+					}
 				}
 
 				fmt.Printf("%-50s %12s %12s %10s\n",
@@ -418,13 +463,16 @@ func compareCmd() *cobra.Command {
 					indicator)
 			}
 
-			fmt.Printf("\nSummary: %d regressions, %d improvements\n", regressions, improvements)
+			if benchmarkKind == string(runner.BenchmarkZig) {
+				fmt.Printf("\nSummary: %d regressions, %d improvements\n", regressions, improvements)
+			}
 			return nil
 		},
 	}
 
 	cmd.Flags().Float64Var(&threshold, "threshold", 10, "regression threshold percentage")
 	cmd.Flags().StringVar(&filter, "filter", "", "filter benchmarks by name")
+	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
 
 	return cmd
 }
@@ -634,6 +682,7 @@ func serveCmd() *cobra.Command {
 }
 
 func hasCommitCmd() *cobra.Command {
+	var benchmarkKind string
 	cmd := &cobra.Command{
 		Use:   "has-commit [commit_hash_full]",
 		Short: "Check if a commit has been recorded (exit 0 if exists, 1 if not)",
@@ -645,7 +694,11 @@ func hasCommitCmd() *cobra.Command {
 			}
 			defer cleanup()
 
-			exists, err := database.HasCommit(args[0])
+			filter, err := benchmarkRunFilter(benchmarkKind)
+			if err != nil {
+				return err
+			}
+			exists, err := database.HasCommitFiltered(args[0], filter)
 			if err != nil {
 				return err
 			}
@@ -658,11 +711,13 @@ func hasCommitCmd() *cobra.Command {
 			return fmt.Errorf("commit %s not found", shortHash(args[0]))
 		},
 	}
+	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
 
 	return cmd
 }
 
 func latestCommitCmd() *cobra.Command {
+	var benchmarkKind string
 	cmd := &cobra.Command{
 		Use:   "latest-commit",
 		Short: "Print the most recently recorded commit hash (full)",
@@ -673,7 +728,11 @@ func latestCommitCmd() *cobra.Command {
 			}
 			defer cleanup()
 
-			run, err := database.GetLatestRun()
+			filter, err := benchmarkRunFilter(benchmarkKind)
+			if err != nil {
+				return err
+			}
+			run, err := database.GetLatestRunFiltered("", filter)
 			if err != nil {
 				return fmt.Errorf("no recorded commits")
 			}
@@ -682,6 +741,7 @@ func latestCommitCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
 
 	return cmd
 }
@@ -692,7 +752,7 @@ func backfillCmd() *cobra.Command {
 	var dryRun bool
 	var flamegraph bool
 	var cfg runner.RunConfig
-	var profileStr string
+	var profileStr, benchmarkKind string
 
 	cmd := &cobra.Command{
 		Use:   "backfill",
@@ -722,6 +782,10 @@ Example:
 			defer cleanup()
 
 			cfg.Profile = runner.ProfileMode(profileStr)
+			cfg.BenchmarkKind = runner.BenchmarkKind(benchmarkKind)
+			if _, err := benchmarkRunFilter(benchmarkKind); err != nil {
+				return err
+			}
 			switch cfg.Profile {
 			case runner.ProfileNone, runner.ProfileCPU:
 			default:
@@ -749,6 +813,7 @@ Example:
 	cmd.Flags().BoolVar(&flamegraph, "flamegraph", false, "deprecated: use --profile cpu")
 	cmd.Flags().StringVar(&profileStr, "profile", string(runner.ProfileNone), "profile mode (none, cpu)")
 	cmd.Flags().IntVar(&cfg.PerfFreq, "perf-freq", 997, "perf sampling frequency")
+	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
 
 	if err := cmd.MarkFlagRequired("repo"); err != nil {
 		panic(err)
@@ -783,7 +848,7 @@ func flamegraphListCmd() *cobra.Command {
 			}
 			defer cleanup()
 
-			run, err := database.GetRunByCommit(args[0])
+			run, err := database.GetRunByCommitFiltered(args[0], db.RunFilter{BenchmarkKind: string(runner.BenchmarkZig)})
 			if err != nil {
 				return fmt.Errorf("run not found: %w", err)
 			}
@@ -823,7 +888,7 @@ func flamegraphSVGCmd() *cobra.Command {
 			}
 			defer cleanup()
 
-			run, err := database.GetRunByCommit(args[0])
+			run, err := database.GetRunByCommitFiltered(args[0], db.RunFilter{BenchmarkKind: string(runner.BenchmarkZig)})
 			if err != nil {
 				return fmt.Errorf("run not found: %w", err)
 			}
@@ -868,7 +933,7 @@ func flamegraphStacksCmd() *cobra.Command {
 			}
 			defer cleanup()
 
-			run, err := database.GetRunByCommit(args[0])
+			run, err := database.GetRunByCommitFiltered(args[0], db.RunFilter{BenchmarkKind: string(runner.BenchmarkZig)})
 			if err != nil {
 				return fmt.Errorf("run not found: %w", err)
 			}
@@ -898,12 +963,12 @@ func flamegraphDiffCmd() *cobra.Command {
 			}
 			defer cleanup()
 
-			run1, err := database.GetRunByCommit(args[0])
+			run1, err := database.GetRunByCommitFiltered(args[0], db.RunFilter{BenchmarkKind: string(runner.BenchmarkZig)})
 			if err != nil {
 				return fmt.Errorf("run1 not found: %w", err)
 			}
 
-			run2, err := database.GetRunByCommit(args[1])
+			run2, err := database.GetRunByCommitFiltered(args[1], db.RunFilter{BenchmarkKind: string(runner.BenchmarkZig)})
 			if err != nil {
 				return fmt.Errorf("run2 not found: %w", err)
 			}
@@ -966,7 +1031,7 @@ func workerCmd() *cobra.Command {
 	var repoPath string
 	var pollInterval time.Duration
 	var once bool
-	var apiURL, apiKey string
+	var apiURL, apiKey, benchmarkKind string
 
 	cmd := &cobra.Command{
 		Use:   "worker",
@@ -995,8 +1060,13 @@ Example:
 			if repoPath == "" {
 				return fmt.Errorf("repo path required")
 			}
+			if benchmarkKind != "" {
+				if _, err := benchmarkRunFilter(benchmarkKind); err != nil {
+					return err
+				}
+			}
 
-			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt)
+			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
 			if apiURL != "" {
@@ -1005,7 +1075,7 @@ Example:
 					BaseURL: apiURL,
 					APIKey:  apiKey,
 				}
-				return runWorkerRemote(ctx, remote, repoPath, pollInterval, once)
+				return runWorkerRemote(ctx, remote, repoPath, pollInterval, once, benchmarkKind)
 			}
 
 			// Local mode
@@ -1015,7 +1085,7 @@ Example:
 			}
 			defer cleanup()
 
-			return runWorkerLocal(ctx, database, repoPath, pollInterval, once)
+			return runWorkerLocal(ctx, database, repoPath, pollInterval, once, benchmarkKind)
 		},
 	}
 
@@ -1024,6 +1094,7 @@ Example:
 	cmd.Flags().BoolVar(&once, "once", false, "process one job and exit")
 	cmd.Flags().StringVar(&apiURL, "api-url", "", "remote API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key for remote auth")
+	cmd.Flags().StringVar(&benchmarkKind, "kind", "", "claim only one benchmark kind (zig, js)")
 
 	if err := cmd.MarkFlagRequired("repo"); err != nil {
 		panic(err)
@@ -1032,15 +1103,55 @@ Example:
 	return cmd
 }
 
+const (
+	workerStatusTimeout      = 10 * time.Second
+	repositoryRestoreTimeout = 15 * time.Second
+)
+
+func workerStatusContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), workerStatusTimeout)
+}
+
+func completeLocalJob(ctx context.Context, database *db.DB, job *db.Job, runID int64) error {
+	statusCtx, cancel := workerStatusContext(ctx)
+	defer cancel()
+	return database.CompleteJob(statusCtx, job.ID, job.ClaimToken, runID)
+}
+
+func updateRemoteJobAfterExecution(ctx context.Context, remote *runner.RemoteRecorder, job *runner.JobClaimResponse, runID int64, jobErr error) (bool, error) {
+	if errors.Is(jobErr, runner.ErrJobClaimLost) {
+		return false, nil
+	}
+
+	shutdownErr := ctx.Err()
+	interrupted := shutdownErr != nil && errors.Is(jobErr, shutdownErr)
+	completed := jobErr == nil || (runID != 0 && interrupted)
+
+	statusCtx, cancel := workerStatusContext(ctx)
+	defer cancel()
+	if completed {
+		return completed, remote.CompleteJob(statusCtx, job.ID, job.ClaimToken, runID)
+	}
+	if interrupted {
+		return completed, remote.ReleaseJob(statusCtx, job.ID, job.ClaimToken)
+	}
+	return completed, remote.FailJob(statusCtx, job.ID, job.ClaimToken, jobErr.Error())
+}
+
 // runWorkerLocal is the existing local-DB worker loop.
-func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollInterval time.Duration, once bool) error {
+func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollInterval time.Duration, once bool, benchmarkKind string) error {
 	zigDir := filepath.Join(repoPath, "packages/core/src/zig")
 	if _, err := os.Stat(zigDir); os.IsNotExist(err) {
 		return fmt.Errorf("zig directory not found: %s", zigDir)
 	}
 
 	for {
-		job, err := database.ClaimNextPendingJob()
+		if ctx.Err() != nil {
+			fmt.Println("Worker stopped")
+			return nil
+		}
+		runPersisted := false
+		job, err := database.ClaimNextPendingJob(benchmarkKind)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error claiming job: %v\n", err)
 			if once {
@@ -1063,9 +1174,18 @@ func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollI
 		}
 		fmt.Println()
 
-		if err := executeJobLocal(ctx, database, job, repoPath); err != nil {
+		runPersisted, err = executeJobLocal(ctx, database, job, repoPath)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "job #%d failed: %v\n", job.ID, err)
-			if dbErr := database.FailJob(job.ID, err.Error()); dbErr != nil {
+			statusCtx, cancel := workerStatusContext(ctx)
+			var dbErr error
+			if ctx.Err() != nil && !runPersisted {
+				dbErr = database.ReleaseJob(statusCtx, job.ID, job.ClaimToken)
+			} else if !runPersisted {
+				dbErr = database.FailJob(statusCtx, job.ID, job.ClaimToken, err.Error())
+			}
+			cancel()
+			if dbErr != nil {
 				fmt.Fprintf(os.Stderr, "failed to update job status: %v\n", dbErr)
 			}
 		}
@@ -1086,60 +1206,50 @@ func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollI
 	}
 }
 
-func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath string) error {
+func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath string) (bool, error) {
 	repoURL := job.RepoURL
 	if repoURL == "" {
 		repoURL = "origin"
 	}
 
 	// Resolve the commit to check out
-	checkoutRef := job.CommitHash
-	if checkoutRef == "" {
-		checkoutRef, _ = fetchAndResolve(ctx, repoPath, repoURL, job.Branch)
-		if checkoutRef == "" {
-			return fmt.Errorf("resolve %s branch %s: could not determine commit", repoURL, job.Branch)
-		}
-		// Record the resolved commit on the job
-		if err := database.UpdateJobCommitHash(job.ID, checkoutRef); err != nil {
-			return fmt.Errorf("update job commit hash: %w", err)
-		}
+	checkoutRef, err := resolveJobCommit(ctx, repoPath, repoURL, job.Branch, job.CommitHash)
+	if err != nil {
+		return false, err
+	}
+	if err := database.UpdateJobCommitHash(ctx, job.ID, job.ClaimToken, checkoutRef); err != nil {
+		return false, fmt.Errorf("update job commit hash: %w", err)
+	}
+	if job.CommitHash == "" {
 		fmt.Printf("  Resolved %s/%s to %s\n", repoURL, job.Branch, shortHash(checkoutRef))
-	} else {
-		fmt.Fprintf(os.Stderr, "  Fetching %s...\n", repoURL)
-		if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL); err != nil {
-			return fmt.Errorf("git fetch: %w", err)
-		}
 	}
 
 	// Save current HEAD so we can restore after
 	origHead, err := runGitCommand(ctx, repoPath, "rev-parse", "HEAD")
 	if err != nil {
-		return fmt.Errorf("get HEAD: %w", err)
+		return false, fmt.Errorf("get HEAD: %w", err)
 	}
 	origHead = strings.TrimSpace(origHead)
 
 	// Check for dirty tracked files (ignore untracked)
 	status, err := runGitCommand(ctx, repoPath, "status", "--porcelain", "--untracked-files=no")
 	if err != nil {
-		return fmt.Errorf("git status: %w", err)
+		return false, fmt.Errorf("git status: %w", err)
 	}
 	if strings.TrimSpace(status) != "" {
-		return fmt.Errorf("opentui repo has uncommitted changes to tracked files")
+		return false, fmt.Errorf("opentui repo has uncommitted changes to tracked files")
 	}
 
 	// Checkout the target commit
 	fmt.Printf("  Checking out %s...\n", shortHash(checkoutRef))
 	if _, err := runGitCommand(ctx, repoPath, "checkout", checkoutRef); err != nil {
-		return fmt.Errorf("git checkout: %w", err)
+		return false, fmt.Errorf("git checkout: %w", err)
 	}
 
 	// Ensure we restore the repo on exit
 	defer func() {
-		if _, err := runGitCommand(ctx, repoPath, "checkout", origHead); err != nil {
+		if err := restoreRepository(ctx, repoPath, origHead); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to restore checkout to %s: %v\n", shortHash(origHead), err)
-		}
-		if _, err := runGitCommand(ctx, repoPath, "reset", "--hard", "HEAD"); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to reset HEAD: %v\n", err)
 		}
 	}()
 
@@ -1167,27 +1277,36 @@ func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath
 	fmt.Printf("  Running benchmarks (samples=%d, profile=%s)...\n", cfg.Samples, cfg.Profile)
 	runID, err := runner.Run(ctx, database, cfg)
 	if err != nil {
-		return fmt.Errorf("benchmark run failed: %w", err)
+		return false, fmt.Errorf("benchmark run failed: %w", err)
 	}
 
 	// Mark job completed
-	if err := database.CompleteJob(job.ID, runID); err != nil {
-		return fmt.Errorf("complete job: %w", err)
+	if err := completeLocalJob(ctx, database, job, runID); err != nil {
+		return true, fmt.Errorf("complete job: %w", err)
 	}
 
 	fmt.Printf("  Job #%d completed (Run #%d)\n", job.ID, runID)
-	return nil
+	return true, nil
 }
 
 // runWorkerRemote is the remote-API worker loop.
-func runWorkerRemote(ctx context.Context, remote *runner.RemoteRecorder, repoPath string, pollInterval time.Duration, once bool) error {
+func runWorkerRemote(ctx context.Context, remote *runner.RemoteRecorder, repoPath string, pollInterval time.Duration, once bool, benchmarkKind string) error {
 	zigDir := filepath.Join(repoPath, "packages/core/src/zig")
 	if _, err := os.Stat(zigDir); os.IsNotExist(err) {
 		return fmt.Errorf("zig directory not found: %s", zigDir)
 	}
 
 	for {
-		job, err := remote.ClaimJob()
+		var runID int64
+		var jobErr error
+		var completed bool
+		var updateErr error
+
+		if ctx.Err() != nil {
+			fmt.Println("Worker stopped")
+			return nil
+		}
+		job, err := remote.ClaimJob(ctx, benchmarkKind)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error claiming job: %v\n", err)
 			if once {
@@ -1210,17 +1329,22 @@ func runWorkerRemote(ctx context.Context, remote *runner.RemoteRecorder, repoPat
 		}
 		fmt.Println()
 
-		if err := executeJobRemote(ctx, remote, job, repoPath); err != nil {
-			fmt.Fprintf(os.Stderr, "job #%d failed: %v\n", job.ID, err)
-			if updateErr := remote.UpdateJob(job.ID, map[string]interface{}{
-				"status": "failed",
-				"error":  err.Error(),
-			}); updateErr != nil {
+		runID, jobErr = executeJobRemote(ctx, remote, job, repoPath)
+		if jobErr != nil {
+			fmt.Fprintf(os.Stderr, "job #%d failed: %v\n", job.ID, jobErr)
+		}
+		completed, updateErr = updateRemoteJobAfterExecution(ctx, remote, job, runID, jobErr)
+		if updateErr != nil {
+			if jobErr == nil {
+				jobErr = fmt.Errorf("complete job: %w", updateErr)
+			} else {
 				fmt.Fprintf(os.Stderr, "failed to update job status: %v\n", updateErr)
 			}
-			if once {
-				return err
-			}
+		} else if completed {
+			fmt.Printf("  Job #%d completed (Run #%d)\n", job.ID, runID)
+		}
+		if once && jobErr != nil {
+			return jobErr
 		}
 
 		if once {
@@ -1239,7 +1363,7 @@ func runWorkerRemote(ctx context.Context, remote *runner.RemoteRecorder, repoPat
 	}
 }
 
-func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *runner.JobClaimResponse, repoPath string) error {
+func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *runner.JobClaimResponse, repoPath string) (int64, error) {
 	// Fetch the branch/remote
 	repoURL := job.RepoURL
 	if repoURL == "" {
@@ -1247,56 +1371,46 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 	}
 
 	// Resolve the commit to check out
-	checkoutRef := job.CommitHash
-	if checkoutRef == "" {
-		checkoutRef, _ = fetchAndResolve(ctx, repoPath, repoURL, job.Branch)
-		if checkoutRef == "" {
-			return fmt.Errorf("resolve %s branch %s: could not determine commit", repoURL, job.Branch)
-		}
-		// Record the resolved commit on the job
-		if err := remote.UpdateJob(job.ID, map[string]interface{}{
-			"status":      "running",
-			"commit_hash": checkoutRef,
-		}); err != nil {
-			return fmt.Errorf("update job commit hash: %w", err)
-		}
+	checkoutRef, err := resolveJobCommit(ctx, repoPath, repoURL, job.Branch, job.CommitHash)
+	if err != nil {
+		return 0, err
+	}
+	if err := remote.UpdateJob(ctx, job.ID, job.ClaimToken, map[string]interface{}{
+		"status":      "running",
+		"commit_hash": checkoutRef,
+	}); err != nil {
+		return 0, fmt.Errorf("update job commit hash: %w", err)
+	}
+	if job.CommitHash == "" {
 		fmt.Printf("  Resolved %s/%s to %s\n", repoURL, job.Branch, shortHash(checkoutRef))
-	} else {
-		fmt.Fprintf(os.Stderr, "  Fetching %s...\n", repoURL)
-		if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL); err != nil {
-			return fmt.Errorf("git fetch: %w", err)
-		}
 	}
 
 	// Save current HEAD so we can restore after
 	origHead, err := runGitCommand(ctx, repoPath, "rev-parse", "HEAD")
 	if err != nil {
-		return fmt.Errorf("get HEAD: %w", err)
+		return 0, fmt.Errorf("get HEAD: %w", err)
 	}
 	origHead = strings.TrimSpace(origHead)
 
 	// Check for dirty tracked files (ignore untracked)
 	status, err := runGitCommand(ctx, repoPath, "status", "--porcelain", "--untracked-files=no")
 	if err != nil {
-		return fmt.Errorf("git status: %w", err)
+		return 0, fmt.Errorf("git status: %w", err)
 	}
 	if strings.TrimSpace(status) != "" {
-		return fmt.Errorf("opentui repo has uncommitted changes to tracked files")
+		return 0, fmt.Errorf("opentui repo has uncommitted changes to tracked files")
 	}
 
 	// Checkout the target commit
 	fmt.Printf("  Checking out %s...\n", shortHash(checkoutRef))
 	if _, err := runGitCommand(ctx, repoPath, "checkout", checkoutRef); err != nil {
-		return fmt.Errorf("git checkout: %w", err)
+		return 0, fmt.Errorf("git checkout: %w", err)
 	}
 
 	// Ensure we restore the repo on exit
 	defer func() {
-		if _, err := runGitCommand(ctx, repoPath, "checkout", origHead); err != nil {
+		if err := restoreRepository(ctx, repoPath, origHead); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to restore checkout to %s: %v\n", shortHash(origHead), err)
-		}
-		if _, err := runGitCommand(ctx, repoPath, "reset", "--hard", "HEAD"); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to reset HEAD: %v\n", err)
 		}
 	}()
 
@@ -1324,46 +1438,49 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 	fmt.Printf("  Running benchmarks (samples=%d, profile=%s)...\n", cfg.Samples, cfg.Profile)
 	parsed, artifacts, err := runner.RunAndCollect(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("benchmark run failed: %w", err)
+		return 0, fmt.Errorf("benchmark run failed: %w", err)
 	}
 
 	// POST results to API
-	runID, resultIDs, err := remote.RecordRun(parsed)
+	runID, resultIDs, err := remote.RecordRun(ctx, parsed)
 	if err != nil {
-		return fmt.Errorf("post results to API: %w", err)
+		return 0, fmt.Errorf("post results to API: %w", err)
 	}
 
 	// Upload artifacts
 	var uploadErrors []string
+	cancellationOnly := true
 	for _, art := range artifacts {
 		resultID, ok := resultIDs[art.Benchmark]
 		if !ok {
 			uploadErrors = append(uploadErrors, fmt.Sprintf("no result ID for artifact %s/%s", art.Benchmark.Category, art.Benchmark.Name))
+			cancellationOnly = false
 			continue
 		}
-		if err := remote.UploadArtifact(runID, resultID, art); err != nil {
+		if err := remote.UploadArtifact(ctx, runID, resultID, art); err != nil {
 			uploadErrors = append(uploadErrors, fmt.Sprintf("upload %s/%s: %v", art.Benchmark.Category, art.Benchmark.Name, err))
+			if ctx.Err() == nil || !errors.Is(err, ctx.Err()) {
+				cancellationOnly = false
+			}
 		}
 	}
 	if len(artifacts) > 0 {
-		if err := remote.FinalizeArtifacts(runID); err != nil {
+		if err := remote.FinalizeArtifacts(ctx, runID); err != nil {
 			uploadErrors = append(uploadErrors, err.Error())
+			if ctx.Err() == nil || !errors.Is(err, ctx.Err()) {
+				cancellationOnly = false
+			}
 		}
 	}
 	if len(uploadErrors) > 0 {
-		return fmt.Errorf("artifact upload errors or finalization errors (%d): %s", len(uploadErrors), strings.Join(uploadErrors, "; "))
+		message := fmt.Sprintf("artifact upload errors or finalization errors (%d): %s", len(uploadErrors), strings.Join(uploadErrors, "; "))
+		if cancellationOnly && ctx.Err() != nil {
+			return runID, fmt.Errorf("%s: %w", message, ctx.Err())
+		}
+		return runID, errors.New(message)
 	}
 
-	// Mark job completed
-	if err := remote.UpdateJob(job.ID, map[string]interface{}{
-		"status": "completed",
-		"run_id": runID,
-	}); err != nil {
-		return fmt.Errorf("complete job: %w", err)
-	}
-
-	fmt.Printf("  Job #%d completed (Run #%d)\n", job.ID, runID)
-	return nil
+	return runID, nil
 }
 
 func triggerCmd() *cobra.Command {
@@ -1386,14 +1503,22 @@ Example:
 				return fmt.Errorf("branch is required")
 			}
 
-			if profile != "none" && profile != "cpu" {
-				return fmt.Errorf("profile must be 'none' or 'cpu'")
-			}
 			if benchmarkKind != string(runner.BenchmarkZig) && benchmarkKind != string(runner.BenchmarkJS) {
 				return fmt.Errorf("kind must be 'zig' or 'js'")
 			}
-			if benchmarkKind == string(runner.BenchmarkJS) && (samples != runner.JavaScriptSamples || profile != string(runner.ProfileNone) ||
-				benchmarkSuite != runner.JavaScriptSuite || protocolVersion != runner.JavaScriptProtocol || manifestHash != runner.JavaScriptManifestHash) {
+			if benchmarkKind == string(runner.BenchmarkJS) {
+				if !cmd.Flags().Changed("profile") {
+					profile = string(runner.ProfileNone)
+				}
+				if !cmd.Flags().Changed("manifest") {
+					manifestHash = jsbench.ManifestDigest
+				}
+			}
+			if profile != "none" && profile != "cpu" {
+				return fmt.Errorf("profile must be 'none' or 'cpu'")
+			}
+			if benchmarkKind == string(runner.BenchmarkJS) && !jsbench.MatchesJob(benchmarkSuite, protocolVersion,
+				manifestHash, samples, profile) {
 				return fmt.Errorf("JavaScript jobs require the canonical identity, samples=3, and profile=none")
 			}
 
@@ -1438,8 +1563,8 @@ Example:
 	cmd.Flags().IntVar(&samples, "samples", 3, "number of benchmark samples")
 	cmd.Flags().StringVar(&profile, "profile", "cpu", "profile mode (none, cpu)")
 	cmd.Flags().StringVar(&benchmarkKind, "kind", string(runner.BenchmarkZig), "benchmark kind (zig, js)")
-	cmd.Flags().StringVar(&benchmarkSuite, "suite", runner.JavaScriptSuite, "benchmark suite")
-	cmd.Flags().Int64Var(&protocolVersion, "protocol", runner.JavaScriptProtocol, "benchmark protocol version")
+	cmd.Flags().StringVar(&benchmarkSuite, "suite", jsbench.Suite, "benchmark suite")
+	cmd.Flags().Int64Var(&protocolVersion, "protocol", jsbench.Protocol, "benchmark protocol version")
 	cmd.Flags().StringVar(&manifestHash, "manifest", "", "expected benchmark manifest hash")
 	cmd.Flags().StringVar(&notes, "notes", "", "optional notes")
 	cmd.Flags().StringVar(&requestedBy, "requested-by", "", "who requested this job")
@@ -1482,7 +1607,7 @@ func runBackfill(ctx context.Context, database *db.DB, count int, start string, 
 
 	var unrecorded []commitInfo
 	for _, c := range commits {
-		exists, err := database.HasCommit(c.hash)
+		exists, err := database.HasCommitFiltered(c.hash, db.RunFilter{BenchmarkKind: string(cfg.BenchmarkKind)})
 		if err != nil {
 			return fmt.Errorf("check commit %s: %w", c.short, err)
 		}
@@ -1585,12 +1710,63 @@ func fetchAndResolve(ctx context.Context, repoPath, repoURL, branch string) (str
 	return strings.TrimSpace(resolved), nil
 }
 
+func resolveJobCommit(ctx context.Context, repoPath, repoURL, branch, requested string) (string, error) {
+	if requested == "" {
+		resolved, err := fetchAndResolve(ctx, repoPath, repoURL, branch)
+		if err != nil {
+			return "", err
+		}
+		if resolved == "" {
+			return "", fmt.Errorf("resolve %s branch %s: could not determine commit", repoURL, branch)
+		}
+		return resolved, nil
+	}
+
+	fmt.Fprintf(os.Stderr, "  Fetching %s...\n", repoURL)
+	if strings.Contains(repoURL, "://") || strings.Contains(repoURL, "@") {
+		if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL, requested); err != nil {
+			return "", fmt.Errorf("git fetch: %w", err)
+		}
+	} else if _, err := runGitCommand(ctx, repoPath, "fetch", repoURL); err != nil {
+		return "", fmt.Errorf("git fetch: %w", err)
+	}
+	resolved, err := runGitCommand(ctx, repoPath, "rev-parse", requested+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("resolve commit %s: %w", requested, err)
+	}
+	return strings.TrimSpace(resolved), nil
+}
+
+func restoreRepository(ctx context.Context, repoPath, origHead string) error {
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), repositoryRestoreTimeout)
+	defer cancel()
+
+	var failures []string
+	if _, err := runGitCommand(restoreCtx, repoPath, "reset", "--hard", "HEAD"); err != nil {
+		failures = append(failures, "reset benchmark checkout: "+err.Error())
+	}
+	if _, err := runGitCommand(restoreCtx, repoPath, "checkout", origHead); err != nil {
+		failures = append(failures, "checkout original HEAD: "+err.Error())
+	}
+	if _, err := runGitCommand(restoreCtx, repoPath, "reset", "--hard", "HEAD"); err != nil {
+		failures = append(failures, "reset original HEAD: "+err.Error())
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
 func runGitCommand(ctx context.Context, repoPath string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repoPath
 	out, err := cmd.CombinedOutput()
 	output := strings.TrimSpace(string(out))
 	if err != nil {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) && ctx.Err() != nil {
+			err = errors.Join(err, ctx.Err())
+		}
 		if output != "" {
 			return string(out), fmt.Errorf("git %s: %w (%s)", strings.Join(args, " "), err, output)
 		}
@@ -1604,6 +1780,46 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max-3] + "..."
+}
+
+func printJavaScriptRunDetails(run *db.Run, results []db.Result) {
+	fmt.Printf("Kind:     %s\nSuite:    %s\nProtocol: %d\nBun:      %s\nZig:      %s\nManifest: %s\nMachine:  %s\n",
+		run.BenchmarkKind, run.BenchmarkSuite, run.ProtocolVersion, run.BunVersion, run.ZigVersion, run.ManifestHash, run.MachineID)
+
+	var maxInnerRSD int64
+	hasInnerRSD := false
+	for _, result := range results {
+		for _, sample := range result.Samples {
+			if sample.InnerRSDPPM != nil && (!hasInnerRSD || *sample.InnerRSDPPM > maxInnerRSD) {
+				maxInnerRSD = *sample.InnerRSDPPM
+				hasInnerRSD = true
+			}
+		}
+	}
+
+	fmt.Println("\nMeasurement quality")
+	if !hasInnerRSD {
+		fmt.Println("Max inner RSD: n/a")
+	} else {
+		fmt.Printf("Max inner RSD: %s\n", formatRSD(maxInnerRSD))
+	}
+	fmt.Println("Process sample RSD:")
+	for _, result := range results {
+		values := make([]float64, len(result.Samples))
+		for i, sample := range result.Samples {
+			values[i] = float64(sample.AvgNs)
+		}
+		rsd, err := jsbench.CalculateRSDPPM(values)
+		if err != nil {
+			fmt.Printf("  %s/%s: n/a\n", result.Category, result.Name)
+			continue
+		}
+		fmt.Printf("  %s/%s: %s\n", result.Category, result.Name, formatRSD(rsd))
+	}
+}
+
+func formatRSD(ppm int64) string {
+	return fmt.Sprintf("%.2f%%", float64(ppm)/10_000)
 }
 
 func printResults(results []db.Result) {

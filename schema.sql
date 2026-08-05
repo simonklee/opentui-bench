@@ -123,6 +123,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     error TEXT,
     run_id INTEGER REFERENCES runs(id),
     requested_by TEXT,
+    claim_token TEXT, -- SHA-256 digest; the raw bearer token is held only by its claimant
+    legacy_tokenless INTEGER NOT NULL DEFAULT 0,
     benchmark_kind TEXT NOT NULL DEFAULT 'zig',
     benchmark_suite TEXT NOT NULL DEFAULT 'core-default',
     protocol_version INTEGER NOT NULL DEFAULT 1,
@@ -130,6 +132,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_claim_token ON jobs(claim_token) WHERE claim_token IS NOT NULL;
 
 -- Cached regression snapshots for history rendering
 CREATE TABLE IF NOT EXISTS regression_cache (
@@ -188,4 +191,4 @@ SELECT
 FROM results r
 JOIN runs ru ON r.run_id = ru.id;
 
-PRAGMA user_version = 6;
+PRAGMA user_version = 7;

@@ -6,6 +6,7 @@ import type { TrendPoint } from "../services/api";
 interface TrendIndicatorProps {
   trendData: TrendPoint[] | undefined;
   currentRunId: number;
+  neutral?: boolean;
   fromCompare: boolean;
   compareBaseRunId?: string;
   compareBaseResultId?: string;
@@ -35,7 +36,13 @@ const TrendIndicator: Component<TrendIndicatorProps> = (props) => {
           pctStr = pct.toFixed(1) + "%";
         }
 
-        const color = diff > 0 ? "text-danger" : diff < 0 ? "text-success" : "text-text-muted";
+        const color = props.neutral
+          ? "text-text-main"
+          : diff > 0
+            ? "text-danger"
+            : diff < 0
+              ? "text-success"
+              : "text-text-muted";
 
         const prevRunId =
           props.fromCompare && props.compareBaseRunId ? props.compareBaseRunId : prev.run_id;

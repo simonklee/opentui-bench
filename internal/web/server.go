@@ -16,6 +16,7 @@ import (
 
 	"opentui-bench/internal/cache"
 	"opentui-bench/internal/db"
+	"opentui-bench/internal/joblease"
 )
 
 //go:embed static
@@ -25,6 +26,7 @@ type Server struct {
 	db                  *db.DB
 	addr                string
 	apiKey              string
+	javascriptRuns      bool
 	svgCache            *cache.SVGCache
 	profileRetention    db.ProfileRetention
 	flamegraphSem       chan struct{}
@@ -74,10 +76,11 @@ func NewServer(database *db.DB, addr string) (*Server, error) {
 	}
 
 	return &Server{
-		db:       database,
-		addr:     addr,
-		apiKey:   os.Getenv("BENCH_API_KEY"),
-		svgCache: svgCache,
+		db:             database,
+		addr:           addr,
+		apiKey:         os.Getenv("BENCH_API_KEY"),
+		javascriptRuns: os.Getenv("BENCH_ENABLE_JAVASCRIPT_RUNS") == "1",
+		svgCache:       svgCache,
 		profileRetention: db.ProfileRetention{
 			MaxRuns:  profileRunsMax,
 			MaxBytes: int64(profileMiBMax) << 20,
@@ -143,6 +146,7 @@ func (s *Server) Start(openBrowser bool) error {
 	mux.HandleFunc("/api/regressions/history", s.handleRegressionsHistory)
 	mux.HandleFunc("/api/regressions", s.handleRegressions)
 	mux.HandleFunc("/api/branches", s.handleBranches)
+	mux.HandleFunc("/api/capabilities", s.handleCapabilities)
 	mux.HandleFunc("/api/has-commit/", s.handleHasCommit)
 	mux.HandleFunc("/api/latest-commit", s.handleLatestCommit)
 	mux.HandleFunc("/api/jobs", s.handleJobsRoute)
@@ -156,6 +160,19 @@ func (s *Server) Start(openBrowser bool) error {
 
 	fmt.Printf("Starting server at http://localhost%s\n", s.addr)
 	return http.ListenAndServe(s.addr, mux)
+}
+
+func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	javascriptRuns := 0
+	if s.javascriptRuns {
+		javascriptRuns = 1
+	}
+	_, _ = fmt.Fprintf(w, `{"javascript_runs":%d,"job_lease_protocol":%d}`, javascriptRuns, joblease.Protocol)
 }
 
 func (s *Server) pruneProfileData() (db.ProfileRetentionResult, error) {
