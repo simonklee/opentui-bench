@@ -423,14 +423,14 @@ const Compare: Component = () => {
 
     const baselineLabel =
       benchmarkKind() === "js" && selectedBaseRun()
-        ? `${runtimeName(selectedBaseRun()!)} ${runtimeVersion(selectedBaseRun()!)}`
-        : "Baseline";
+        ? `${runtimeName(selectedBaseRun()!)} ${runtimeVersion(selectedBaseRun()!)} P50`
+        : "Baseline P50";
     const comparedLabel =
       benchmarkKind() === "js" && selectedCurrRun()
-        ? `${runtimeName(selectedCurrRun()!)} ${runtimeVersion(selectedCurrRun()!)}`
-        : "Current";
+        ? `${runtimeName(selectedCurrRun()!)} ${runtimeVersion(selectedCurrRun()!)} P50`
+        : "Current P50";
     const md =
-      `| Benchmark | ${baselineLabel} | ${comparedLabel} | Delta (compared / baseline) |\n|---|---|---|---|\n` +
+      `| Benchmark | ${baselineLabel} | ${comparedLabel} | P50 delta (compared / baseline) |\n|---|---|---|---|\n` +
       comparisons
         .map((c) => {
           const delta =
@@ -756,19 +756,19 @@ const Compare: Component = () => {
                   class="px-4 py-2.5 font-semibold text-right cursor-pointer hover:bg-bg-hover hover:text-text-main"
                   onClick={() => handleSort("baseline_ns")}
                 >
-                  Baseline
+                  Baseline P50
                 </th>
                 <th
                   class="px-4 py-2.5 font-semibold text-right cursor-pointer hover:bg-bg-hover hover:text-text-main"
                   onClick={() => handleSort("current_ns")}
                 >
-                  {compareMode() === "runtime" ? "Compared" : "Current"}
+                  {compareMode() === "runtime" ? "Compared P50" : "Current P50"}
                 </th>
                 <th
                   class="px-4 py-2.5 font-semibold text-right cursor-pointer hover:bg-bg-hover hover:text-text-main"
                   onClick={() => handleSort("change_percent")}
                 >
-                  {compareMode() === "runtime" ? "Duration delta / speed" : "Delta %"}
+                  {compareMode() === "runtime" ? "P50 duration delta / speed" : "P50 Delta %"}
                 </th>
               </tr>
             </thead>

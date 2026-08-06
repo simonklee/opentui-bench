@@ -321,7 +321,10 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                     class="fixed inset-0 z-[60] border-0 bg-transparent p-0"
                     onClick={() => setShowTrendHelp(false)}
                   ></button>
-                  <div class="absolute left-0 top-full mt-2 w-[320px] bg-white border border-black shadow-2xl z-[70] p-4 text-[12px] text-black">
+                  <div
+                    class="absolute left-0 top-full mt-2 bg-white border border-black shadow-2xl z-[70] p-4 text-[12px] text-black"
+                    style={{ width: "min(320px, calc(100vw - 92px))" }}
+                  >
                     <div class="font-bold uppercase tracking-widest mb-3 border-b border-border pb-2">
                       Visualization Guide
                     </div>
@@ -514,7 +517,10 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                     class="fixed inset-0 z-[60] border-0 bg-transparent p-0"
                     onClick={() => setShowProfileHelp(false)}
                   ></button>
-                  <div class="absolute left-0 top-full mt-2 w-[320px] bg-white border border-black shadow-2xl z-[70] p-4 text-[12px] text-black">
+                  <div
+                    class="absolute left-0 top-full mt-2 bg-white border border-black shadow-2xl z-[70] p-4 text-[12px] text-black"
+                    style={{ width: "min(320px, calc(100vw - 92px))" }}
+                  >
                     <div class="font-bold uppercase tracking-widest mb-3 border-b border-border pb-2">
                       CPU Profile
                     </div>

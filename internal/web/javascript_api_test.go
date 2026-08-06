@@ -301,6 +301,16 @@ func TestRunSelectorsDefaultToZigAndFilterCanonicalJavaScript(t *testing.T) {
 	}
 }
 
+func TestRunsReturnsEmptyArray(t *testing.T) {
+	server, _ := newAPIStorageServer(t)
+	recorder := httptest.NewRecorder()
+	server.handleRuns(recorder, httptest.NewRequest(http.MethodGet, "/api/runs?benchmark_kind=js", nil))
+
+	if recorder.Code != http.StatusOK || strings.TrimSpace(recorder.Body.String()) != "[]" {
+		t.Fatalf("status/body = %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestHistoricalJavaScriptCompareByIDUsesStoredIdentity(t *testing.T) {
 	server, database := newAPIStorageServer(t)
 	baselineID := insertHistoricalJSCompareRun(t, database, "historical-a", "sha256:historical", 100)

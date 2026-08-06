@@ -71,7 +71,7 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		ResultCount   int    `json:"result_count"`
 	}
 
-	var response []runResponse
+	response := make([]runResponse, 0, len(runs))
 	for _, run := range runs {
 		count, err := s.db.CountResultsForRun(run.ID)
 		if err != nil {

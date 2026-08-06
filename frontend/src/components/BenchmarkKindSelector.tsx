@@ -30,7 +30,7 @@ const BenchmarkKindSelector: Component = () => {
       aria-label="Benchmark language"
     >
       <div
-        class={`grid grid-cols-2 border border-border ${isSidebarExpanded() ? "" : "grid-cols-1"}`}
+        class={`grid border border-border ${isSidebarExpanded() ? "grid-cols-2" : "grid-cols-1"}`}
       >
         {(["zig", "js"] as const).map((kind) => (
           <button
