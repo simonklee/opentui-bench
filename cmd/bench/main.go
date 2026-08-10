@@ -619,6 +619,9 @@ func pruneCmd() *cobra.Command {
 		Use:   "prune",
 		Short: "Prune bulky profile data while preserving benchmark history",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if profileRunsMax <= 0 {
+				return fmt.Errorf("profile-runs must be positive")
+			}
 			if profileMiBMax <= 0 || profileMiBMax > 1<<20 {
 				return fmt.Errorf("profile-mib must be between 1 and %d", 1<<20)
 			}
@@ -640,23 +643,27 @@ func pruneCmd() *cobra.Command {
 				float64(result.BytesDeleted)/(1<<20),
 				result.ProfileRunsRetained,
 				float64(result.BytesRetained)/(1<<20))
+			storage, err := database.StorageStats()
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Database storage: %.1f MiB allocated, %.1f MiB live, %.1f MiB reusable\n",
+				float64(storage.AllocatedBytes)/(1<<20),
+				float64(storage.LiveBytes)/(1<<20),
+				float64(storage.FreeBytes)/(1<<20))
 
 			if !compact {
 				return nil
 			}
-			before, err := os.Stat(database.Path())
-			if err != nil {
-				return fmt.Errorf("stat database before compacting: %w", err)
-			}
 			if err := database.Vacuum(); err != nil {
 				return err
 			}
-			after, err := os.Stat(database.Path())
+			compacted, err := database.StorageStats()
 			if err != nil {
-				return fmt.Errorf("stat database after compacting: %w", err)
+				return err
 			}
 			fmt.Printf("Compacted database from %.1f MiB to %.1f MiB\n",
-				float64(before.Size())/(1<<20), float64(after.Size())/(1<<20))
+				float64(storage.AllocatedBytes)/(1<<20), float64(compacted.AllocatedBytes)/(1<<20))
 			return nil
 		},
 	}

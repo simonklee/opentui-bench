@@ -47,7 +47,7 @@ Data is stored in a SQLite database. You can download it via the "Export" link
 in the web UI sidebar, or directly at `/api/database/download`.
 
 Aggregate benchmark history is retained indefinitely. Bulky CPU profiles are
-limited to 256 complete recent runs and 256 MiB by default, whichever limit is
+limited to 50 complete recent runs and 128 MiB by default, whichever limit is
 reached first; generated SVGs use a five-run filesystem cache instead of SQLite.
 Override the server limits with `PROFILE_RETENTION_RUNS`,
 `PROFILE_RETENTION_MIB`, and `SVG_CACHE_MAX_RUNS`.
@@ -64,7 +64,10 @@ to be retried without consuming another job. The server stores only its SHA-256
 digest; jobs already running during the v7 migration remain leased until the
 normal 24-hour stale recovery window expires.
 
-Prune an existing database and optionally return free pages to the filesystem:
+Profile pruning makes deleted pages reusable, bounding steady-state growth, but
+does not immediately shrink the SQLite file. Database downloads are compact
+snapshots and do not transfer those free pages. Prune an existing source
+database and optionally return its free pages to the filesystem:
 
 ```bash
 ./bench --db /path/to/bench.db prune --compact

@@ -1493,20 +1493,15 @@ func (s *Server) handleDatabaseDownload(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	tmp, err := os.CreateTemp("", "opentui-bench-export-*.db")
+	tmpDir, err := os.MkdirTemp("", "opentui-bench-export-*")
 	if err != nil {
 		http.Error(w, "Failed to prepare database export", http.StatusInternalServerError)
 		return
 	}
-	tmpPath := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		http.Error(w, "Failed to prepare database export", http.StatusInternalServerError)
-		return
-	}
-	defer func() { _ = os.Remove(tmpPath) }()
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	tmpPath := filepath.Join(tmpDir, "bench.db")
 
-	if err := s.db.Backup(r.Context(), tmpPath); err != nil {
+	if err := s.db.CompactBackup(r.Context(), tmpPath); err != nil {
 		if r.Context().Err() == nil {
 			http.Error(w, "Failed to snapshot database", http.StatusInternalServerError)
 		}

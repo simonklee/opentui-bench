@@ -262,6 +262,81 @@ func TestVacuumReclaimsPrunedProfilePages(t *testing.T) {
 	}
 }
 
+func TestCompactBackupExcludesFreePagesAndPreservesSource(t *testing.T) {
+	database := openTestDB(t)
+	runID, _ := insertProfileTestRun(t, database, "2026-01-01T00:00:00Z", make([]byte, 2<<20))
+	if _, err := database.PruneProfileData(ProfileRetention{MaxRuns: 1, MaxBytes: 1}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := database.StorageStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.FreeBytes == 0 {
+		t.Fatal("test database has no free pages")
+	}
+
+	destination := filepath.Join(t.TempDir(), "compact.db")
+	if err := database.CompactBackup(context.Background(), destination); err != nil {
+		t.Fatal(err)
+	}
+	exported, err := OpenReadOnly(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = exported.Close() }()
+	after, err := exported.StorageStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.FreeBytes != 0 || after.AllocatedBytes >= before.AllocatedBytes {
+		t.Fatalf("compact storage = %+v, source storage = %+v", after, before)
+	}
+	if _, err := exported.GetRun(runID); err != nil {
+		t.Fatalf("exported benchmark history: %v", err)
+	}
+
+	sourceAfter, err := database.StorageStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceAfter != before {
+		t.Fatalf("compact backup changed source storage: before=%+v after=%+v", before, sourceAfter)
+	}
+}
+
+func TestCompactBackupRejectsExistingDestinationAndCleansUpCancellation(t *testing.T) {
+	database := openTestDB(t)
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "existing.db")
+	if err := os.WriteFile(existing, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompactBackup(context.Background(), existing); err == nil {
+		t.Fatal("compact backup replaced an existing destination")
+	}
+	contents, err := os.ReadFile(existing)
+	if err != nil || string(contents) != "keep" {
+		t.Fatalf("existing destination changed: contents=%q err=%v", contents, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cancelled := filepath.Join(dir, "cancelled.db")
+	if err := database.CompactBackup(ctx, cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled compact backup error = %v", err)
+	}
+	if _, err := os.Stat(cancelled); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cancelled destination remains: %v", err)
+	}
+}
+
+func TestDefaultProfileRetentionBounds(t *testing.T) {
+	if DefaultProfileRunsMax != 50 || DefaultProfileBytesMax != 128<<20 {
+		t.Fatalf("default profile retention = %d runs/%d bytes", DefaultProfileRunsMax, DefaultProfileBytesMax)
+	}
+}
+
 func TestInsertAndGetJob(t *testing.T) {
 	db := openTestDB(t)
 

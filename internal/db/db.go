@@ -16,7 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"modernc.org/sqlite"
+	_ "modernc.org/sqlite"
 
 	"opentui-bench/internal/joblease"
 	"opentui-bench/internal/jsbench"
@@ -188,8 +188,8 @@ const (
 	CurrentSchemaVersion     = 8
 	CurrentSampleDataVersion = 1
 	CurrentSummaryVersion    = 2
-	DefaultProfileRunsMax    = 256
-	DefaultProfileBytesMax   = int64(256 << 20)
+	DefaultProfileRunsMax    = 50
+	DefaultProfileBytesMax   = int64(128 << 20)
 )
 
 type DB struct {
@@ -201,46 +201,59 @@ func (db *DB) Path() string {
 	return db.path
 }
 
-// Backup writes a consistent online backup without buffering the database in
-// memory. A separate read connection keeps normal API traffic responsive.
-func (db *DB) Backup(ctx context.Context, destination string) error {
-	source, err := sql.Open("sqlite", "file:"+filepath.ToSlash(db.path)+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)")
+// CompactBackup writes a consistent snapshot without copying free pages. A
+// separate read connection keeps normal WAL-mode API traffic responsive.
+// SQLite requires that destination does not already exist.
+func (db *DB) CompactBackup(ctx context.Context, destination string) error {
+	if _, err := os.Stat(destination); err == nil {
+		return fmt.Errorf("compact backup destination already exists: %s", destination)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat compact backup destination: %w", err)
+	}
+	source, err := sql.Open("sqlite", "file:"+filepath.ToSlash(db.path)+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
-		return fmt.Errorf("open backup source: %w", err)
+		return fmt.Errorf("open compact backup source: %w", err)
 	}
 	defer func() { _ = source.Close() }()
-
-	conn, err := source.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire backup connection: %w", err)
+	source.SetMaxOpenConns(1)
+	if _, err := source.ExecContext(ctx, `VACUUM INTO ?`, destination); err != nil {
+		removeErr := os.Remove(destination)
+		if errors.Is(removeErr, os.ErrNotExist) {
+			removeErr = nil
+		}
+		return errors.Join(fmt.Errorf("write compact backup: %w", err), removeErr)
 	}
-	defer func() { _ = conn.Close() }()
+	return nil
+}
 
-	type backuper interface {
-		NewBackup(string) (*sqlite.Backup, error)
+type StorageStats struct {
+	AllocatedBytes int64
+	LiveBytes      int64
+	FreeBytes      int64
+	PageSize       int64
+	PageCount      int64
+	FreePageCount  int64
+}
+
+func (db *DB) StorageStats() (StorageStats, error) {
+	var stats StorageStats
+	if err := db.QueryRow(`PRAGMA page_size`).Scan(&stats.PageSize); err != nil {
+		return StorageStats{}, fmt.Errorf("read SQLite page size: %w", err)
 	}
-	return conn.Raw(func(driverConn any) error {
-		driverBackuper, ok := driverConn.(backuper)
-		if !ok {
-			return errors.New("sqlite driver does not support online backup")
-		}
-		backup, err := driverBackuper.NewBackup(destination)
-		if err != nil {
-			return fmt.Errorf("start online backup: %w", err)
-		}
-		for {
-			if err := ctx.Err(); err != nil {
-				return errors.Join(err, backup.Finish())
-			}
-			more, err := backup.Step(1024)
-			if err != nil {
-				return errors.Join(fmt.Errorf("copy online backup: %w", err), backup.Finish())
-			}
-			if !more {
-				return backup.Finish()
-			}
-		}
-	})
+	if err := db.QueryRow(`PRAGMA page_count`).Scan(&stats.PageCount); err != nil {
+		return StorageStats{}, fmt.Errorf("read SQLite page count: %w", err)
+	}
+	if err := db.QueryRow(`PRAGMA freelist_count`).Scan(&stats.FreePageCount); err != nil {
+		return StorageStats{}, fmt.Errorf("read SQLite free page count: %w", err)
+	}
+	if stats.PageSize <= 0 || stats.PageCount < 0 || stats.FreePageCount < 0 || stats.FreePageCount > stats.PageCount {
+		return StorageStats{}, fmt.Errorf("invalid SQLite storage stats: page_size=%d page_count=%d free_page_count=%d",
+			stats.PageSize, stats.PageCount, stats.FreePageCount)
+	}
+	stats.AllocatedBytes = stats.PageSize * stats.PageCount
+	stats.FreeBytes = stats.PageSize * stats.FreePageCount
+	stats.LiveBytes = stats.AllocatedBytes - stats.FreeBytes
+	return stats, nil
 }
 
 // Vacuum rewrites the database to return free pages to the filesystem. Profile
