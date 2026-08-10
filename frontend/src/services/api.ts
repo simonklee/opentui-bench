@@ -266,6 +266,8 @@ export interface RegressionHistoryResponse {
   entry_count: number;
   cached_runs: number;
   computed_runs: number;
+  remaining_runs: number;
+  complete: boolean;
   entries: RegressionHistoryEntry[];
 }
 

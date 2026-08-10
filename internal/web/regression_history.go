@@ -21,6 +21,10 @@ import (
 const (
 	defaultRegressionHistoryLimit = 120
 	maxRegressionHistoryLimit     = 500
+	// A cold snapshot evaluates every benchmark and may run change-point
+	// permutations. Bound synchronous work so an empty cache cannot turn one
+	// HTTP request into a multi-minute operation.
+	maxRegressionHistoryComputations = 4
 
 	// Bump this when cached regression history payloads become incompatible.
 	// Do not include the executable hash in cache keys: unrelated rebuilds and
@@ -125,6 +129,8 @@ type regressionHistoryResponse struct {
 	EntryCount        int                      `json:"entry_count"`
 	CachedRuns        int                      `json:"cached_runs"`
 	ComputedRuns      int                      `json:"computed_runs"`
+	RemainingRuns     int                      `json:"remaining_runs"`
+	Complete          bool                     `json:"complete"`
 	Entries           []regressionHistoryEntry `json:"entries"`
 }
 
@@ -202,6 +208,8 @@ func (s *Server) handleRegressionsHistory(w http.ResponseWriter, r *http.Request
 	entries := make([]regressionHistoryEntry, 0, len(runs))
 	cachedRuns := 0
 	computedRuns := 0
+	remainingRuns := 0
+	computedFingerprints := make(map[int64]string, maxRegressionHistoryComputations)
 
 	for _, run := range runs {
 		cacheKey := db.RegressionCacheKey{
@@ -229,30 +237,16 @@ func (s *Server) handleRegressionsHistory(w http.ResponseWriter, r *http.Request
 			payload = cacheEntry.ResponseJSON
 			cachedAt = cacheEntry.UpdatedAt
 		} else {
-			var snapshotJSON []byte
-			stable := false
-			for attempt := 0; attempt < 2; attempt++ {
-				snapshotJSON, err = s.computeRegressionsSnapshot(r.Context(), run.ID, branch, window, minPoints, baselineOffset)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-				currentFingerprint, err := s.db.RegressionDataFingerprint(run.ID)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-				if currentFingerprint == dataFingerprint {
-					stable = true
-					break
-				}
-				dataFingerprint = currentFingerprint
-				targetGenerationKey = s.regressionCacheGenerationKey(branch, window, minPoints, baselineOffset, dataFingerprint)
+			if computedRuns >= maxRegressionHistoryComputations {
+				remainingRuns++
+				continue
 			}
-			if !stable {
-				http.Error(w, fmt.Sprintf("regression inputs changed while computing run %d", run.ID), http.StatusConflict)
+			snapshotJSON, err := s.computeRegressionsSnapshot(r.Context(), run.ID, branch, window, minPoints, baselineOffset)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			computedFingerprints[run.ID] = dataFingerprint
 
 			payload = string(snapshotJSON)
 			if err := s.db.UpsertRegressionCache(&db.RegressionCacheEntry{
@@ -310,6 +304,19 @@ func (s *Server) handleRegressionsHistory(w http.ResponseWriter, r *http.Request
 			Regressions:         regressions,
 		})
 	}
+	if len(computedFingerprints) > 0 {
+		currentFingerprints, err := s.db.RegressionDataFingerprints(runIDs)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for runID, before := range computedFingerprints {
+			if currentFingerprints[runID] != before {
+				http.Error(w, fmt.Sprintf("regression inputs changed while computing run %d", runID), http.StatusConflict)
+				return
+			}
+		}
+	}
 
 	response := regressionHistoryResponse{
 		Branch:            branch,
@@ -329,6 +336,8 @@ func (s *Server) handleRegressionsHistory(w http.ResponseWriter, r *http.Request
 		EntryCount:        len(entries),
 		CachedRuns:        cachedRuns,
 		ComputedRuns:      computedRuns,
+		RemainingRuns:     remainingRuns,
+		Complete:          remainingRuns == 0,
 		Entries:           entries,
 	}
 

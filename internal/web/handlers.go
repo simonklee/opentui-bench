@@ -1699,7 +1699,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		if cached, ok := resultsCache[runID]; ok {
 			return cached, nil
 		}
-		fetched, err := s.db.GetResultsForRun(runID)
+		fetched, err := s.db.GetResultSummariesForRun(runID)
 		if err != nil {
 			return nil, err
 		}
@@ -1786,10 +1786,13 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type benchResult struct {
-		testResult  stats.RegressionResult
-		latest      db.Result
-		baseline    *stats.BaselineStats
-		changePoint *changePointDiagnostic
+		testResult stats.RegressionResult
+		latest     db.Result
+		baseline   *stats.BaselineStats
+		trends     []struct {
+			Run    db.Run
+			Result db.Result
+		}
 	}
 
 	var regressions []regression
@@ -1832,8 +1835,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 
 		var observations []stats.OrderedRunStat
 		var targetObservation stats.OrderedRunStat
-		ageByRunID := make(map[int64]int, len(benchmarkTrends))
-		for age, trend := range benchmarkTrends {
+		for _, trend := range benchmarkTrends {
 			run := trend.Run
 			result := trend.Result
 			runDate, err := time.Parse(time.RFC3339Nano, run.RunDate)
@@ -1843,7 +1845,6 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			}
 			observation := stats.OrderedRunStat{RunDate: runDate, Stat: toRunStat(run.ID, result)}
 			observations = append(observations, observation)
-			ageByRunID[run.ID] = age
 			runByID[run.ID] = run
 			if run.ID == latestRunID {
 				targetObservation = observation
@@ -1861,28 +1862,11 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 		analyzableBenchmarks++
 
 		result := evaluation.Result
-		var diagnostic *changePointDiagnostic
-		if len(benchmarkTrends) >= 2*changePointMinSegment {
-			series := make([]stats.RunStat, 0, len(benchmarkTrends))
-			for i := len(benchmarkTrends) - 1; i >= 0; i-- {
-				trend := benchmarkTrends[i]
-				series = append(series, toRunStat(trend.Run.ID, trend.Result))
-			}
-			points := stats.DetectChangePoints(series, changePointMinSegment, changePointAlpha, changePointPerms)
-			if len(points) > 0 {
-				point := points[len(points)-1]
-				diagnostic = &changePointDiagnostic{
-					RunID: point.RunID, PValue: point.PValue, EffectPercent: point.EffectPercent,
-					MagnitudeNs: point.Magnitude, Recent: ageByRunID[point.RunID] <= changePointMaxAgeRuns,
-				}
-			}
-		}
-
 		benchResults = append(benchResults, benchResult{
-			testResult:  result,
-			latest:      latestResult,
-			baseline:    baseline,
-			changePoint: diagnostic,
+			testResult: result,
+			latest:     latestResult,
+			baseline:   baseline,
+			trends:     benchmarkTrends,
 		})
 	}
 
@@ -1897,6 +1881,29 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 			absoluteChange := *bench.testResult.AbsoluteChangeNs
 			if !bh.IsSignificant || changePercent < stats.MinPracticalRegressionEffectPercent || absoluteChange < defaultMinAbsoluteNs {
 				continue
+			}
+			var diagnostic *changePointDiagnostic
+			if len(bench.trends) >= 2*changePointMinSegment {
+				series := make([]stats.RunStat, 0, len(bench.trends))
+				for i := len(bench.trends) - 1; i >= 0; i-- {
+					trend := bench.trends[i]
+					series = append(series, stats.RunStat{RunID: trend.Run.ID, Avg: float64(trend.Result.AvgNs)})
+				}
+				points := stats.DetectChangePoints(series, changePointMinSegment, changePointAlpha, changePointPerms)
+				if len(points) > 0 {
+					point := points[len(points)-1]
+					age := len(bench.trends)
+					for i, trend := range bench.trends {
+						if trend.Run.ID == point.RunID {
+							age = i
+							break
+						}
+					}
+					diagnostic = &changePointDiagnostic{
+						RunID: point.RunID, PValue: point.PValue, EffectPercent: point.EffectPercent,
+						MagnitudeNs: point.Magnitude, Recent: age <= changePointMaxAgeRuns,
+					}
+				}
 			}
 
 			ciLower, ciUpper, _ := stats.CI95(bench.latest.AvgNs, bench.latest.StdDevNs, bench.latest.SampleCount)
@@ -1925,7 +1932,7 @@ func (s *Server) handleRegressions(w http.ResponseWriter, r *http.Request) {
 				DetectionMethod:       "log_avg_prediction_score",
 				TScore:                tScore,
 				DegreesOfFreedom:      bench.testResult.DegreesOfFreedom,
-				ChangePointDiagnostic: bench.changePoint,
+				ChangePointDiagnostic: diagnostic,
 			}
 
 			if baselineRun, ok := runByID[bench.baseline.RunID]; ok {

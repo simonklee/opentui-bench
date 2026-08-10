@@ -1,4 +1,4 @@
-import { createResource, Show, For } from "solid-js";
+import { createEffect, createResource, onCleanup, Show, For } from "solid-js";
 import type { Component } from "solid-js";
 import { useNavigate, useSearchParams } from "@solidjs/router";
 import { api } from "../services/api";
@@ -181,12 +181,18 @@ const Regressions: Component = () => {
     return b || "main";
   };
   const regressionKey = () => `${branch()}:${defaultRegressionHistoryLimit}`;
-  const [history] = createResource(regressionKey, () =>
+  const [history, { refetch: refetchHistory }] = createResource(regressionKey, () =>
     api.getRegressionHistory({
       branch: branch(),
       limit: defaultRegressionHistoryLimit,
     }),
   );
+  createEffect(() => {
+    const response = history();
+    if (!response || response.complete) return;
+    const timer = window.setTimeout(() => void refetchHistory(), 250);
+    onCleanup(() => window.clearTimeout(timer));
+  });
 
   const setBranch = (next: string) => {
     setSearchParams({ branch: next === "main" ? undefined : next });
@@ -261,7 +267,17 @@ const Regressions: Component = () => {
               </div>
             </Show>
 
-            <Show when={!history.loading && history()}>
+            <Show when={!history.loading && history() && !history()?.complete}>
+              <div class="flex items-center gap-2 text-text-muted">
+                <Loader2 size={18} class="animate-spin" />
+                <span class="text-[14px]">
+                  Analyzing regression history, {history()?.remaining_runs ?? 0} run
+                  {history()?.remaining_runs !== 1 ? "s" : ""} remaining...
+                </span>
+              </div>
+            </Show>
+
+            <Show when={!history.loading && history()?.complete}>
               <Show
                 when={hasRegressions()}
                 fallback={

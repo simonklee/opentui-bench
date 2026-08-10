@@ -143,6 +143,41 @@ func TestRegressionHistoryBatchFingerprintPreservesWarmCacheBehavior(t *testing.
 	}
 }
 
+func TestRegressionHistoryBoundsColdComputations(t *testing.T) {
+	database := openRegressionHistoryTestDB(t)
+	server := &Server{db: database}
+	at := time.Date(2026, 2, 20, 10, 0, 0, 0, time.UTC)
+	totalRuns := maxRegressionHistoryComputations + 2
+	for i := 0; i < totalRuns; i++ {
+		runID := insertRegressionHistoryTestRun(t, database, "main", at.Add(time.Duration(i)*time.Hour), fmt.Sprintf("run-%d", i))
+		insertRegressionHistoryTestResult(t, database, runID, 100_000)
+	}
+
+	requestHistory := func() regressionHistoryResponse {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/regressions/history?branch=main&limit=%d&min_points=2&baseline_offset=0", totalRuns), nil)
+		rec := httptest.NewRecorder()
+		server.handleRegressionsHistory(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d; body=%q", rec.Code, rec.Body.String())
+		}
+		var response regressionHistoryResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	first := requestHistory()
+	if first.ComputedRuns != maxRegressionHistoryComputations || first.RemainingRuns != 2 || first.Complete {
+		t.Fatalf("first response progress = computed %d, remaining %d, complete %t", first.ComputedRuns, first.RemainingRuns, first.Complete)
+	}
+	second := requestHistory()
+	if second.ComputedRuns != 2 || second.CachedRuns != maxRegressionHistoryComputations || second.RemainingRuns != 0 || !second.Complete {
+		t.Fatalf("second response progress = computed %d, cached %d, remaining %d, complete %t", second.ComputedRuns, second.CachedRuns, second.RemainingRuns, second.Complete)
+	}
+}
+
 func TestRegressionsBackfillsSparseBenchmarkHistory(t *testing.T) {
 	database := openRegressionHistoryTestDB(t)
 	server := &Server{db: database}

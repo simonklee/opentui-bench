@@ -1080,6 +1080,16 @@ func (db *DB) HasCommitFiltered(commitHashFull string, filter RunFilter) (bool, 
 }
 
 func (db *DB) GetResultsForRun(runID int64) ([]Result, error) {
+	return db.getResultsForRun(runID, true)
+}
+
+// GetResultSummariesForRun omits memory, sample, and batch evidence. Callers
+// doing run-level comparisons avoid two or more child queries per result.
+func (db *DB) GetResultSummariesForRun(runID int64) ([]Result, error) {
+	return db.getResultsForRun(runID, false)
+}
+
+func (db *DB) getResultsForRun(runID int64, includeEvidence bool) ([]Result, error) {
 	rows, err := db.Query(`
 		SELECT id, run_id, category, name, min_ns, avg_ns, max_ns, 
 		       COALESCE(std_dev_ns, 0), COALESCE(p50_ns, 0), COALESCE(p95_ns, 0), COALESCE(p99_ns, 0),
@@ -1111,6 +1121,10 @@ func (db *DB) GetResultsForRun(runID int64) ([]Result, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	if !includeEvidence {
+		return results, nil
 	}
 
 	for i := range results {
