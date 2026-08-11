@@ -47,7 +47,8 @@ readonly LOG_FILE="$HOME/benchmark.log"
 readonly ALERT_STATE_FILE="$HOME/.cache/opentui-bench/last-alert"
 readonly JS_BENCHMARK_SUITE="core-default"
 readonly JS_PROTOCOL_VERSION=1
-readonly JS_MANIFEST_HASH="sha256:eadd082d755c58b7e8a865bd5873802974881967a4edab1c79d0fb1cba482aa0"
+# The canonical JS manifest hash is advertised by the API via /api/capabilities
+# so the worker never needs a script update when the benchmark workload changes.
 readonly JS_BUN_VERSION="1.3.14"
 readonly JS_NODE_VERSION="26.4.0"
 
@@ -364,11 +365,12 @@ schedule_javascript_main_job() {
 	if [[ "$runtime" == node ]] && ! has_stable_javascript_node; then
 		return 0
 	fi
-	local capabilities
+	local capabilities manifest_hash
 	if ! capabilities=$(curl --fail --silent --show-error --max-time 120 "$API_URL/api/capabilities") ||
 		! jq -e --arg runtime "$runtime" \
 			'.javascript_runs == 1 and .job_lease_protocol == 3 and (.javascript_runtimes | index($runtime) != null)' \
-			<<<"$capabilities" >/dev/null; then
+			<<<"$capabilities" >/dev/null ||
+		! manifest_hash=$(jq -er '.javascript_manifest_hash // empty | select(startswith("sha256:"))' <<<"$capabilities"); then
 		info "Server does not advertise $runtime JavaScript scheduling support; skipping automatic scheduling"
 		return 0
 	fi
@@ -379,7 +381,7 @@ schedule_javascript_main_job() {
 		--data-urlencode 'requested_by=automatic' --data-urlencode 'benchmark_kind=js' \
 		--data-urlencode "benchmark_suite=$JS_BENCHMARK_SUITE" \
 		--data-urlencode "protocol_version=$JS_PROTOCOL_VERSION" \
-		--data-urlencode "manifest_hash=$JS_MANIFEST_HASH" \
+		--data-urlencode "manifest_hash=$manifest_hash" \
 		--data-urlencode "js_runtime=$runtime" \
 		--data-urlencode "runtime_version=$runtime_version")
 
@@ -433,7 +435,7 @@ schedule_javascript_main_job() {
 		--arg branch main \
 		--arg commit_hash "$next_commit" \
 		--arg suite "$JS_BENCHMARK_SUITE" \
-		--arg manifest "$JS_MANIFEST_HASH" \
+		--arg manifest "$manifest_hash" \
 		--arg runtime "$runtime" \
 		--arg runtime_version "$runtime_version" \
 		--argjson protocol "$JS_PROTOCOL_VERSION" '

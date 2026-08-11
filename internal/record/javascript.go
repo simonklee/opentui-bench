@@ -159,10 +159,18 @@ func validateJSIdentity(document *jsInvocation, expected RunMetadata) error {
 		(document.JSRuntime == jsbench.RuntimeBun && document.BunVersion != "" && document.BunVersion != document.RuntimeVersion)) {
 		return fmt.Errorf("bun_version is legacy Bun compatibility data and must not identify another runtime")
 	}
-	if document.BenchmarkSuite != expected.BenchmarkSuite || document.ProtocolVersion != expected.ProtocolVersion ||
-		document.ZigVersion != expected.ZigVersion ||
-		document.Manifest.Hash != expected.ManifestHash {
-		return fmt.Errorf("identity does not match requested suite, protocol, versions, and manifest")
+	if document.BenchmarkSuite != expected.BenchmarkSuite {
+		return fmt.Errorf("benchmark_suite = %q, want %q", document.BenchmarkSuite, expected.BenchmarkSuite)
+	}
+	if document.ProtocolVersion != expected.ProtocolVersion {
+		return fmt.Errorf("protocol_version = %d, want %d", document.ProtocolVersion, expected.ProtocolVersion)
+	}
+	if document.ZigVersion != expected.ZigVersion {
+		return fmt.Errorf("zig_version = %q, want %q", document.ZigVersion, expected.ZigVersion)
+	}
+	if document.Manifest.Hash != expected.ManifestHash {
+		return fmt.Errorf("manifest hash = %q, want canonical %q (bump the pinned manifest digest if the workload change is intentional)",
+			document.Manifest.Hash, expected.ManifestHash)
 	}
 	if document.Manifest.ProtocolVersion != document.ProtocolVersion {
 		return fmt.Errorf("manifest protocol_version = %d, document protocol_version = %d", document.Manifest.ProtocolVersion, document.ProtocolVersion)

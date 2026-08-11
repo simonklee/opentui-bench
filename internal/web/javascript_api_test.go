@@ -107,14 +107,14 @@ func TestJavaScriptRunCapability(t *testing.T) {
 	server, _ := newAPIStorageServer(t)
 	recorder := httptest.NewRecorder()
 	server.handleCapabilities(recorder, httptest.NewRequest(http.MethodGet, "/api/capabilities", nil))
-	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"javascript_runs":0,"javascript_runtimes":["bun","node"],"javascript_protocol":1,"job_lease_protocol":3}` {
+	if recorder.Code != http.StatusOK || recorder.Body.String() != fmt.Sprintf(`{"javascript_runs":0,"javascript_runtimes":["bun","node"],"javascript_protocol":1,"javascript_manifest_hash":%q,"job_lease_protocol":3}`, jsbench.ManifestDigest) {
 		t.Fatalf("status/body = %d: %s", recorder.Code, recorder.Body.String())
 	}
 
 	server.javascriptRuns = true
 	recorder = httptest.NewRecorder()
 	server.handleCapabilities(recorder, httptest.NewRequest(http.MethodGet, "/api/capabilities", nil))
-	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"javascript_runs":1,"javascript_runtimes":["bun","node"],"javascript_protocol":1,"job_lease_protocol":3}` {
+	if recorder.Code != http.StatusOK || recorder.Body.String() != fmt.Sprintf(`{"javascript_runs":1,"javascript_runtimes":["bun","node"],"javascript_protocol":1,"javascript_manifest_hash":%q,"job_lease_protocol":3}`, jsbench.ManifestDigest) {
 		t.Fatalf("enabled status/body = %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
@@ -443,9 +443,18 @@ func TestJavaScriptJobRequiresCanonicalIdentity(t *testing.T) {
 	server, _ := newAPIStorageServer(t)
 	server.javascriptRuns = true
 	invalid := httptest.NewRecorder()
-	server.handleCreateJob(invalid, httptest.NewRequest(http.MethodPost, "/api/jobs", strings.NewReader(`{"branch":"main","benchmark_kind":"js"}`)))
+	server.handleCreateJob(invalid, httptest.NewRequest(http.MethodPost, "/api/jobs",
+		strings.NewReader(`{"branch":"main","benchmark_kind":"js","manifest_hash":"sha256:not-canonical"}`)))
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("invalid status = %d: %s", invalid.Code, invalid.Body.String())
+	}
+
+	// Omitted identity fields default to the canonical JS identity.
+	defaulted := httptest.NewRecorder()
+	server.handleCreateJob(defaulted, httptest.NewRequest(http.MethodPost, "/api/jobs",
+		strings.NewReader(`{"branch":"main","benchmark_kind":"js"}`)))
+	if defaulted.Code != http.StatusCreated || !strings.Contains(defaulted.Body.String(), jsbench.ManifestDigest) {
+		t.Fatalf("defaulted status/body = %d: %s", defaulted.Code, defaulted.Body.String())
 	}
 
 	valid := httptest.NewRecorder()

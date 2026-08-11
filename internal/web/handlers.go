@@ -2111,6 +2111,9 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		if req.RuntimeVersion == "" {
 			req.RuntimeVersion = jsbench.RuntimeVersion(req.JSRuntime)
 		}
+		if req.ManifestHash == "" {
+			req.ManifestHash = jsbench.ManifestDigest
+		}
 	}
 
 	if req.Samples <= 0 {

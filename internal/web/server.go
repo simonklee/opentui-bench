@@ -17,6 +17,7 @@ import (
 	"opentui-bench/internal/cache"
 	"opentui-bench/internal/db"
 	"opentui-bench/internal/joblease"
+	"opentui-bench/internal/jsbench"
 )
 
 //go:embed static
@@ -174,7 +175,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	if s.javascriptRuns {
 		javascriptRuns = 1
 	}
-	_, _ = fmt.Fprintf(w, `{"javascript_runs":%d,"javascript_runtimes":["bun","node"],"javascript_protocol":%d,"job_lease_protocol":%d}`, javascriptRuns, 1, joblease.Protocol)
+	_, _ = fmt.Fprintf(w, `{"javascript_runs":%d,"javascript_runtimes":["bun","node"],"javascript_protocol":%d,"javascript_manifest_hash":%q,"job_lease_protocol":%d}`, javascriptRuns, 1, jsbench.ManifestDigest, joblease.Protocol)
 }
 
 func (s *Server) pruneProfileData() (db.ProfileRetentionResult, error) {
