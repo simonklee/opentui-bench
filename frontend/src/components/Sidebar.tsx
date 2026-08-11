@@ -21,6 +21,7 @@ import {
   PanelLeftOpen,
   HelpCircle,
   Activity,
+  ListChecks,
 } from "lucide-solid";
 
 const Sidebar: Component = () => {
@@ -161,42 +162,53 @@ const Sidebar: Component = () => {
         class={`p-4 border-t border-border text-[10px] uppercase tracking-wider text-text-muted flex items-center ${isSidebarExpanded() ? "justify-between" : "justify-center"}`}
       >
         <div
-          class={`overflow-hidden whitespace-nowrap transition-all duration-300 flex items-center gap-4 ${isSidebarExpanded() ? "max-w-[250px] opacity-100" : "max-w-0 opacity-0"}`}
+          class={`overflow-hidden whitespace-nowrap transition-all duration-300 flex flex-col gap-2 ${isSidebarExpanded() ? "max-w-[250px] opacity-100" : "max-w-0 opacity-0"}`}
         >
-          <a
-            href="https://github.com/simonklee/opentui-bench"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="hover:text-black transition-colors flex items-center gap-1"
-            title="opentui-bench on GitHub"
-          >
-            <GitBranch size={12} />
-            <span>Source</span>
-          </a>
-          <form
-            method="post"
-            action="/api/database/download"
-            onSubmit={(event) => {
-              if (!confirm("Download the full SQLite database (currently over 1 GB)?")) {
-                event.preventDefault();
-              }
-            }}
-          >
-            <button
-              type="submit"
-              class="cursor-pointer border-0 bg-transparent p-0 hover:text-black hover:underline"
-              title="Download SQLite database"
-            >
-              Export
-            </button>
-          </form>
           <button
             type="button"
-            class="cursor-pointer border-0 bg-transparent p-0 hover:text-black hover:underline"
-            onClick={toggleHelp}
+            class={`cursor-pointer border-0 bg-transparent p-0 transition-colors flex items-center gap-1 hover:text-black ${location.pathname === "/jobs" ? "text-black" : ""}`}
+            onClick={() => navigate("/jobs")}
+            title="Benchmark worker queue and history"
           >
-            Shortcuts
+            <ListChecks size={12} />
+            <span>Jobs</span>
           </button>
+          <div class="flex items-center gap-4">
+            <a
+              href="https://github.com/simonklee/opentui-bench"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="hover:text-black transition-colors flex items-center gap-1"
+              title="opentui-bench on GitHub"
+            >
+              <GitBranch size={12} />
+              <span>Source</span>
+            </a>
+            <form
+              method="post"
+              action="/api/database/download"
+              onSubmit={(event) => {
+                if (!confirm("Download the full SQLite database (currently over 1 GB)?")) {
+                  event.preventDefault();
+                }
+              }}
+            >
+              <button
+                type="submit"
+                class="cursor-pointer border-0 bg-transparent p-0 hover:text-black hover:underline"
+                title="Download SQLite database"
+              >
+                Export
+              </button>
+            </form>
+            <button
+              type="button"
+              class="cursor-pointer border-0 bg-transparent p-0 hover:text-black hover:underline"
+              onClick={toggleHelp}
+            >
+              Shortcuts
+            </button>
+          </div>
         </div>
         <div
           class={`transition-all duration-300 ${isSidebarExpanded() ? "opacity-0 w-0 overflow-hidden" : "opacity-100 w-auto"}`}

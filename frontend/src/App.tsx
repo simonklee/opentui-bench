@@ -6,6 +6,7 @@ import Regressions from "./pages/Regressions";
 import RunsList from "./pages/RunsList";
 import BenchmarkDetail from "./pages/BenchmarkDetail";
 import Compare from "./pages/Compare";
+import Jobs from "./pages/Jobs";
 import HelpModal from "./components/HelpModal";
 import { isHelpOpen, toggleHelp } from "./shortcuts";
 import {
@@ -77,6 +78,7 @@ const App: Component = () => {
       <Route path="/runs" component={RunsList} />
       <Route path="/benchmarks/:id" component={BenchmarkDetail} />
       <Route path="/compare" component={Compare} />
+      <Route path="/jobs" component={Jobs} />
     </Router>
   );
 };

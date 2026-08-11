@@ -151,9 +151,14 @@ export interface Job extends Partial<RunIdentity> {
   kind: string;
   branch: string;
   commit_hash?: string;
+  samples: number;
+  profile: string;
+  notes?: string;
   error?: string;
   created_at: string;
+  started_at?: string;
   completed_at?: string;
+  run_id?: number;
   requested_by?: string;
 }
 
@@ -428,14 +433,15 @@ export const api = {
     return fetchJson<string[]>(withBenchmarkKind("/api/branches", kind));
   },
   getJobs: async (
-    kind: BenchmarkKind,
+    kind?: BenchmarkKind,
     status?: string,
     limit = 50,
     requestedBy?: string,
     jsRuntime: JSRuntimeFilter = "bun",
   ) => {
-    const params = new URLSearchParams({ benchmark_kind: kind, limit: String(limit) });
-    if (kind === "js") params.set("js_runtime", jsRuntime);
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (kind) params.set("benchmark_kind", kind);
+    if (kind === "js" && jsRuntime !== "all") params.set("js_runtime", jsRuntime);
     if (status) params.set("status", status);
     if (requestedBy) params.set("requested_by", requestedBy);
     return fetchJson<Job[]>(`/api/jobs?${params}`);
