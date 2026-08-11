@@ -2347,8 +2347,10 @@ func (db *DB) ListJobsFiltered(limit int, status string, branch string, benchmar
 }
 
 // JobLeaseDuration bounds how long an unresponsive worker can retain a job.
-// Benchmark jobs normally finish well within a day, including profiling runs.
-const JobLeaseDuration = 24 * time.Hour
+// The longest observed jobs (Zig suite with cpu profiling) finish within
+// about 30 minutes, so two hours leaves ample margin while letting jobs
+// stranded by worker crashes recover on the next claim instead of after a day.
+const JobLeaseDuration = 2 * time.Hour
 
 var (
 	ErrJobClaimLost   = errors.New("job claim is no longer active")
