@@ -120,14 +120,9 @@ func RunAndCollectWithExecutor(ctx context.Context, cfg RunConfig, executor Exec
 		args = append(args, "--bench", cfg.FilterBenchmark)
 	}
 
-	err = BuildZigBench(ctx, zigDir, cfg.ZigOptimize, executor)
+	benchBin, err := BuildZigBench(ctx, zigDir, cfg.ZigOptimize, executor)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build failed: %w", err)
-	}
-
-	benchBin, err := FindBenchmarkBinary(zigDir)
-	if err != nil {
-		return nil, nil, fmt.Errorf("find benchmark binary: %w", err)
 	}
 
 	outputs := make([][]byte, 0, cfg.Samples)
@@ -157,17 +152,6 @@ func RunAndCollectWithExecutor(ctx context.Context, cfg RunConfig, executor Exec
 	var artifacts []CollectedArtifact
 
 	if cfg.Profile == ProfileCPU {
-		if cfg.ZigOptimize != "ReleaseSafe" {
-			err = BuildZigBench(ctx, zigDir, "ReleaseSafe", executor)
-			if err != nil {
-				return parsed, nil, fmt.Errorf("profiling build failed: %w", err)
-			}
-			benchBin, err = FindBenchmarkBinary(zigDir)
-			if err != nil {
-				return parsed, nil, fmt.Errorf("find benchmark binary (safe): %w", err)
-			}
-		}
-
 		for _, res := range parsed.Results {
 			benchmark := db.BenchmarkKey{Category: res.Category, Name: res.Name}
 			if !hasUniqueProfileSelector(parsed.Results, benchmark) {

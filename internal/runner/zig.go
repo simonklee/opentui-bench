@@ -3,12 +3,10 @@ package runner
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 func ZigDir(repoPath string) string {
@@ -23,55 +21,28 @@ func ZigDir(repoPath string) string {
 	return nativeDir
 }
 
-func BuildZigBench(ctx context.Context, zigDir string, optimize string, r CmdRunner) error {
-	cmd := exec.CommandContext(ctx, "zig", "build", "bench", "-Dbench-optimize="+optimize, "--", "--help")
+func BuildZigBench(ctx context.Context, zigDir string, optimize string, r CmdRunner) (string, error) {
+	cmd := exec.CommandContext(ctx, "zig", "build", "bench", "-Dbench-optimize="+optimize, "--verbose", "--", "--help")
 	cmd.Dir = zigDir
 
 	out, err := r.CombinedOutput(ctx, cmd)
 	if err != nil {
-		return fmt.Errorf("zig build failed: %w\n%s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func FindBenchmarkBinary(zigDir string) (string, error) {
-	// Try standard install location first (from zig build)
-	binPath := filepath.Join(zigDir, "zig-out", "bin", "opentui-bench")
-	if info, err := os.Stat(binPath); err == nil && !info.IsDir() {
-		return binPath, nil
+		return "", fmt.Errorf("zig build failed: %w\n%s", err, strings.TrimSpace(string(out)))
 	}
 
-	// Fallback: search zig-cache (legacy behavior)
-	cacheDir := filepath.Join(zigDir, ".zig-cache")
-	var newestPath string
-	var newestTime time.Time
-
-	err := filepath.WalkDir(cacheDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	const suffix = "opentui-bench --help"
+	for line := range strings.Lines(string(out)) {
+		line = strings.TrimSpace(line)
+		if !strings.HasSuffix(line, suffix) {
+			continue
 		}
-		if d.IsDir() {
-			return nil
+		path := strings.TrimSpace(strings.TrimSuffix(line, "--help"))
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(zigDir, path)
 		}
-		if d.Name() == "opentui-bench" {
-			info, err := d.Info()
-			if err == nil && info.Mode()&0o111 != 0 {
-				if info.ModTime().After(newestTime) {
-					newestTime = info.ModTime()
-					newestPath = path
-				}
-			}
-		}
-		return nil
-	})
-
-	if newestPath != "" {
-		return newestPath, nil
+		return filepath.Clean(path), nil
 	}
-	if err != nil && !os.IsNotExist(err) {
-		return "", err
-	}
-	return "", fmt.Errorf("opentui-bench binary not found in %s", cacheDir)
+	return "", fmt.Errorf("zig build did not report benchmark binary path")
 }
 
 func RunZigBenchJSON(ctx context.Context, zigDir string, optimize string, args []string, r CmdRunner) ([]byte, error) {
