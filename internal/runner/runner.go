@@ -170,15 +170,8 @@ func RunAndCollectWithExecutor(ctx context.Context, cfg RunConfig, executor Exec
 
 		for _, res := range parsed.Results {
 			benchmark := db.BenchmarkKey{Category: res.Category, Name: res.Name}
-			matches := 0
-			for _, candidate := range parsed.Results {
-				if strings.Contains(strings.ToLower(candidate.Category), strings.ToLower(benchmark.Category)) &&
-					strings.Contains(strings.ToLower(candidate.Name), strings.ToLower(benchmark.Name)) {
-					matches++
-				}
-			}
-			if matches != 1 {
-				return parsed, artifacts, fmt.Errorf("profile selector for %s/%s matches %d benchmarks", benchmark.Category, benchmark.Name, matches)
+			if !hasUniqueProfileSelector(parsed.Results, benchmark) {
+				continue
 			}
 
 			pbGz, kind, err := CaptureCPUProfile(ctx, executor, benchBin, benchmark, cfg.PerfFreq)
@@ -196,6 +189,17 @@ func RunAndCollectWithExecutor(ctx context.Context, cfg RunConfig, executor Exec
 	}
 
 	return parsed, artifacts, nil
+}
+
+func hasUniqueProfileSelector(results []record.ParsedResult, benchmark db.BenchmarkKey) bool {
+	matches := 0
+	for _, candidate := range results {
+		if strings.Contains(strings.ToLower(candidate.Category), strings.ToLower(benchmark.Category)) &&
+			strings.Contains(strings.ToLower(candidate.Name), strings.ToLower(benchmark.Name)) {
+			matches++
+		}
+	}
+	return matches == 1
 }
 
 func normalizeRunConfig(cfg RunConfig) RunConfig {
