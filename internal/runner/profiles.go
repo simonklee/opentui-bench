@@ -16,7 +16,7 @@ import (
 	"opentui-bench/internal/db"
 )
 
-func CaptureCPUProfile(ctx context.Context, r CmdRunner, benchBin string, benchmark db.BenchmarkKey, freq int) ([]byte, string, error) {
+func CaptureCPUProfile(ctx context.Context, r CmdRunner, benchBin, workingDir string, benchmark db.BenchmarkKey, freq int) ([]byte, string, error) {
 	tmp, err := os.MkdirTemp("", "opentui-prof-")
 	if err != nil {
 		return nil, "", err
@@ -28,6 +28,7 @@ func CaptureCPUProfile(ctx context.Context, r CmdRunner, benchBin string, benchm
 
 	cmd1 := exec.CommandContext(ctx, "perf", "record", "-F", strconv.Itoa(freq), "-g", "-o", perfData, "--",
 		benchBin, "--filter", benchmark.Category, "--bench", benchmark.Name, "--json")
+	cmd1.Dir = workingDir
 
 	out1, err := r.CombinedOutput(ctx, cmd1)
 	if err != nil {

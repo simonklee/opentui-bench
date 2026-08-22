@@ -174,7 +174,7 @@ func RunAndCollectWithExecutor(ctx context.Context, cfg RunConfig, executor Exec
 				continue
 			}
 
-			pbGz, kind, err := CaptureCPUProfile(ctx, executor, benchBin, benchmark, cfg.PerfFreq)
+			pbGz, kind, err := CaptureCPUProfile(ctx, executor, benchBin, zigDir, benchmark, cfg.PerfFreq)
 			if err != nil {
 				return parsed, artifacts, fmt.Errorf("profile %s/%s: %w", res.Category, res.Name, err)
 			}
