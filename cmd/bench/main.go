@@ -1184,7 +1184,7 @@ func updateRemoteJobAfterExecution(ctx context.Context, remote *runner.RemoteRec
 
 // runWorkerLocal is the existing local-DB worker loop.
 func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollInterval time.Duration, once bool, benchmarkKind string) error {
-	zigDir := filepath.Join(repoPath, "packages/core/src/zig")
+	zigDir := runner.ZigDir(repoPath)
 	if _, err := os.Stat(zigDir); os.IsNotExist(err) {
 		return fmt.Errorf("zig directory not found: %s", zigDir)
 	}
@@ -1342,7 +1342,7 @@ func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath
 
 // runWorkerRemote is the remote-API worker loop.
 func runWorkerRemote(ctx context.Context, remote *runner.RemoteRecorder, repoPath string, pollInterval time.Duration, once bool, benchmarkKind string) error {
-	zigDir := filepath.Join(repoPath, "packages/core/src/zig")
+	zigDir := runner.ZigDir(repoPath)
 	if _, err := os.Stat(zigDir); os.IsNotExist(err) {
 		return fmt.Errorf("zig directory not found: %s", zigDir)
 	}
@@ -1636,7 +1636,7 @@ Example:
 }
 
 func runBackfill(ctx context.Context, database *db.DB, count int, start string, dryRun bool, cfg runner.RunConfig) error {
-	zigDir := filepath.Join(cfg.RepoPath, "packages/core/src/zig")
+	zigDir := runner.ZigDir(cfg.RepoPath)
 
 	if _, err := os.Stat(zigDir); os.IsNotExist(err) {
 		return fmt.Errorf("zig directory not found: %s", zigDir)

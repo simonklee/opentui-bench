@@ -83,7 +83,7 @@ func TestJavaScriptOrchestrationUsesCanonicalCommandsAndSeparateDiagnostics(t *t
 	for i, dir := range executor.dirs {
 		wantDir := "/repo"
 		if slices.Equal(executor.commands[i], []string{"zig", "version"}) {
-			wantDir = "/repo/packages/core/src/zig"
+			wantDir = "/repo/packages/native"
 		}
 		if dir != wantDir {
 			t.Fatalf("command %q directory = %q, want %q", executor.commands[i], dir, wantDir)

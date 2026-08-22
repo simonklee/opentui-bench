@@ -12,11 +12,19 @@ import (
 )
 
 func ZigDir(repoPath string) string {
-	return filepath.Join(repoPath, "packages", "core", "src", "zig")
+	nativeDir := filepath.Join(repoPath, "packages", "native")
+	if _, err := os.Stat(filepath.Join(nativeDir, "build.zig")); err == nil {
+		return nativeDir
+	}
+	legacyDir := filepath.Join(repoPath, "packages", "core", "src", "zig")
+	if _, err := os.Stat(filepath.Join(legacyDir, "build.zig")); err == nil {
+		return legacyDir
+	}
+	return nativeDir
 }
 
 func BuildZigBench(ctx context.Context, zigDir string, optimize string, r CmdRunner) error {
-	cmd := exec.CommandContext(ctx, "zig", "build", "-Doptimize="+optimize)
+	cmd := exec.CommandContext(ctx, "zig", "build", "bench", "-Dbench-optimize="+optimize, "--", "--help")
 	cmd.Dir = zigDir
 
 	out, err := r.CombinedOutput(ctx, cmd)

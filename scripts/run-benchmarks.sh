@@ -49,7 +49,7 @@ readonly JS_BENCHMARK_SUITE="core-default"
 readonly JS_PROTOCOL_VERSION=1
 # The canonical JS manifest hash is advertised by the API via /api/capabilities
 # so the worker never needs a script update when the benchmark workload changes.
-readonly JS_BUN_VERSION="1.3.14"
+readonly JS_BUN_VERSION="1.4.0"
 readonly JS_NODE_VERSION="26.4.0"
 
 # API configuration - set these as environment variables
