@@ -50,7 +50,7 @@ readonly JS_PROTOCOL_VERSION=1
 # The canonical JS manifest hash is advertised by the API via /api/capabilities
 # so the worker never needs a script update when the benchmark workload changes.
 readonly JS_BUN_VERSION="1.4.0"
-readonly JS_NODE_VERSION="26.4.0"
+readonly JS_NODE_VERSION="26.7.0"
 
 # API configuration - set these as environment variables
 : "${API_URL:=https://opentui-bench.fly.dev}"

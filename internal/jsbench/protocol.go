@@ -16,7 +16,7 @@ const (
 	RuntimeBun     = "bun"
 	RuntimeNode    = "node"
 	BunVersion     = "1.4.0"
-	NodeVersion    = "26.4.0"
+	NodeVersion    = "26.7.0"
 	ZigVersion     = "0.16.0"
 	ManifestDigest = "sha256:eadd082d755c58b7e8a865bd5873802974881967a4edab1c79d0fb1cba482aa0"
 	Samples        = 3

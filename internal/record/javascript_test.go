@@ -74,7 +74,7 @@ func TestParseJSInvocationsAggregatesAndRetainsEvidence(t *testing.T) {
 
 func TestParseJSInvocationsSchema2UsesGenericRuntimeIdentity(t *testing.T) {
 	document := strings.Replace(jsTestInvocation(100, 102, 14002),
-		`"schema_version":1`, `"schema_version":2,"js_runtime":"node","runtime_version":"26.4.0"`, 1)
+		`"schema_version":1`, fmt.Sprintf(`"schema_version":2,"js_runtime":"node","runtime_version":"%s"`, jsbench.NodeVersion), 1)
 	document = strings.Replace(document, `,"bun_version":"1.3.14"`, ``, 1)
 	meta := jsTestMeta()
 	meta.BunVersion = ""
