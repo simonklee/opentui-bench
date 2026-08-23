@@ -12,6 +12,12 @@ import (
 	"opentui-bench/internal/jsbench"
 )
 
+type processResult struct {
+	stdout []byte
+	stderr []byte
+	err    error
+}
+
 type scriptedExecutor struct {
 	commands [][]string
 	dirs     []string
@@ -19,6 +25,7 @@ type scriptedExecutor struct {
 	timeouts []time.Duration
 	outputs  int
 	bun      string
+	bench    []processResult
 }
 
 func (e *scriptedExecutor) CombinedOutput(_ context.Context, cmd *exec.Cmd) ([]byte, error) {
@@ -52,7 +59,12 @@ func (e *scriptedExecutor) Output(ctx context.Context, cmd *exec.Cmd) ([]byte, [
 	case slices.Equal(cmd.Args, []string{"node", "--version"}):
 		return []byte("v" + jsbench.NodeVersion + "\n"), nil, nil
 	case len(cmd.Args) > 2 && cmd.Args[2] == "--cwd=packages/core" && cmd.Args[len(cmd.Args)-1] == "--format=json":
-		return nil, []byte("unstable case"), errors.New("exit status 1")
+		if len(e.bench) == 0 {
+			return nil, []byte("unstable case"), errors.New("exit status 1")
+		}
+		result := e.bench[0]
+		e.bench = e.bench[1:]
+		return result.stdout, result.stderr, result.err
 	default:
 		return nil, nil, nil
 	}
@@ -101,6 +113,83 @@ func TestJavaScriptOrchestrationUsesCanonicalCommandsAndSeparateDiagnostics(t *t
 			t.Fatalf("command %q timeout = %s, want within %s", executor.commands[i+5], executor.timeouts[i], timeout)
 		}
 	}
+}
+
+func TestJavaScriptRetriesInnerRSDOnce(t *testing.T) {
+	ok := processResult{stdout: []byte(`{"ok":true}`)}
+	executor := &scriptedExecutor{bench: []processResult{
+		{stderr: []byte("JS Mouse/stdin-sgr-bubble-depth-8: inner RSD 134621 ppm exceeds 50000 ppm\n"), err: errors.New("exit status 1")},
+		ok, ok, ok,
+	}}
+	outputs, err := runJavaScriptSamples(context.Background(), RunConfig{RepoPath: "/repo"}, executor, "bench:js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outputs) != jsbench.Samples || string(outputs[0]) != `{"ok":true}` {
+		t.Fatalf("outputs = %q", outputs)
+	}
+	if got := countBenchCommands(executor); got != jsbench.Samples+1 {
+		t.Fatalf("process attempts = %d, want %d", got, jsbench.Samples+1)
+	}
+}
+
+func TestJavaScriptReportsInnerRSDAfterRetry(t *testing.T) {
+	failure := processResult{
+		stderr: []byte("JS Text/text-buffer-word-wrap-measure: inner RSD 59864 ppm exceeds 50000 ppm\n"),
+		err:    errors.New("exit status 1"),
+	}
+	executor := &scriptedExecutor{bench: []processResult{failure, failure}}
+	_, err := runJavaScriptSamples(context.Background(), RunConfig{RepoPath: "/repo"}, executor, "bench:js")
+	if err == nil || !strings.Contains(err.Error(), "JavaScript sample 1 failed after retry") ||
+		!strings.Contains(err.Error(), "inner RSD 59864 ppm") {
+		t.Fatalf("error = %v", err)
+	}
+	if got := countBenchCommands(executor); got != 2 {
+		t.Fatalf("process attempts = %d, want 2", got)
+	}
+}
+
+func TestJavaScriptDoesNotRetryOtherFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result processResult
+	}{
+		{
+			name:   "non-rsd",
+			result: processResult{stderr: []byte("lockfile had changes, but lockfile is frozen\n"), err: errors.New("exit status 1")},
+		},
+		{
+			name: "canceled",
+			result: processResult{
+				stderr: []byte("JS Mouse/stdin-sgr-bubble-depth-8: inner RSD 134621 ppm exceeds 50000 ppm\n"),
+				err:    context.Canceled,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &scriptedExecutor{bench: []processResult{tc.result, {stdout: []byte(`{"ok":true}`)}}}
+			_, err := runJavaScriptSamples(context.Background(), RunConfig{RepoPath: "/repo"}, executor, "bench:js")
+			if err == nil || strings.Contains(err.Error(), "after retry") {
+				t.Fatalf("error = %v", err)
+			}
+			if tc.result.err == context.Canceled && !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %v, want canceled", err)
+			}
+			if got := countBenchCommands(executor); got != 1 {
+				t.Fatalf("process attempts = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func countBenchCommands(executor *scriptedExecutor) int {
+	count := 0
+	for _, command := range executor.commands {
+		if len(command) > 0 && command[len(command)-1] == "--format=json" {
+			count++
+		}
+	}
+	return count
 }
 
 func TestJavaScriptRejectsPrereleaseBun(t *testing.T) {

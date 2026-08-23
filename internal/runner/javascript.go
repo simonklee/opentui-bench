@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -39,25 +40,13 @@ func runJavaScript(ctx context.Context, cfg RunConfig, meta record.RunMetadata, 
 		return nil, fmt.Errorf("build native: %w", err)
 	}
 
-	outputs := make([][]byte, 0, jsbench.Samples)
 	script := "bench:js"
 	if cfg.JSRuntime == RuntimeNode {
 		script = "bench:js:node"
 	}
-	for i := 0; i < jsbench.Samples; i++ {
-		processCtx, cancel := context.WithTimeout(ctx, JavaScriptTimeout)
-		cmd := exec.Command("bun", "--no-env-file", "--cwd=packages/core", "run", script, "--format=json")
-		cmd.Dir = cfg.RepoPath
-		cmd.Env = canonicalJavaScriptEnv(os.Environ())
-		if cfg.JSRuntime == RuntimeNode {
-			cmd.Env = append(cmd.Env, "OTUI_BENCH_NATIVE_PREPARED=1")
-		}
-		stdout, stderr, err := executor.Output(processCtx, cmd)
-		cancel()
-		if err != nil {
-			return nil, fmt.Errorf("JavaScript sample %d failed: %w: %s", i+1, err, strings.TrimSpace(string(stderr)))
-		}
-		outputs = append(outputs, bytes.Clone(stdout))
+	outputs, err := runJavaScriptSamples(ctx, cfg, executor, script)
+	if err != nil {
+		return nil, err
 	}
 
 	invocations := make([]io.Reader, len(outputs))
@@ -69,6 +58,46 @@ func runJavaScript(ctx context.Context, cfg RunConfig, meta record.RunMetadata, 
 		return nil, fmt.Errorf("parse JavaScript results: %w", err)
 	}
 	return parsed, nil
+}
+
+func runJavaScriptSamples(ctx context.Context, cfg RunConfig, executor Executor, script string) ([][]byte, error) {
+	outputs := make([][]byte, 0, jsbench.Samples)
+	for i := 0; i < jsbench.Samples; i++ {
+		stdout, stderr, err := runJavaScriptProcess(ctx, cfg, executor, script)
+		retried := false
+		if err != nil && shouldRetryJavaScriptSample(err, stderr) {
+			retried = true
+			stdout, stderr, err = runJavaScriptProcess(ctx, cfg, executor, script)
+		}
+		if err != nil {
+			label := fmt.Sprintf("JavaScript sample %d failed", i+1)
+			if retried {
+				label += " after retry"
+			}
+			return nil, fmt.Errorf("%s: %w: %s", label, err, strings.TrimSpace(string(stderr)))
+		}
+		outputs = append(outputs, bytes.Clone(stdout))
+	}
+	return outputs, nil
+}
+
+func runJavaScriptProcess(ctx context.Context, cfg RunConfig, executor Executor, script string) ([]byte, []byte, error) {
+	processCtx, cancel := context.WithTimeout(ctx, JavaScriptTimeout)
+	defer cancel()
+	cmd := exec.Command("bun", "--no-env-file", "--cwd=packages/core", "run", script, "--format=json")
+	cmd.Dir = cfg.RepoPath
+	cmd.Env = canonicalJavaScriptEnv(os.Environ())
+	if cfg.JSRuntime == RuntimeNode {
+		cmd.Env = append(cmd.Env, "OTUI_BENCH_NATIVE_PREPARED=1")
+	}
+	return executor.Output(processCtx, cmd)
+}
+
+func shouldRetryJavaScriptSample(err error, stderr []byte) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return bytes.Contains(stderr, []byte("inner RSD ")) && bytes.Contains(stderr, []byte(" exceeds "))
 }
 
 func checkBunVersion(ctx context.Context, executor Executor, dir string) error {
