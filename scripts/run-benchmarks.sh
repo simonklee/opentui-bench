@@ -261,6 +261,16 @@ setup_repos() {
 	cd "$BENCH_REPO"
 	git fetch origin
 	git reset --hard origin/main
+	local installed_script="$SCRIPT_DIR/${SCRIPT_PATH##*/}"
+	if ! cmp -s "$BENCH_REPO/scripts/run-benchmarks.sh" "$installed_script"; then
+		log "Updating installed benchmark worker..."
+		local worker_script_tmp
+		worker_script_tmp=$(mktemp "$SCRIPT_DIR/.run-benchmarks.sh.XXXXXX")
+		install -m 755 "$BENCH_REPO/scripts/run-benchmarks.sh" "$worker_script_tmp"
+		mv -f "$worker_script_tmp" "$installed_script"
+		lock_release
+		exec "$installed_script" "$@"
+	fi
 	make backend-build
 
 	# opentui
@@ -566,7 +576,7 @@ main() {
 	log "Starting benchmark run"
 	check_dependencies
 
-	setup_repos
+	setup_repos "$@"
 	while true; do
 		did_work=false
 		run_benchmarks
