@@ -22,6 +22,18 @@ func ZigDir(repoPath string) string {
 }
 
 func BuildZigBench(ctx context.Context, zigDir string, optimize string, r CmdRunner) (string, error) {
+	prepareScript := filepath.Join(zigDir, "scripts", "prepare-zig-deps.sh")
+	if _, err := os.Stat(prepareScript); err == nil {
+		cmd := exec.CommandContext(ctx, "sh", prepareScript)
+		cmd.Dir = zigDir
+		out, err := r.CombinedOutput(ctx, cmd)
+		if err != nil {
+			return "", fmt.Errorf("prepare Zig dependencies: %w\n%s", err, strings.TrimSpace(string(out)))
+		}
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("inspect Zig dependency preparation script: %w", err)
+	}
+
 	cmd := exec.CommandContext(ctx, "zig", "build", "bench", "-Dbench-optimize="+optimize, "--verbose", "--", "--help")
 	cmd.Dir = zigDir
 
