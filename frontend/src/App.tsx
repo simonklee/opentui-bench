@@ -7,6 +7,8 @@ import RunsList from "./pages/RunsList";
 import BenchmarkDetail from "./pages/BenchmarkDetail";
 import Compare from "./pages/Compare";
 import Jobs from "./pages/Jobs";
+import Investigations from "./pages/Investigations";
+import Investigation from "./pages/Investigation";
 import HelpModal from "./components/HelpModal";
 import { isHelpOpen, toggleHelp } from "./shortcuts";
 import {
@@ -79,6 +81,8 @@ const App: Component = () => {
       <Route path="/benchmarks/:id" component={BenchmarkDetail} />
       <Route path="/compare" component={Compare} />
       <Route path="/jobs" component={Jobs} />
+      <Route path="/investigations" component={Investigations} />
+      <Route path="/investigations/:id" component={Investigation} />
     </Router>
   );
 };

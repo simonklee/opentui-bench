@@ -107,14 +107,24 @@ func TestJavaScriptRunCapability(t *testing.T) {
 	server, _ := newAPIStorageServer(t)
 	recorder := httptest.NewRecorder()
 	server.handleCapabilities(recorder, httptest.NewRequest(http.MethodGet, "/api/capabilities", nil))
-	if recorder.Code != http.StatusOK || recorder.Body.String() != fmt.Sprintf(`{"javascript_runs":0,"javascript_runtimes":["bun","node"],"javascript_protocol":1,"javascript_manifest_hash":%q,"job_lease_protocol":3}`, jsbench.ManifestDigest) {
-		t.Fatalf("status/body = %d: %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var caps map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &caps); err != nil {
+		t.Fatal(err)
+	}
+	if caps["javascript_runs"] != float64(0) || caps["job_lease_protocol"] != float64(3) {
+		t.Fatalf("capabilities = %s", recorder.Body.String())
 	}
 
 	server.javascriptRuns = true
 	recorder = httptest.NewRecorder()
 	server.handleCapabilities(recorder, httptest.NewRequest(http.MethodGet, "/api/capabilities", nil))
-	if recorder.Code != http.StatusOK || recorder.Body.String() != fmt.Sprintf(`{"javascript_runs":1,"javascript_runtimes":["bun","node"],"javascript_protocol":1,"javascript_manifest_hash":%q,"job_lease_protocol":3}`, jsbench.ManifestDigest) {
+	if err := json.Unmarshal(recorder.Body.Bytes(), &caps); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || caps["javascript_runs"] != float64(1) {
 		t.Fatalf("enabled status/body = %d: %s", recorder.Code, recorder.Body.String())
 	}
 }

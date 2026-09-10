@@ -7,10 +7,12 @@ import BenchmarkFilterBar from "../components/BenchmarkFilterBar";
 import BenchmarkResultsTable from "../components/BenchmarkResultsTable";
 import BenchmarkDetailModal from "../components/BenchmarkDetailModal";
 import { useBenchmarkDetail } from "../hooks/useBenchmarkDetail";
-import { ApiError } from "../services/api";
+import { api, ApiError } from "../services/api";
 import { Button } from "../components/Button";
+import { useNavigate } from "@solidjs/router";
 
 const BenchmarkDetail: Component = () => {
+  const navigate = useNavigate();
   const {
     run,
     runLoading,
@@ -45,6 +47,8 @@ const BenchmarkDetail: Component = () => {
   );
   const [chartRange, setChartRange] = createSignal(70);
   const [copyToast, setCopyToast] = createSignal(false);
+  const [investigateBusy, setInvestigateBusy] = createSignal(false);
+  const [investigateError, setInvestigateError] = createSignal("");
 
   // Side effects relevant to the global store/view
   createEffect(() => {
@@ -58,6 +62,28 @@ const BenchmarkDetail: Component = () => {
     const bid = selectedBenchmarkId();
     if (!rid || !bid) return;
     window.location.href = `/api/runs/${rid}/results/${bid}/artifacts/cpu.pprof/download`;
+  };
+
+  const startInvestigate = async () => {
+    const details = run();
+    const bench = selectedBenchmark();
+    if (!details || !bench || investigateBusy()) return;
+    const context = regressionContext();
+    setInvestigateBusy(true);
+    setInvestigateError("");
+    try {
+      const created = await api.createInvestigation({
+        trigger_result_id: bench.id,
+        statistical_reference_run_id: context?.baselineRunId,
+        baseline_commit: context?.baselineCommitHash,
+        target_commit: details.commit_hash_full || details.commit_hash,
+      });
+      navigate(`/investigations/${created.investigation.id}`);
+    } catch (error) {
+      setInvestigateError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setInvestigateBusy(false);
+    }
   };
 
   const openPProfUI = () => {
@@ -168,6 +194,10 @@ const BenchmarkDetail: Component = () => {
               onClose={closeDetail}
               onDownloadCpu={downloadCpuProfile}
               onOpenPProf={openPProfUI}
+              onInvestigate={() => void startInvestigate()}
+              investigateBusy={investigateBusy()}
+              investigateError={investigateError()}
+              captureMissingReason={run()?.capture?.missing_reason}
               onTrendClick={handleTrendClick}
             />
           </Show>

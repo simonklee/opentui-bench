@@ -95,6 +95,11 @@ const RegressionRow: Component<{ regression: RegressionWithContext }> = (props) 
     params.set("regression_run_date", regression.run_date);
     params.set("regression_change_pct", String(regression.change_percent));
     params.set("regression_branch", regression.branch || "main");
+    params.set("regression_baseline_run_id", String(regression.baseline_run_id));
+    params.set(
+      "regression_baseline_commit",
+      regression.baseline_commit_hash_full || regression.baseline_commit_hash,
+    );
 
     navigate(`/benchmarks/${targetRunId}?${params.toString()}`);
   };

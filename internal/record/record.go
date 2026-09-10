@@ -34,53 +34,56 @@ type MemStatJSON struct {
 }
 
 type RunMetadata struct {
-	CommitHash       string
-	CommitHashFull   string
-	CommitMessage    string
-	CommitDate       string
-	Branch           string
-	MachineID        string
-	Notes            string
-	ZigOptimize      string
-	SampleCount      int
-	BenchmarkKind    string
-	BenchmarkSuite   string
-	ProtocolVersion  int64
-	BunVersion       string
-	JSRuntime        string
-	RuntimeVersion   string
-	ZigVersion       string
-	ManifestHash     string
-	ManifestJSON     string
-	LegacyJSIdentity bool
+	CommitHash       string `json:"commit_hash"`
+	CommitHashFull   string `json:"commit_hash_full"`
+	CommitMessage    string `json:"commit_message"`
+	CommitDate       string `json:"commit_date"`
+	Branch           string `json:"branch"`
+	MachineID        string `json:"machine_id"`
+	Notes            string `json:"notes"`
+	ZigOptimize      string `json:"zig_optimize"`
+	SampleCount      int    `json:"sample_count"`
+	BenchmarkKind    string `json:"benchmark_kind"`
+	BenchmarkSuite   string `json:"benchmark_suite"`
+	ProtocolVersion  int64  `json:"protocol_version"`
+	BunVersion       string `json:"bun_version,omitempty"`
+	JSRuntime        string `json:"js_runtime,omitempty"`
+	RuntimeVersion   string `json:"runtime_version,omitempty"`
+	ZigVersion       string `json:"zig_version,omitempty"`
+	ManifestHash     string `json:"manifest_hash,omitempty"`
+	ManifestJSON     string `json:"manifest_json,omitempty"`
+	Purpose          string `json:"purpose,omitempty"`
+	AttemptKey       string `json:"attempt_key,omitempty"`
+	AttemptRole      string `json:"attempt_role,omitempty"`
+	LegacyJSIdentity bool   `json:"-"`
 }
 
 // ParsedRun contains a fully parsed and aggregated benchmark run, ready for
 // storage (local DB or remote API). Built entirely in memory with no side effects.
 type ParsedRun struct {
-	Meta    RunMetadata
-	Results []ParsedResult
+	Meta    RunMetadata    `json:"meta"`
+	Results []ParsedResult `json:"results"`
 }
 
 // ParsedResult is a single aggregated benchmark result with optional memory stats.
 type ParsedResult struct {
-	Category             string
-	Name                 string
-	MinNs                int64
-	AvgNs                int64
-	MaxNs                int64
-	StdDevNs             int64
-	P50Ns                int64
-	P95Ns                int64
-	P99Ns                int64
-	TotalNs              int64
-	Iterations           int64
-	SampleCount          int64
-	SampleAvgVarianceNs2 *float64
-	SampleDataVersion    int64
-	SummaryVersion       int64
-	Samples              []db.ResultSample
-	MemStats             []MemStatJSON
+	Category             string            `json:"category"`
+	Name                 string            `json:"name"`
+	MinNs                int64             `json:"min_ns"`
+	AvgNs                int64             `json:"avg_ns"`
+	MaxNs                int64             `json:"max_ns"`
+	StdDevNs             int64             `json:"std_dev_ns"`
+	P50Ns                int64             `json:"p50_ns"`
+	P95Ns                int64             `json:"p95_ns"`
+	P99Ns                int64             `json:"p99_ns"`
+	TotalNs              int64             `json:"total_ns"`
+	Iterations           int64             `json:"iterations"`
+	SampleCount          int64             `json:"sample_count"`
+	SampleAvgVarianceNs2 *float64          `json:"sample_avg_variance_ns2,omitempty"`
+	SampleDataVersion    int64             `json:"sample_data_version"`
+	SummaryVersion       int64             `json:"summary_version"`
+	Samples              []db.ResultSample `json:"samples"`
+	MemStats             []MemStatJSON     `json:"mem_stats,omitempty"`
 }
 
 type sample struct {
@@ -199,7 +202,19 @@ func parseInvocation(reader io.Reader) (map[db.BenchmarkKey]sample, []db.Benchma
 
 // Store writes a ParsedRun to the database. Returns the run ID and result count.
 func Store(database *db.DB, parsed *ParsedRun) (int64, int, error) {
-	run := &db.Run{
+	if parsed.Meta.Purpose == db.PurposeInvestigation || parsed.Meta.AttemptKey != "" || parsed.Meta.AttemptRole != "" {
+		return 0, 0, fmt.Errorf("investigation measurements must be published together with StoreInvestigation")
+	}
+	run, results := storageValues(parsed)
+	runID, _, err := database.InsertRunWithResults(&run, results)
+	if err != nil {
+		return 0, 0, fmt.Errorf("insert run: %w", err)
+	}
+	return runID, len(parsed.Results), nil
+}
+
+func storageValues(parsed *ParsedRun) (db.Run, []db.Result) {
+	run := db.Run{
 		CommitHash:       parsed.Meta.CommitHash,
 		CommitHashFull:   parsed.Meta.CommitHashFull,
 		CommitMessage:    parsed.Meta.CommitMessage,
@@ -218,6 +233,9 @@ func Store(database *db.DB, parsed *ParsedRun) (int64, int, error) {
 		ZigVersion:       parsed.Meta.ZigVersion,
 		ManifestHash:     parsed.Meta.ManifestHash,
 		ManifestJSON:     parsed.Meta.ManifestJSON,
+		Purpose:          parsed.Meta.Purpose,
+		AttemptKey:       parsed.Meta.AttemptKey,
+		AttemptRole:      parsed.Meta.AttemptRole,
 		LegacyJSIdentity: parsed.Meta.LegacyJSIdentity,
 	}
 
@@ -253,11 +271,7 @@ func Store(database *db.DB, parsed *ParsedRun) (int64, int, error) {
 		}
 		results = append(results, result)
 	}
-	runID, _, err := database.InsertRunWithResults(run, results)
-	if err != nil {
-		return 0, 0, fmt.Errorf("insert run: %w", err)
-	}
-	return runID, len(parsed.Results), nil
+	return run, results
 }
 
 // Record parses benchmark output and writes it to the database. This is a

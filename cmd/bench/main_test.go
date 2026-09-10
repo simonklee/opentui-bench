@@ -22,6 +22,53 @@ import (
 	"opentui-bench/internal/runner"
 )
 
+func TestPairConfigCandidateRetainsComparisonTarget(t *testing.T) {
+	cfg := pairConfigFromJob("repo", "branch", "notes", "zig", "core-default", 1, 3, "none", "cat", "name", "key", "baseline", "candidate", "target", db.AttemptRoleCandidate)
+	if cfg.BaselineCommit != "baseline" || cfg.TargetCommit != "target" || cfg.CandidateCommit != "candidate" {
+		t.Fatalf("candidate replaced a comparison revision: %+v", cfg)
+	}
+	cfg = pairConfigFromJob("repo", "branch", "notes", "zig", "core-default", 1, 3, "none", "cat", "name", "key", "baseline", "resolved-target", "target", db.AttemptRolePair)
+	if cfg.TargetCommit != "resolved-target" || cfg.CandidateCommit != "" {
+		t.Fatalf("pair did not use its resolved target: %+v", cfg)
+	}
+}
+
+func TestInvestigateNewInvocationQueuesPairAndExactRetryReuses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bench.db")
+	withDBPath(t, path)
+	database, err := db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	_, ids, err := database.InsertRunWithResults(&db.Run{
+		CommitHash: "bbbbbbbb", CommitHashFull: strings.Repeat("b", 40), Branch: "main", RunDate: "2026-09-09T00:00:00Z",
+	}, []db.Result{{Category: "cat", Name: "bench", AvgNs: 100}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--result-id", strconv.FormatInt(ids[db.BenchmarkKey{Category: "cat", Name: "bench"}], 10), "--baseline", strings.Repeat("a", 40)}
+	for _, key := range []string{"", "", "stable-retry", "stable-retry"} {
+		cmd := investigateCmd()
+		invocation := append([]string(nil), args...)
+		if key != "" {
+			invocation = append(invocation, "--attempt-key", key)
+		}
+		cmd.SetArgs(invocation)
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	investigations, err := database.ListInvestigations(10)
+	if err != nil || len(investigations) != 1 {
+		t.Fatalf("investigations = %+v (%v)", investigations, err)
+	}
+	attempts, err := database.ListAttempts(investigations[0].ID)
+	if err != nil || len(attempts) != 3 {
+		t.Fatalf("attempts = %+v (%v), want two independent runs and one exact retry", attempts, err)
+	}
+}
+
 func TestSupportedJavaScriptRuntimesRequiresBunForNode(t *testing.T) {
 	dir := t.TempDir()
 	writeTool := func(name, output string) {

@@ -173,6 +173,15 @@ const Sidebar: Component = () => {
             <ListChecks size={12} />
             <span>Jobs</span>
           </button>
+          <button
+            type="button"
+            class={`cursor-pointer border-0 bg-transparent p-0 transition-colors flex items-center gap-1 hover:text-black ${location.pathname.startsWith("/investigations") ? "text-black" : ""}`}
+            onClick={() => navigate("/investigations")}
+            title="Paired benchmark investigations"
+          >
+            <Activity size={12} />
+            <span>Investigate</span>
+          </button>
           <div class="flex items-center gap-4">
             <a
               href="https://github.com/simonklee/opentui-bench"

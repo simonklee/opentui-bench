@@ -21,6 +21,7 @@ var migrations = []migration{
 	migrateJavaScriptStorage,
 	migrateJobClaimTokens,
 	migrateJavaScriptRuntimes,
+	migrateInvestigationSchema,
 }
 
 func migrateJavaScriptRuntimes(tx *sql.Tx) error {
@@ -221,6 +222,16 @@ func migrateLegacySchema(tx *sql.Tx) error {
 			return err
 		}
 	}
+	if len(runColumns) > 0 && !runColumns["purpose"] {
+		if _, err := tx.Exec(`ALTER TABLE runs ADD COLUMN purpose TEXT NOT NULL DEFAULT 'history'`); err != nil {
+			return err
+		}
+	}
+	if len(runColumns) > 0 && !runColumns["attempt_id"] {
+		if _, err := tx.Exec(`ALTER TABLE runs ADD COLUMN attempt_id INTEGER`); err != nil {
+			return err
+		}
+	}
 	jobColumns, err := tableColumns(tx, "jobs")
 	if err != nil {
 		return err
@@ -230,6 +241,20 @@ func migrateLegacySchema(tx *sql.Tx) error {
 	if len(jobColumns) > 0 && !jobColumns["claim_token"] {
 		if _, err := tx.Exec(`ALTER TABLE jobs ADD COLUMN claim_token TEXT`); err != nil {
 			return err
+		}
+	}
+	for _, addition := range []struct{ name, sql string }{
+		{"category", `ALTER TABLE jobs ADD COLUMN category TEXT NOT NULL DEFAULT ''`},
+		{"name", `ALTER TABLE jobs ADD COLUMN name TEXT NOT NULL DEFAULT ''`},
+		{"attempt_key", `ALTER TABLE jobs ADD COLUMN attempt_key TEXT`},
+		{"investigation_id", `ALTER TABLE jobs ADD COLUMN investigation_id INTEGER`},
+		{"baseline_commit", `ALTER TABLE jobs ADD COLUMN baseline_commit TEXT NOT NULL DEFAULT ''`},
+		{"role", `ALTER TABLE jobs ADD COLUMN role TEXT NOT NULL DEFAULT ''`},
+	} {
+		if len(jobColumns) > 0 && !jobColumns[addition.name] {
+			if _, err := tx.Exec(addition.sql); err != nil {
+				return err
+			}
 		}
 	}
 	resultsExists, err := tableExists(tx, "results")
@@ -363,6 +388,82 @@ func migrateStoragePrecision(tx *sql.Tx) error {
 	       r.summary_version, ru.id AS run_id, ru.commit_hash, ru.commit_hash_full,
 	       ru.commit_message, ru.commit_date, ru.branch, ru.run_date, ru.machine_id, ru.notes
 	FROM results r JOIN runs ru ON r.run_id = ru.id`)
+	return err
+}
+
+func migrateInvestigationSchema(tx *sql.Tx) error {
+	runColumns, err := tableColumns(tx, "runs")
+	if err != nil {
+		return err
+	}
+	if !runColumns["purpose"] {
+		if _, err := tx.Exec(`ALTER TABLE runs ADD COLUMN purpose TEXT NOT NULL DEFAULT 'history'`); err != nil {
+			return err
+		}
+	}
+	if !runColumns["attempt_id"] {
+		if _, err := tx.Exec(`ALTER TABLE runs ADD COLUMN attempt_id INTEGER`); err != nil {
+			return err
+		}
+	}
+	jobColumns, err := tableColumns(tx, "jobs")
+	if err != nil {
+		return err
+	}
+	for _, addition := range []struct{ name, sql string }{
+		{"category", `ALTER TABLE jobs ADD COLUMN category TEXT NOT NULL DEFAULT ''`},
+		{"name", `ALTER TABLE jobs ADD COLUMN name TEXT NOT NULL DEFAULT ''`},
+		{"attempt_key", `ALTER TABLE jobs ADD COLUMN attempt_key TEXT`},
+		{"investigation_id", `ALTER TABLE jobs ADD COLUMN investigation_id INTEGER`},
+		{"baseline_commit", `ALTER TABLE jobs ADD COLUMN baseline_commit TEXT NOT NULL DEFAULT ''`},
+		{"role", `ALTER TABLE jobs ADD COLUMN role TEXT NOT NULL DEFAULT ''`},
+	} {
+		if !jobColumns[addition.name] {
+			if _, err := tx.Exec(addition.sql); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = tx.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_runs_purpose ON runs(purpose);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_attempt_key ON jobs(attempt_key)
+			WHERE attempt_key IS NOT NULL AND attempt_key <> '';
+		CREATE INDEX IF NOT EXISTS idx_jobs_investigation ON jobs(investigation_id);
+		CREATE TABLE IF NOT EXISTS investigations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			identity_key TEXT NOT NULL UNIQUE,
+			trigger_result_id INTEGER REFERENCES results(id),
+			category TEXT NOT NULL,
+			name TEXT NOT NULL,
+			benchmark_kind TEXT NOT NULL DEFAULT 'zig',
+			baseline_commit TEXT NOT NULL,
+			target_commit TEXT NOT NULL,
+			statistical_reference_run_id INTEGER REFERENCES runs(id),
+			status TEXT NOT NULL DEFAULT 'open',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS investigation_attempts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			attempt_key TEXT NOT NULL UNIQUE,
+			investigation_id INTEGER NOT NULL REFERENCES investigations(id) ON DELETE CASCADE,
+			role TEXT NOT NULL,
+			commit_hash TEXT NOT NULL,
+			branch TEXT NOT NULL DEFAULT '',
+			samples INTEGER NOT NULL DEFAULT 3,
+			profile TEXT NOT NULL DEFAULT 'none',
+			job_id INTEGER REFERENCES jobs(id),
+			run_id INTEGER REFERENCES runs(id),
+			baseline_run_id INTEGER REFERENCES runs(id),
+			target_run_id INTEGER REFERENCES runs(id),
+			status TEXT NOT NULL DEFAULT 'pending',
+			recipe_json TEXT NOT NULL DEFAULT '{}',
+			error TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_investigation_attempts_investigation ON investigation_attempts(investigation_id);
+	`)
 	return err
 }
 

@@ -10,11 +10,11 @@ import (
 	"time"
 )
 
-func TestOSRunnerCombinedOutputPreservesCancellationWithExitError(t *testing.T) {
+func TestOSRunnerCombinedOutputKillsDescendantsAndPreservesCancellation(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "started")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", "printf started > \"$MARKER\"; exec sleep 60")
+	cmd := exec.CommandContext(ctx, "sh", "-c", "sleep 60 & printf started > \"$MARKER\"; wait")
 	cmd.Env = append(os.Environ(), "MARKER="+marker)
 	done := make(chan error, 1)
 	go func() {

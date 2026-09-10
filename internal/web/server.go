@@ -3,6 +3,7 @@ package web
 import (
 	"crypto/subtle"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -27,6 +28,7 @@ type Server struct {
 	db                  *db.DB
 	addr                string
 	apiKey              string
+	githubAuth          *githubAuth
 	javascriptRuns      bool
 	svgCache            *cache.SVGCache
 	profileRetention    db.ProfileRetention
@@ -36,6 +38,11 @@ type Server struct {
 }
 
 func NewServer(database *db.DB, addr string) (*Server, error) {
+	apiKey := os.Getenv("BENCH_API_KEY")
+	githubAuth, err := loadGitHubAuth(apiKey)
+	if err != nil {
+		return nil, err
+	}
 	cacheDir := os.Getenv("SVG_CACHE_DIR")
 	if cacheDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -79,7 +86,8 @@ func NewServer(database *db.DB, addr string) (*Server, error) {
 	return &Server{
 		db:             database,
 		addr:           addr,
-		apiKey:         os.Getenv("BENCH_API_KEY"),
+		apiKey:         apiKey,
+		githubAuth:     githubAuth,
 		javascriptRuns: os.Getenv("BENCH_ENABLE_JAVASCRIPT_RUNS") == "1",
 		svgCache:       svgCache,
 		profileRetention: db.ProfileRetention{
@@ -150,10 +158,16 @@ func (s *Server) Start(openBrowser bool) error {
 	mux.HandleFunc("/api/regressions", s.handleRegressions)
 	mux.HandleFunc("/api/branches", s.handleBranches)
 	mux.HandleFunc("/api/capabilities", s.handleCapabilities)
+	mux.HandleFunc("/api/auth/session", s.handleAuthSession)
+	mux.HandleFunc("/api/auth/github", s.handleGitHubLogin)
+	mux.HandleFunc(githubCallbackPath, s.handleGitHubCallback)
+	mux.HandleFunc("/api/auth/logout", s.handleAuthLogout)
 	mux.HandleFunc("/api/has-commit/", s.handleHasCommit)
 	mux.HandleFunc("/api/latest-commit", s.handleLatestCommit)
 	mux.HandleFunc("/api/jobs", s.handleJobsRoute)
 	mux.HandleFunc("/api/jobs/", s.routeJobsAPI)
+	mux.HandleFunc("/api/investigations", s.handleInvestigationsRoute)
+	mux.HandleFunc("/api/investigations/", s.routeInvestigationsAPI)
 	mux.HandleFunc("/api/database/download", s.handleDatabaseDownload)
 
 	if openBrowser {
@@ -175,7 +189,24 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	if s.javascriptRuns {
 		javascriptRuns = 1
 	}
-	_, _ = fmt.Fprintf(w, `{"javascript_runs":%d,"javascript_runtimes":["bun","node"],"javascript_protocol":%d,"javascript_manifest_hash":%q,"job_lease_protocol":%d}`, javascriptRuns, 1, jsbench.ManifestDigest, joblease.Protocol)
+	renderer := "inferno-flamegraph"
+	rendererError := ""
+	if _, err := exec.LookPath("inferno-flamegraph"); err != nil {
+		renderer = "unavailable"
+		rendererError = "inferno-flamegraph not available"
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"javascript_runs":           javascriptRuns,
+		"javascript_runtimes":       []string{"bun", "node"},
+		"javascript_protocol":       1,
+		"javascript_manifest_hash":  jsbench.ManifestDigest,
+		"job_lease_protocol":        joblease.Protocol,
+		"flamegraph_renderer":       renderer,
+		"flamegraph_renderer_error": rendererError,
+		"investigation_jobs":        1,
+		"authentication_required":   s.apiKey != "" || s.githubAuth != nil,
+		"github_auth_configured":    s.githubAuth != nil,
+	})
 }
 
 func (s *Server) pruneProfileData() (db.ProfileRetentionResult, error) {

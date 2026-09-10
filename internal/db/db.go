@@ -47,11 +47,14 @@ CREATE TABLE IF NOT EXISTS runs (
     zig_version TEXT NOT NULL DEFAULT '',
     manifest_hash TEXT NOT NULL DEFAULT '',
     manifest_json TEXT NOT NULL DEFAULT '',
-    idempotency_key TEXT
+    idempotency_key TEXT,
+    purpose TEXT NOT NULL DEFAULT 'history',
+    attempt_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_runs_commit ON runs(commit_hash);
 CREATE INDEX IF NOT EXISTS idx_runs_date ON runs(run_date);
 CREATE INDEX IF NOT EXISTS idx_runs_branch ON runs(branch);
+CREATE INDEX IF NOT EXISTS idx_runs_purpose ON runs(purpose);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_idempotency_key ON runs(idempotency_key)
     WHERE idempotency_key IS NOT NULL AND idempotency_key <> '';
 
@@ -151,11 +154,56 @@ CREATE TABLE IF NOT EXISTS jobs (
     protocol_version INTEGER NOT NULL DEFAULT 1,
     manifest_hash TEXT NOT NULL DEFAULT '',
     js_runtime TEXT NOT NULL DEFAULT '',
-    runtime_version TEXT NOT NULL DEFAULT ''
+    runtime_version TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL DEFAULT '',
+    attempt_key TEXT,
+    investigation_id INTEGER,
+    baseline_commit TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_claim_token ON jobs(claim_token) WHERE claim_token IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_attempt_key ON jobs(attempt_key)
+    WHERE attempt_key IS NOT NULL AND attempt_key <> '';
+CREATE INDEX IF NOT EXISTS idx_jobs_investigation ON jobs(investigation_id);
+
+CREATE TABLE IF NOT EXISTS investigations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity_key TEXT NOT NULL UNIQUE,
+    trigger_result_id INTEGER REFERENCES results(id),
+    category TEXT NOT NULL,
+    name TEXT NOT NULL,
+    benchmark_kind TEXT NOT NULL DEFAULT 'zig',
+    baseline_commit TEXT NOT NULL,
+    target_commit TEXT NOT NULL,
+    statistical_reference_run_id INTEGER REFERENCES runs(id),
+    status TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS investigation_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_key TEXT NOT NULL UNIQUE,
+    investigation_id INTEGER NOT NULL REFERENCES investigations(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    commit_hash TEXT NOT NULL,
+    branch TEXT NOT NULL DEFAULT '',
+    samples INTEGER NOT NULL DEFAULT 3,
+    profile TEXT NOT NULL DEFAULT 'none',
+    job_id INTEGER REFERENCES jobs(id),
+    run_id INTEGER REFERENCES runs(id),
+    baseline_run_id INTEGER REFERENCES runs(id),
+    target_run_id INTEGER REFERENCES runs(id),
+    status TEXT NOT NULL DEFAULT 'pending',
+    recipe_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_investigation_attempts_investigation ON investigation_attempts(investigation_id);
 
 CREATE TABLE IF NOT EXISTS regression_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,11 +233,29 @@ FROM results r JOIN runs ru ON r.run_id = ru.id;
 `
 
 const (
-	CurrentSchemaVersion     = 8
+	CurrentSchemaVersion     = 9
 	CurrentSampleDataVersion = 1
 	CurrentSummaryVersion    = 2
 	DefaultProfileRunsMax    = 50
 	DefaultProfileBytesMax   = int64(128 << 20)
+
+	PurposeHistory       = "history"
+	PurposeInvestigation = "investigation"
+
+	JobKindBenchmark   = "benchmark"
+	JobKindInvestigate = "investigate"
+
+	AttemptRolePair      = "pair"
+	AttemptRoleBaseline  = "baseline"
+	AttemptRoleTarget    = "target"
+	AttemptRoleCandidate = "candidate"
+	AttemptRoleControl   = "control"
+
+	MaxOutstandingInvestigationJobs      = 4
+	MaxAttemptsPerInvestigation          = 16
+	MaxCandidateAttemptsPerInvestigation = 8
+	MaxInvestigationSamples              = 30
+	AttemptKeyMaxLen                     = 128
 )
 
 type DB struct {
@@ -381,7 +447,11 @@ type Run struct {
 	ZigVersion       string
 	ManifestHash     string
 	ManifestJSON     string
-	LegacyJSIdentity bool // request-only marker for deployed schema-1 Bun retries
+	Purpose          string
+	AttemptID        int64
+	AttemptKey       string // request-only; becomes the idempotency key for investigation runs
+	AttemptRole      string // request-only; distinguishes pair baseline/target recordings
+	LegacyJSIdentity bool   // request-only marker for deployed schema-1 Bun retries
 }
 
 // RunFilter selects one benchmark cohort. Empty fields are unconstrained.
@@ -441,6 +511,14 @@ func appendRunFilter(query string, args []interface{}, alias string, filter RunF
 		args = append(args, filter.ProtocolVersion)
 	}
 	return query, args
+}
+
+func appendHistoryPurpose(query, alias string) string {
+	col := "purpose"
+	if alias != "" {
+		col = alias + ".purpose"
+	}
+	return query + " AND " + col + " = '" + PurposeHistory + "'"
 }
 
 func runCohortFilter(run *Run) RunFilter {
@@ -587,6 +665,9 @@ func gzipDecompress(data []byte) ([]byte, error) {
 
 func (db *DB) InsertRun(run *Run) (int64, error) {
 	normalizeRunIdentity(run)
+	if run.Purpose == PurposeInvestigation || run.AttemptKey != "" || run.AttemptID != 0 || run.AttemptRole != "" {
+		return 0, fmt.Errorf("investigation runs must be recorded atomically with RecordAttempt")
+	}
 	res, err := db.Exec(`
 		INSERT INTO runs (commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
 			benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json)
@@ -625,6 +706,13 @@ func normalizeRunIdentity(run *Run) {
 			run.BunVersion = run.RuntimeVersion
 		}
 	}
+	if run.Purpose == "" {
+		if run.AttemptKey != "" {
+			run.Purpose = PurposeInvestigation
+		} else {
+			run.Purpose = PurposeHistory
+		}
+	}
 }
 
 func (db *DB) InsertResult(result *Result) (int64, error) {
@@ -654,6 +742,9 @@ func normalizedSummaryVersion(version int64) int64 {
 // run, result, memory-stat, and raw-sample insertion all succeed.
 func (db *DB) InsertRunWithResults(run *Run, results []Result) (int64, map[BenchmarkKey]int64, error) {
 	normalizeRunIdentity(run)
+	if run.Purpose == PurposeInvestigation || run.AttemptKey != "" || run.AttemptID != 0 || run.AttemptRole != "" {
+		return 0, nil, fmt.Errorf("investigation runs must be recorded atomically with RecordAttempt")
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return 0, nil, err
@@ -671,9 +762,13 @@ func (db *DB) InsertRunWithResults(run *Run, results []Result) (int64, map[Bench
 }
 
 // InsertRunWithResultsIfAbsent atomically persists a remote measurement once.
-// Empty commit hashes are never deduplicated.
+// Empty commit hashes are never deduplicated. Investigation recordings use the
+// attempt key so a new experiment is stored even when the commit already exists.
 func (db *DB) InsertRunWithResultsIfAbsent(run *Run, results []Result) (*Run, map[BenchmarkKey]int64, bool, error) {
 	normalizeRunIdentity(run)
+	if run.Purpose == PurposeInvestigation || run.AttemptKey != "" || run.AttemptID != 0 || run.AttemptRole != "" {
+		return db.retryAttemptRun(run, results)
+	}
 	idempotencyKey := ""
 	if run.CommitHashFull != "" {
 		idempotencyKey = measurementIdempotencyKey(run)
@@ -708,12 +803,16 @@ func (db *DB) InsertRunWithResultsIfAbsent(run *Run, results []Result) (*Run, ma
 }
 
 func insertRunWithResultsTx(tx *sql.Tx, run *Run, results []Result, idempotencyKey string) (int64, map[BenchmarkKey]int64, bool, error) {
+	attemptID := any(nil)
+	if run.AttemptID != 0 {
+		attemptID = run.AttemptID
+	}
 	res, err := tx.Exec(`INSERT INTO runs (commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
-		benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json, idempotency_key)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+		benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json, idempotency_key, purpose, attempt_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?)
 		ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key <> '' DO NOTHING`, run.CommitHash, run.CommitHashFull, run.CommitMessage,
 		run.CommitDate, run.Branch, run.RunDate, run.MachineID, run.Notes, run.ZigOptimize,
-		run.BenchmarkKind, run.BenchmarkSuite, run.ProtocolVersion, run.BunVersion, run.JSRuntime, run.RuntimeVersion, run.ZigVersion, run.ManifestHash, run.ManifestJSON, idempotencyKey)
+		run.BenchmarkKind, run.BenchmarkSuite, run.ProtocolVersion, run.BunVersion, run.JSRuntime, run.RuntimeVersion, run.ZigVersion, run.ManifestHash, run.ManifestJSON, idempotencyKey, run.Purpose, attemptID)
 	if err != nil {
 		return 0, nil, false, err
 	}
@@ -764,14 +863,22 @@ func insertRunWithResultsTx(tx *sql.Tx, run *Run, results []Result, idempotencyK
 	return runID, ids, true, nil
 }
 
+func attemptIdempotencyKey(attemptKey, role string) string {
+	hash := sha256.New()
+	_, _ = fmt.Fprintf(hash, "attempt:%s:%s", attemptKey, role)
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
 func measurementIdempotencyKey(run *Run) string {
 	hash := sha256.New()
 	branch := run.Branch
 	if branch == "" || branch == "main" {
 		branch = "main"
 	}
-	values := []string{idempotencySerialization(run), run.CommitHashFull, branch, run.MachineID, run.BenchmarkKind,
-		run.BenchmarkSuite, fmt.Sprint(run.ProtocolVersion)}
+	values := []string{
+		idempotencySerialization(run), run.CommitHashFull, branch, run.MachineID, run.BenchmarkKind,
+		run.BenchmarkSuite, fmt.Sprint(run.ProtocolVersion),
+	}
 	if values[0] == "measurement-v1" {
 		values = append(values, run.BunVersion)
 	} else {
@@ -801,7 +908,8 @@ func getRunByIdempotencyKeyTx(tx *sql.Tx, idempotencyKey string) (*Run, error) {
 		       benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json
 		FROM runs WHERE idempotency_key = ?`, idempotencyKey).Scan(
 		&run.ID, &run.CommitHash, &commitHashFullN, &commitMessage, &commitDate, &branch, &run.RunDate, &machineIDN, &notes, &zigOptimizeN,
-		&run.BenchmarkKind, &run.BenchmarkSuite, &run.ProtocolVersion, &run.BunVersion, &run.JSRuntime, &run.RuntimeVersion, &run.ZigVersion, &run.ManifestHash, &run.ManifestJSON)
+		&run.BenchmarkKind, &run.BenchmarkSuite, &run.ProtocolVersion, &run.BunVersion, &run.JSRuntime, &run.RuntimeVersion, &run.ZigVersion, &run.ManifestHash, &run.ManifestJSON,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -866,6 +974,7 @@ func (db *DB) ListRunsFiltered(limit int, branch string, since string, filter Ru
 		args = append(args, since)
 	}
 	query, args = appendRunFilter(query, args, "", filter)
+	query = appendHistoryPurpose(query, "")
 
 	query += " ORDER BY run_date DESC"
 	if limit > 0 {
@@ -903,6 +1012,14 @@ func (db *DB) GetRun(id int64) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
+	var attemptID sql.NullInt64
+	if err := db.QueryRow(`SELECT purpose, attempt_id FROM runs WHERE id = ?`, id).Scan(&r.Purpose, &attemptID); err != nil {
+		return nil, err
+	}
+	if r.Purpose == "" {
+		r.Purpose = PurposeHistory
+	}
+	r.AttemptID = attemptID.Int64
 	return &r, nil
 }
 
@@ -918,6 +1035,7 @@ func (db *DB) GetRunByCommitFiltered(commitHash string, filter RunFilter) (*Run,
 		FROM runs WHERE (commit_hash = ? OR commit_hash_full = ?)`
 	args := []interface{}{commitHash, commitHash}
 	query, args = appendRunFilter(query, args, "", filter)
+	query = appendHistoryPurpose(query, "")
 	query += " ORDER BY run_date DESC, id DESC LIMIT 1"
 	err := scanRun(db.QueryRow(query, args...), &r)
 	if err != nil {
@@ -944,6 +1062,7 @@ func (db *DB) GetLatestRunFiltered(branch string, filter RunFilter) (*Run, error
 		args = append(args, branch)
 	}
 	query, args = appendRunFilter(query, args, "", filter)
+	query = appendHistoryPurpose(query, "")
 	query += " ORDER BY julianday(run_date) DESC, id DESC LIMIT 1"
 	err := scanRun(db.QueryRow(query, args...), &r)
 	if err != nil {
@@ -962,7 +1081,8 @@ func (db *DB) GetLatestRunForBranch(branch string) (*Run, error) {
 			SELECT id, commit_hash, commit_hash_full, commit_message, commit_date, branch, run_date, machine_id, notes, zig_optimize,
 			       benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json
 			FROM runs
-			WHERE branch = 'main' OR branch IS NULL OR branch = ''
+			WHERE (branch = 'main' OR branch IS NULL OR branch = '')
+			  AND purpose = '` + PurposeHistory + `'
 			ORDER BY julianday(run_date) DESC, id DESC LIMIT 1`
 	} else {
 		query = `
@@ -970,6 +1090,7 @@ func (db *DB) GetLatestRunForBranch(branch string) (*Run, error) {
 			       benchmark_kind, benchmark_suite, protocol_version, bun_version, js_runtime, runtime_version, zig_version, manifest_hash, manifest_json
 			FROM runs
 			WHERE branch = ?
+			  AND purpose = '` + PurposeHistory + `'
 			ORDER BY julianday(run_date) DESC, id DESC LIMIT 1`
 		args = append(args, branch)
 	}
@@ -1003,6 +1124,7 @@ func (db *DB) ListRunsForBranchFiltered(branch string, limit int, filter RunFilt
 		args = append(args, branch)
 	}
 	query, args = appendRunFilter(query, args, "", filter)
+	query = appendHistoryPurpose(query, "")
 
 	query += ` ORDER BY julianday(run_date) DESC, id DESC`
 	if limit > 0 {
@@ -1048,6 +1170,7 @@ func (db *DB) GetBranchesWithRunsFiltered(filter RunFilter) (branches []string, 
 		FROM runs WHERE 1=1`
 	args := []interface{}{}
 	query, args = appendRunFilter(query, args, "", filter)
+	query = appendHistoryPurpose(query, "")
 	query += `
 		ORDER BY
 			CASE WHEN normalized_branch = 'main' THEN 0 ELSE 1 END,
@@ -1085,6 +1208,7 @@ func (db *DB) HasCommitFiltered(commitHashFull string, filter RunFilter) (bool, 
 	query := `SELECT COUNT(*) FROM runs WHERE commit_hash_full = ?`
 	args := []interface{}{commitHashFull}
 	query, args = appendRunFilter(query, args, "", filter)
+	query = appendHistoryPurpose(query, "")
 	err := db.QueryRow(query, args...).Scan(&count)
 	if err != nil {
 		return false, err
@@ -1167,7 +1291,8 @@ func (db *DB) GetResult(resultID int64) (*Result, error) {
 		FROM results WHERE id = ?`, resultID).Scan(
 		&r.ID, &r.RunID, &r.Category, &r.Name, &r.MinNs, &r.AvgNs, &r.MaxNs,
 		&r.StdDevNs, &r.P50Ns, &r.P95Ns, &r.P99Ns,
-		&r.TotalNs, &r.Iterations, &r.SampleCount, &variance, &r.SampleDataVersion, &r.SummaryVersion)
+		&r.TotalNs, &r.Iterations, &r.SampleCount, &variance, &r.SampleDataVersion, &r.SummaryVersion,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1339,7 +1464,8 @@ func (db *DB) GetTrend(resultID int64, limit int) ([]struct {
 ) {
 	var refResult Result
 	if err := db.QueryRow(`SELECT id, run_id, category, name FROM results WHERE id = ?`, resultID).Scan(
-		&refResult.ID, &refResult.RunID, &refResult.Category, &refResult.Name); err != nil {
+		&refResult.ID, &refResult.RunID, &refResult.Category, &refResult.Name,
+	); err != nil {
 		return nil, err
 	}
 	refRun, err := db.GetRun(refResult.RunID)
@@ -1373,6 +1499,7 @@ func (db *DB) GetTrend(resultID int64, limit int) ([]struct {
 		query += " AND (julianday(ru.run_date) < julianday(?) OR (julianday(ru.run_date) = julianday(?) AND ru.id <= ?))"
 		args = append(args, refRun.RunDate, refRun.RunDate, refRun.ID)
 	}
+	query = appendHistoryPurpose(query, "ru")
 	query += " ORDER BY julianday(ru.run_date) DESC, ru.id DESC"
 	if limit > 0 {
 		query += " LIMIT ?"
@@ -1501,8 +1628,9 @@ func (db *DB) RegressionDataFingerprint(runID int64) (fingerprint string, err er
 		       r.id, r.category, r.name, r.avg_ns, r.std_dev_ns, r.sample_count
 		FROM runs ru
 		LEFT JOIN results r ON r.run_id = ru.id
-		WHERE julianday(ru.run_date) < julianday(?)
-		   OR (julianday(ru.run_date) = julianday(?) AND ru.id <= ?)
+		WHERE ru.purpose = '`+PurposeHistory+`'
+		  AND (julianday(ru.run_date) < julianday(?)
+		   OR (julianday(ru.run_date) = julianday(?) AND ru.id <= ?))
 		ORDER BY julianday(ru.run_date), ru.id, r.category, r.name, r.id`,
 		target.RunDate, target.RunDate, target.ID)
 	if err != nil {
@@ -1617,8 +1745,9 @@ func (db *DB) RegressionDataFingerprints(runIDs []int64) (fingerprints map[int64
 		       r.id, r.category, r.name, r.avg_ns, r.std_dev_ns, r.sample_count
 		FROM runs ru
 		LEFT JOIN results r ON r.run_id = ru.id
-		WHERE julianday(ru.run_date) < julianday(?)
-		   OR (julianday(ru.run_date) = julianday(?) AND ru.id <= ?)
+		WHERE ru.purpose = '`+PurposeHistory+`'
+		  AND (julianday(ru.run_date) < julianday(?)
+		   OR (julianday(ru.run_date) = julianday(?) AND ru.id <= ?))
 		ORDER BY julianday(ru.run_date), ru.id, r.category, r.name, r.id`,
 		maxRunDate, maxRunDate, maxRunID)
 	if err != nil {
@@ -1688,7 +1817,8 @@ func (db *DB) GetFlamegraph(runID int64, benchmarkName string) (*Flamegraph, err
 	err := db.QueryRow(`
 		SELECT id, run_id, benchmark_name, folded_stacks_gz, sampling_freq, created_at
 		FROM flamegraphs WHERE run_id = ? AND benchmark_name = ?`, runID, benchmarkName).Scan(
-		&fg.ID, &fg.RunID, &fg.BenchmarkName, &compressedStacks, &fg.SamplingFreq, &fg.CreatedAt)
+		&fg.ID, &fg.RunID, &fg.BenchmarkName, &compressedStacks, &fg.SamplingFreq, &fg.CreatedAt,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1801,7 +1931,6 @@ func retainedProfileRunIDs(tx *sql.Tx, retention ProfileRetention) ([]int64, int
 		JOIN runs ON runs.id = r.run_id
 		WHERE a.kind = 'cpu.pprof'
 		GROUP BY r.run_id
-		HAVING COUNT(*) = (SELECT COUNT(*) FROM results expected WHERE expected.run_id = r.run_id)
 		ORDER BY julianday(runs.run_date) DESC, r.run_id DESC`)
 	if err != nil {
 		return nil, 0, err
@@ -1824,7 +1953,7 @@ func retainedProfileRunIDs(tx *sql.Tx, retention ProfileRetention) ([]int64, int
 	return ids, retainedBytes, rows.Err()
 }
 
-func deleteUnretainedProfiles(tx *sql.Tx, retainedRunIDs []int64, preserveIncomplete bool) error {
+func deleteUnretainedProfiles(tx *sql.Tx, retainedRunIDs []int64) error {
 	if _, err := tx.Exec(`DELETE FROM flamegraphs`); err != nil {
 		return err
 	}
@@ -1838,16 +1967,6 @@ func deleteUnretainedProfiles(tx *sql.Tx, retainedRunIDs []int64, preserveIncomp
 			args[i] = runID
 		}
 	}
-	if preserveIncomplete {
-		runFilter += ` AND run_id IN (
-			SELECT expected.run_id
-			FROM results expected
-			LEFT JOIN artifacts profile
-			  ON profile.result_id = expected.id AND profile.kind = 'cpu.pprof'
-			GROUP BY expected.run_id
-			HAVING COUNT(profile.id) = COUNT(*)
-		)`
-	}
 	if _, err := tx.Exec(`
 		DELETE FROM artifacts
 		WHERE kind = 'cpu.pprof'
@@ -1859,80 +1978,84 @@ func deleteUnretainedProfiles(tx *sql.Tx, retainedRunIDs []int64, preserveIncomp
 	return nil
 }
 
-func finalizeProfileRun(tx *sql.Tx, runID int64) (bool, error) {
-	var resultCount, profileCount int64
-	if err := tx.QueryRow(`
+type ProfileFinalizeStatus struct {
+	Complete     bool
+	ResultCount  int64
+	ProfileCount int64
+}
+
+func captureStatus(q profileStorageQuerier, runID int64) (ProfileFinalizeStatus, error) {
+	var status ProfileFinalizeStatus
+	if err := q.QueryRow(`
 		SELECT COUNT(*), COUNT(profile.id)
 		FROM results result
 		LEFT JOIN artifacts profile
 		  ON profile.result_id = result.id AND profile.kind = 'cpu.pprof'
-		WHERE result.run_id = ?`, runID).Scan(&resultCount, &profileCount); err != nil {
-		return false, err
+		WHERE result.run_id = ?`, runID).Scan(&status.ResultCount, &status.ProfileCount); err != nil {
+		return ProfileFinalizeStatus{}, err
 	}
-	if resultCount == 0 {
-		return false, fmt.Errorf("run %d has no results", runID)
-	}
-	if profileCount == resultCount {
-		return true, nil
-	}
-	_, err := tx.Exec(`
-		DELETE FROM artifacts
-		WHERE kind = 'cpu.pprof'
-		  AND result_id IN (SELECT id FROM results WHERE run_id = ?)`, runID)
-	return false, err
+	status.Complete = status.ResultCount > 0 && status.ProfileCount == status.ResultCount
+	return status, nil
 }
 
 // PruneProfileData preserves compact benchmark summaries while bounding bulky
 // source profiles. Derived SVG artifacts are always removed because they can be
 // regenerated into the bounded filesystem cache.
-func (db *DB) pruneProfileData(retention ProfileRetention, finalizeRunID int64) (ProfileRetentionResult, bool, error) {
-	if retention.MaxRuns <= 0 {
-		return ProfileRetentionResult{}, false, fmt.Errorf("profile retention max runs must be positive")
-	}
-	if retention.MaxBytes <= 0 {
-		return ProfileRetentionResult{}, false, fmt.Errorf("profile retention max bytes must be positive")
-	}
-
+func (db *DB) pruneProfileData(retention ProfileRetention, finalizeRunID int64) (ProfileRetentionResult, ProfileFinalizeStatus, error) {
 	tx, err := db.Begin()
 	if err != nil {
-		return ProfileRetentionResult{}, false, err
+		return ProfileRetentionResult{}, ProfileFinalizeStatus{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	result, status, err := pruneProfileDataTx(tx, retention, finalizeRunID)
+	if err != nil {
+		return ProfileRetentionResult{}, ProfileFinalizeStatus{}, err
+	}
+	return result, status, tx.Commit()
+}
+
+func pruneProfileDataTx(tx *sql.Tx, retention ProfileRetention, finalizeRunID int64) (ProfileRetentionResult, ProfileFinalizeStatus, error) {
+	if retention.MaxRuns <= 0 {
+		return ProfileRetentionResult{}, ProfileFinalizeStatus{}, fmt.Errorf("profile retention max runs must be positive")
+	}
+	if retention.MaxBytes <= 0 {
+		return ProfileRetentionResult{}, ProfileFinalizeStatus{}, fmt.Errorf("profile retention max bytes must be positive")
+	}
 
 	beforeBlobs, beforeBytes, err := profileStorageStats(tx)
 	if err != nil {
-		return ProfileRetentionResult{}, false, err
-	}
-	complete := true
-	if finalizeRunID != 0 {
-		complete, err = finalizeProfileRun(tx, finalizeRunID)
-		if err != nil {
-			return ProfileRetentionResult{}, false, err
-		}
+		return ProfileRetentionResult{}, ProfileFinalizeStatus{}, err
 	}
 	retainedRunIDs, _, err := retainedProfileRunIDs(tx, retention)
 	if err != nil {
-		return ProfileRetentionResult{}, false, err
+		return ProfileRetentionResult{}, ProfileFinalizeStatus{}, err
 	}
 	if _, err := tx.Exec(`DELETE FROM artifacts WHERE kind IN ('cpu.flamegraph.svg', 'cpu.callgraph.svg')`); err != nil {
-		return ProfileRetentionResult{}, false, err
+		return ProfileRetentionResult{}, ProfileFinalizeStatus{}, err
 	}
-	if err := deleteUnretainedProfiles(tx, retainedRunIDs, finalizeRunID != 0); err != nil {
-		return ProfileRetentionResult{}, false, err
+	if err := deleteUnretainedProfiles(tx, retainedRunIDs); err != nil {
+		return ProfileRetentionResult{}, ProfileFinalizeStatus{}, err
 	}
 	afterBlobs, afterBytes, err := profileStorageStats(tx)
 	if err != nil {
-		return ProfileRetentionResult{}, false, err
+		return ProfileRetentionResult{}, ProfileFinalizeStatus{}, err
 	}
-	if err := tx.Commit(); err != nil {
-		return ProfileRetentionResult{}, false, err
+	var status ProfileFinalizeStatus
+	if finalizeRunID != 0 {
+		status, err = captureStatus(tx, finalizeRunID)
+		if err != nil {
+			return ProfileRetentionResult{}, ProfileFinalizeStatus{}, err
+		}
+		if status.ResultCount == 0 {
+			return ProfileRetentionResult{}, ProfileFinalizeStatus{}, fmt.Errorf("run %d has no results", finalizeRunID)
+		}
 	}
 	return ProfileRetentionResult{
 		BlobsDeleted:        beforeBlobs - afterBlobs,
 		BytesDeleted:        beforeBytes - afterBytes,
 		ProfileRunsRetained: len(retainedRunIDs),
 		BytesRetained:       afterBytes,
-	}, complete, nil
+	}, status, nil
 }
 
 func (db *DB) PruneProfileData(retention ProfileRetention) (ProfileRetentionResult, error) {
@@ -1940,30 +2063,53 @@ func (db *DB) PruneProfileData(retention ProfileRetention) (ProfileRetentionResu
 	return result, err
 }
 
-// FinalizeProfileData applies retention after a run's uploads. Other incomplete
-// runs are preserved because they may still be uploading concurrently. An
-// incomplete target run is discarded as a unit.
-func (db *DB) FinalizeProfileData(runID int64, retention ProfileRetention) (ProfileRetentionResult, bool, error) {
+// FinalizeProfileData applies the same bounds to complete and partial captures.
+func (db *DB) FinalizeProfileData(runID int64, retention ProfileRetention) (ProfileRetentionResult, ProfileFinalizeStatus, error) {
 	return db.pruneProfileData(retention, runID)
+}
+
+func (db *DB) CaptureStatus(runID int64) (ProfileFinalizeStatus, error) {
+	return captureStatus(db, runID)
 }
 
 func (db *DB) InsertArtifact(a *Artifact) (int64, error) {
 	res, err := db.Exec(`
 		INSERT INTO artifacts (result_id, kind, data_blob, metadata, created_at)
-		VALUES (?, ?, ?, ?, ?)`,
-		a.ResultID, a.Kind, a.DataBlob, a.Metadata, a.CreatedAt)
+		SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (
+			SELECT 1 FROM results JOIN runs ON runs.id = results.run_id
+			WHERE results.id = ? AND runs.purpose = 'investigation'
+		)`, a.ResultID, a.Kind, a.DataBlob, a.Metadata, a.CreatedAt, a.ResultID)
 	if err != nil {
 		return 0, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return 0, fmt.Errorf("investigation artifacts must be recorded atomically with RecordAttempt")
 	}
 	return res.LastInsertId()
 }
 
 func (db *DB) InsertArtifactIfMissing(a *Artifact) error {
-	_, err := db.Exec(`
+	res, err := db.Exec(`
 		INSERT OR IGNORE INTO artifacts (result_id, kind, data_blob, metadata, created_at)
-		VALUES (?, ?, ?, ?, ?)`,
-		a.ResultID, a.Kind, a.DataBlob, a.Metadata, a.CreatedAt)
-	return err
+		SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (
+			SELECT 1 FROM results JOIN runs ON runs.id = results.run_id
+			WHERE results.id = ? AND runs.purpose = 'investigation'
+		)`, a.ResultID, a.Kind, a.DataBlob, a.Metadata, a.CreatedAt, a.ResultID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n != 0 {
+		return err
+	}
+	var exists bool
+	if err := db.QueryRow(`SELECT EXISTS (SELECT 1 FROM artifacts WHERE result_id = ? AND kind = ?)`, a.ResultID, a.Kind).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("investigation artifacts must be recorded atomically with RecordAttempt")
+	}
+	return nil
 }
 
 func (db *DB) GetArtifact(resultID int64, kind string) (*Artifact, error) {
@@ -1971,7 +2117,8 @@ func (db *DB) GetArtifact(resultID int64, kind string) (*Artifact, error) {
 	err := db.QueryRow(`
 		SELECT id, result_id, kind, data_blob, metadata, created_at
 		FROM artifacts WHERE result_id = ? AND kind = ?`, resultID, kind).Scan(
-		&a.ID, &a.ResultID, &a.Kind, &a.DataBlob, &a.Metadata, &a.CreatedAt)
+		&a.ID, &a.ResultID, &a.Kind, &a.DataBlob, &a.Metadata, &a.CreatedAt,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -2034,6 +2181,7 @@ func (db *DB) GetComparableRunsWindow(runID int64, window int) ([]Run, error) {
 	} else {
 		query, args = appendRunFilter(query, args, "", runCohortFilter(refRun))
 	}
+	query = appendHistoryPurpose(query, "")
 	query += `
 		  AND (julianday(run_date) < julianday(?) OR (julianday(run_date) = julianday(?) AND id <= ?))
 		ORDER BY julianday(run_date) DESC, id DESC
@@ -2078,6 +2226,7 @@ func (db *DB) GetComparableMainRunsWindow(runID int64, window int) ([]Run, error
 		FROM runs
 		WHERE (branch = 'main' OR branch IS NULL OR branch = '')`
 	query, args := appendRunFilter(query, nil, "", runCohortFilter(refRun))
+	query = appendHistoryPurpose(query, "")
 	query += ` AND (julianday(run_date) < julianday(?) OR (julianday(run_date) = julianday(?) AND id <= ?))
 		ORDER BY julianday(run_date) DESC, id DESC
 		LIMIT ?`
@@ -2148,28 +2297,35 @@ func (db *DB) GetResultsForBenchmarkInRuns(key BenchmarkKey, runIDs []int64) (ma
 
 // Job represents a queued benchmark job.
 type Job struct {
-	ID              int64
-	Status          string // pending, running, completed, failed, cancelled
-	Kind            string // benchmark
-	Branch          string
-	CommitHash      string // optional: specific commit, empty = branch HEAD
-	RepoURL         string // git remote name or URL
-	Samples         int
-	Profile         string // none, cpu
-	Notes           string
-	CreatedAt       string
-	StartedAt       string
-	CompletedAt     string
-	Error           string
-	RunID           *int64 // links to resulting benchmark run
-	RequestedBy     string
-	ClaimToken      string // populated only by ClaimNextPendingJob
-	BenchmarkKind   string
-	BenchmarkSuite  string
-	ProtocolVersion int64
-	ManifestHash    string
-	JSRuntime       string
-	RuntimeVersion  string
+	ID               int64
+	Status           string // pending, running, completed, failed, cancelled
+	Kind             string // benchmark
+	Branch           string
+	CommitHash       string // optional: specific commit, empty = branch HEAD
+	RepoURL          string // git remote name or URL
+	Samples          int
+	Profile          string // none, cpu
+	Notes            string
+	CreatedAt        string
+	StartedAt        string
+	CompletedAt      string
+	Error            string
+	RunID            *int64 // links to resulting benchmark run
+	RequestedBy      string
+	ClaimToken       string // populated only by ClaimNextPendingJob
+	BenchmarkKind    string
+	BenchmarkSuite   string
+	ProtocolVersion  int64
+	ManifestHash     string
+	JSRuntime        string
+	RuntimeVersion   string
+	Category         string
+	Name             string
+	AttemptKey       string
+	InvestigationID  *int64
+	BaselineCommit   string
+	ComparisonCommit string
+	Role             string
 }
 
 func (db *DB) InsertJob(job *Job) (int64, error) {
@@ -2190,6 +2346,15 @@ func (db *DB) InsertJob(job *Job) (int64, error) {
 			job.RuntimeVersion = jsbench.RuntimeVersion(job.JSRuntime)
 		}
 	}
+	if job.Kind == "" {
+		job.Kind = JobKindBenchmark
+	}
+	if job.Kind != JobKindBenchmark && job.Kind != JobKindInvestigate {
+		return 0, fmt.Errorf("job kind must be benchmark or investigate")
+	}
+	if job.Kind == JobKindInvestigate || job.AttemptKey != "" || job.InvestigationID != nil {
+		return 0, fmt.Errorf("investigation jobs must be created with an investigation attempt")
+	}
 	if job.BenchmarkKind != "zig" && job.BenchmarkKind != jsbench.Kind {
 		return 0, fmt.Errorf("benchmark kind must be zig or js")
 	}
@@ -2197,7 +2362,7 @@ func (db *DB) InsertJob(job *Job) (int64, error) {
 		job.JSRuntime, job.RuntimeVersion, job.ManifestHash, job.Samples, job.Profile) {
 		return 0, fmt.Errorf("JavaScript jobs require canonical suite, protocol, manifest, three samples, and no profile")
 	}
-	var commitHash, notes, requestedBy *string
+	var commitHash, notes, requestedBy, attemptKey *string
 	if job.CommitHash != "" {
 		commitHash = &job.CommitHash
 	}
@@ -2207,36 +2372,46 @@ func (db *DB) InsertJob(job *Job) (int64, error) {
 	if job.RequestedBy != "" {
 		requestedBy = &job.RequestedBy
 	}
+	if job.AttemptKey != "" {
+		attemptKey = &job.AttemptKey
+	}
+	var investigationID any
+	if job.InvestigationID != nil {
+		investigationID = *job.InvestigationID
+	}
 
 	res, err := db.Exec(`
 		INSERT INTO jobs (status, kind, branch, commit_hash, repo_url, samples, profile, notes, created_at, requested_by,
-			benchmark_kind, benchmark_suite, protocol_version, manifest_hash, js_runtime, runtime_version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			benchmark_kind, benchmark_suite, protocol_version, manifest_hash, js_runtime, runtime_version,
+			category, name, attempt_key, investigation_id, baseline_commit, role)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.Status, job.Kind, job.Branch, commitHash, job.RepoURL,
 		job.Samples, job.Profile, notes, job.CreatedAt, requestedBy,
-		job.BenchmarkKind, job.BenchmarkSuite, job.ProtocolVersion, job.ManifestHash, job.JSRuntime, job.RuntimeVersion)
+		job.BenchmarkKind, job.BenchmarkSuite, job.ProtocolVersion, job.ManifestHash, job.JSRuntime, job.RuntimeVersion,
+		job.Category, job.Name, attemptKey, investigationID, job.BaselineCommit, job.Role)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
-func (db *DB) GetJob(id int64) (*Job, error) {
-	var j Job
-	var commitHash, notes, startedAt, completedAt, jobError, requestedBy sql.NullString
-	var runID sql.NullInt64
+const jobSelectColumns = `id, status, kind, branch, commit_hash, repo_url, samples, profile, notes,
+	created_at, started_at, completed_at, error, run_id, requested_by,
+	benchmark_kind, benchmark_suite, protocol_version, manifest_hash, js_runtime, runtime_version,
+	category, name, attempt_key, investigation_id, baseline_commit, role,
+	COALESCE((SELECT target_commit FROM investigations WHERE investigations.id = jobs.investigation_id), '')`
 
-	err := db.QueryRow(`
-		SELECT id, status, kind, branch, commit_hash, repo_url, samples, profile, notes,
-		       created_at, started_at, completed_at, error, run_id, requested_by,
-		       benchmark_kind, benchmark_suite, protocol_version, manifest_hash, js_runtime, runtime_version
-		FROM jobs WHERE id = ?`, id).Scan(
+func scanJob(s scanner, j *Job) error {
+	var commitHash, notes, startedAt, completedAt, jobError, requestedBy, attemptKey sql.NullString
+	var runID, investigationID sql.NullInt64
+	if err := s.Scan(
 		&j.ID, &j.Status, &j.Kind, &j.Branch, &commitHash, &j.RepoURL,
 		&j.Samples, &j.Profile, &notes,
 		&j.CreatedAt, &startedAt, &completedAt, &jobError, &runID, &requestedBy,
-		&j.BenchmarkKind, &j.BenchmarkSuite, &j.ProtocolVersion, &j.ManifestHash, &j.JSRuntime, &j.RuntimeVersion)
-	if err != nil {
-		return nil, err
+		&j.BenchmarkKind, &j.BenchmarkSuite, &j.ProtocolVersion, &j.ManifestHash, &j.JSRuntime, &j.RuntimeVersion,
+		&j.Category, &j.Name, &attemptKey, &investigationID, &j.BaselineCommit, &j.Role, &j.ComparisonCommit,
+	); err != nil {
+		return err
 	}
 	j.CommitHash = commitHash.String
 	j.Notes = notes.String
@@ -2244,9 +2419,23 @@ func (db *DB) GetJob(id int64) (*Job, error) {
 	j.CompletedAt = completedAt.String
 	j.Error = jobError.String
 	j.RequestedBy = requestedBy.String
+	j.AttemptKey = attemptKey.String
 	if runID.Valid {
 		v := runID.Int64
 		j.RunID = &v
+	}
+	if investigationID.Valid {
+		v := investigationID.Int64
+		j.InvestigationID = &v
+	}
+	return nil
+}
+
+func (db *DB) GetJob(id int64) (*Job, error) {
+	var j Job
+	err := scanJob(db.QueryRow(`SELECT `+jobSelectColumns+` FROM jobs WHERE id = ?`, id), &j)
+	if err != nil {
+		return nil, err
 	}
 	return &j, nil
 }
@@ -2258,10 +2447,7 @@ func (db *DB) ListJobs(limit int, status string, branch string) ([]Job, error) {
 func (db *DB) ListJobsFiltered(limit int, status string, branch string, benchmarkKind string, requestedBy string,
 	benchmarkSuite string, protocolVersion int64, manifestHash string, runtimeIdentity ...string,
 ) ([]Job, error) {
-	query := `SELECT id, status, kind, branch, commit_hash, repo_url, samples, profile, notes,
-	                 created_at, started_at, completed_at, error, run_id, requested_by,
-	                 benchmark_kind, benchmark_suite, protocol_version, manifest_hash, js_runtime, runtime_version
-	          FROM jobs WHERE 1=1`
+	query := `SELECT ` + jobSelectColumns + ` FROM jobs WHERE 1=1`
 	args := []interface{}{}
 
 	if status != "" {
@@ -2320,26 +2506,8 @@ func (db *DB) ListJobsFiltered(limit int, status string, branch string, benchmar
 	var jobs []Job
 	for rows.Next() {
 		var j Job
-		var commitHash, notes, startedAt, completedAt, jobError, requestedBy sql.NullString
-		var runID sql.NullInt64
-
-		if err := rows.Scan(
-			&j.ID, &j.Status, &j.Kind, &j.Branch, &commitHash, &j.RepoURL,
-			&j.Samples, &j.Profile, &notes,
-			&j.CreatedAt, &startedAt, &completedAt, &jobError, &runID, &requestedBy,
-			&j.BenchmarkKind, &j.BenchmarkSuite, &j.ProtocolVersion, &j.ManifestHash, &j.JSRuntime, &j.RuntimeVersion,
-		); err != nil {
+		if err := scanJob(rows, &j); err != nil {
 			return nil, err
-		}
-		j.CommitHash = commitHash.String
-		j.Notes = notes.String
-		j.StartedAt = startedAt.String
-		j.CompletedAt = completedAt.String
-		j.Error = jobError.String
-		j.RequestedBy = requestedBy.String
-		if runID.Valid {
-			v := runID.Int64
-			j.RunID = &v
 		}
 		jobs = append(jobs, j)
 	}
@@ -2385,6 +2553,14 @@ func (db *DB) ClaimNextPendingJob(benchmarkKind string) (*Job, error) {
 // ClaimNextPendingJobWithToken uses a caller-owned bearer token so a repeated
 // remote claim can recover the lease after its first response was lost.
 func (db *DB) ClaimNextPendingJobWithToken(benchmarkKind, claimToken string, javascriptRuntimes ...string) (*Job, error) {
+	return db.claimNextPendingJob(benchmarkKind, claimToken, javascriptRuntimes, false)
+}
+
+func (db *DB) ClaimNextPendingJobIncludingInvestigation(benchmarkKind, claimToken string, javascriptRuntimes ...string) (*Job, error) {
+	return db.claimNextPendingJob(benchmarkKind, claimToken, javascriptRuntimes, true)
+}
+
+func (db *DB) claimNextPendingJob(benchmarkKind, claimToken string, javascriptRuntimes []string, includeInvestigation bool) (*Job, error) {
 	if benchmarkKind != "" && benchmarkKind != "zig" && benchmarkKind != jsbench.Kind {
 		return nil, fmt.Errorf("benchmark kind must be zig or js")
 	}
@@ -2401,6 +2577,15 @@ func (db *DB) ClaimNextPendingJobWithToken(benchmarkKind, claimToken string, jav
 	now := nowTime.Format(time.RFC3339)
 	staleBefore := nowTime.Add(-JobLeaseDuration).Format(time.RFC3339)
 	if _, err := tx.Exec(`
+		UPDATE investigation_attempts SET status = 'pending', error = NULL, updated_at = ?
+		FROM jobs
+		WHERE investigation_attempts.job_id = jobs.id AND investigation_attempts.attempt_key = jobs.attempt_key
+		  AND investigation_attempts.investigation_id = jobs.investigation_id
+		  AND investigation_attempts.status = 'running' AND jobs.kind = 'investigate' AND jobs.status = 'running'
+		  AND (jobs.started_at IS NULL OR julianday(jobs.started_at) <= julianday(?))`, now, staleBefore); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`
 		UPDATE jobs SET status = 'pending', started_at = NULL, claim_token = NULL, legacy_tokenless = 0
 		WHERE status = 'running'
 		  AND (started_at IS NULL OR julianday(started_at) <= julianday(?))`, staleBefore); err != nil {
@@ -2415,6 +2600,9 @@ func (db *DB) ClaimNextPendingJobWithToken(benchmarkKind, claimToken string, jav
 	if err == nil {
 		if benchmarkKind != "" && benchmarkKind != existingKind {
 			return nil, fmt.Errorf("claim token already owns a %s job", existingKind)
+		}
+		if err := syncJobAttemptTx(context.Background(), tx, existingID); err != nil {
+			return nil, err
 		}
 		if err := tx.Commit(); err != nil {
 			return nil, err
@@ -2432,6 +2620,9 @@ func (db *DB) ClaimNextPendingJobWithToken(benchmarkKind, claimToken string, jav
 
 	query := `SELECT id FROM jobs WHERE status = 'pending'`
 	args := []interface{}{}
+	if !includeInvestigation {
+		query += ` AND kind = 'benchmark'`
+	}
 	if benchmarkKind != "" {
 		query += ` AND benchmark_kind = ?`
 		args = append(args, benchmarkKind)
@@ -2467,6 +2658,9 @@ func (db *DB) ClaimNextPendingJobWithToken(benchmarkKind, claimToken string, jav
 	if err := requireActiveJobClaim(res, jobID); err != nil {
 		return nil, err
 	}
+	if err := syncJobAttemptTx(context.Background(), tx, jobID); err != nil {
+		return nil, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -2482,7 +2676,12 @@ func (db *DB) ClaimNextPendingJobWithToken(benchmarkKind, claimToken string, jav
 
 // CompleteJob marks the actively claimed job as completed and links the resulting run.
 func (db *DB) CompleteJob(ctx context.Context, jobID int64, claimToken string, runID int64) error {
-	result, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
 		UPDATE jobs
 		SET status = 'completed', completed_at = ?, run_id = ?, error = NULL, claim_token = NULL, legacy_tokenless = 0
 		WHERE id = ? AND status = 'running' AND COALESCE(claim_token, '') = ?
@@ -2497,6 +2696,12 @@ func (db *DB) CompleteJob(ctx context.Context, jobID int64, claimToken string, r
 			  AND runs.manifest_hash = jobs.manifest_hash
 			  AND runs.js_runtime = jobs.js_runtime
 			  AND runs.runtime_version = jobs.runtime_version
+			  AND (jobs.kind != 'investigate' OR EXISTS (
+				SELECT 1 FROM investigation_attempts a WHERE a.job_id = jobs.id
+				  AND a.attempt_key = jobs.attempt_key AND a.id = runs.attempt_id
+				  AND a.run_id = runs.id AND a.status = 'completed'
+				  AND runs.purpose = 'investigation'
+			  ))
 		  )`, timeNow(), runID, jobID, storedJobClaimCredential(claimToken), claimToken, runID)
 	if err != nil {
 		return err
@@ -2506,11 +2711,28 @@ func (db *DB) CompleteJob(ctx context.Context, jobID int64, claimToken string, r
 		return err
 	}
 	if affected == 1 {
-		return nil
+		var attemptKey sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT attempt_key FROM jobs WHERE id = ?`, jobID).Scan(&attemptKey); err != nil {
+			return err
+		}
+		if attemptKey.String != "" {
+			a, err := getAttemptByKey(tx, attemptKey.String)
+			if err != nil {
+				return err
+			}
+			inv, err := getInvestigation(tx, a.InvestigationID)
+			if err != nil {
+				return err
+			}
+			if err := validateStoredAttempt(tx, inv, a); err != nil {
+				return fmt.Errorf("%w: %v", ErrJobRunMismatch, err)
+			}
+		}
+		return tx.Commit()
 	}
 
 	var active bool
-	if err := db.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM jobs WHERE id = ? AND status = 'running' AND COALESCE(claim_token, '') = ?
 			  AND (? <> '' OR legacy_tokenless = 1)
@@ -2544,7 +2766,12 @@ func (db *DB) ReleaseJob(ctx context.Context, jobID int64, claimToken string) er
 
 // CancelJob cancels a pending job. Returns an error if the job is not pending.
 func (db *DB) CancelJob(jobID int64) error {
-	res, err := db.Exec(`UPDATE jobs SET status = 'cancelled' WHERE id = ? AND status = 'pending'`, jobID)
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(`UPDATE jobs SET status = 'cancelled' WHERE id = ? AND status = 'pending'`, jobID)
 	if err != nil {
 		return err
 	}
@@ -2555,7 +2782,10 @@ func (db *DB) CancelJob(jobID int64) error {
 	if affected == 0 {
 		return fmt.Errorf("job %d is not pending (may already be running, completed, or cancelled)", jobID)
 	}
-	return nil
+	if err := syncJobAttemptTx(context.Background(), tx, jobID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdateJobCommitHash sets the resolved commit hash on the actively claimed job.
@@ -2564,14 +2794,35 @@ func (db *DB) UpdateJobCommitHash(ctx context.Context, jobID int64, claimToken, 
 }
 
 func (db *DB) updateClaimedJob(ctx context.Context, jobID int64, claimToken, setClause string, args ...any) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	args = append(args, jobID, storedJobClaimCredential(claimToken), claimToken)
-	result, err := db.ExecContext(ctx, `UPDATE jobs SET `+setClause+
+	result, err := tx.ExecContext(ctx, `UPDATE jobs SET `+setClause+
 		` WHERE id = ? AND status = 'running' AND COALESCE(claim_token, '') = ?
 		  AND (? <> '' OR legacy_tokenless = 1)`, args...)
 	if err != nil {
 		return err
 	}
-	return requireActiveJobClaim(result, jobID)
+	if err := requireActiveJobClaim(result, jobID); err != nil {
+		return err
+	}
+	if err := syncJobAttemptTx(ctx, tx, jobID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func syncJobAttemptTx(ctx context.Context, tx *sql.Tx, jobID int64) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE investigation_attempts SET status = jobs.status, error = jobs.error, updated_at = ?
+		FROM jobs
+		WHERE investigation_attempts.job_id = jobs.id AND investigation_attempts.attempt_key = jobs.attempt_key
+		  AND investigation_attempts.investigation_id = jobs.investigation_id AND jobs.id = ? AND jobs.kind = 'investigate'
+		  AND investigation_attempts.status IN ('pending', 'running') AND investigation_attempts.status != jobs.status`, timeNow(), jobID)
+	return err
 }
 
 func requireActiveJobClaim(result sql.Result, jobID int64) error {
@@ -2587,7 +2838,8 @@ func requireActiveJobClaim(result sql.Result, jobID int64) error {
 
 func (db *DB) GetRegressionCache(key RegressionCacheKey, generationKey string) (*RegressionCacheEntry, error) {
 	var entry RegressionCacheEntry
-	err := db.QueryRow(`
+	err := db.QueryRow(
+		`
 		SELECT run_id, branch, window, min_points, baseline_offset, generation_key, response_json, created_at, updated_at
 		FROM regression_cache
 		WHERE run_id = ? AND branch = ? AND window = ? AND min_points = ? AND baseline_offset = ? AND generation_key = ?`,
@@ -2620,7 +2872,8 @@ func (db *DB) UpsertRegressionCache(entry *RegressionCacheEntry) error {
 	}
 	entry.UpdatedAt = now
 
-	_, err := db.Exec(`
+	_, err := db.Exec(
+		`
 		INSERT INTO regression_cache (
 			run_id, branch, window, min_points, baseline_offset,
 			generation_key, response_json, created_at, updated_at

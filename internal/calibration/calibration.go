@@ -236,7 +236,7 @@ func Run(database *db.DB, opts Options) (*Report, error) {
 }
 
 func loadRuns(database *db.DB) ([]runData, error) {
-	rows, err := database.Query(`SELECT id FROM runs ORDER BY julianday(run_date), id`)
+	rows, err := database.Query(`SELECT id FROM runs WHERE purpose = 'history' ORDER BY julianday(run_date), id`)
 	if err != nil {
 		return nil, err
 	}

@@ -52,6 +52,8 @@ export interface RegressionNavigationContext {
   introducedRunDate?: string;
   changePercent?: number;
   branch: string;
+  baselineRunId?: number;
+  baselineCommitHash?: string;
 }
 
 export function useBenchmarkDetail() {
@@ -223,6 +225,8 @@ export function useBenchmarkDetail() {
       introducedRunDate: firstSearchParam(searchParams.regression_intro_run_date),
       changePercent: parseSearchParamFloat(searchParams.regression_change_pct),
       branch: firstSearchParam(searchParams.regression_branch) || "main",
+      baselineRunId: parseSearchParamInt(searchParams.regression_baseline_run_id),
+      baselineCommitHash: firstSearchParam(searchParams.regression_baseline_commit),
     };
   });
 

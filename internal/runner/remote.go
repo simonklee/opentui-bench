@@ -91,6 +91,9 @@ type createRunRequest struct {
 	ZigVersion      string               `json:"zig_version"`
 	ManifestHash    string               `json:"manifest_hash"`
 	ManifestJSON    string               `json:"manifest_json"`
+	Purpose         string               `json:"purpose,omitempty"`
+	AttemptKey      string               `json:"attempt_key,omitempty"`
+	AttemptRole     string               `json:"attempt_role,omitempty"`
 	Results         []createRunResultReq `json:"results"`
 }
 
@@ -133,6 +136,9 @@ type createdResult struct {
 // RecordRun marshals the ParsedRun and POSTs it to /api/runs.
 // Returns the run ID and a map of "category/name" -> result ID.
 func (r *RemoteRecorder) RecordRun(ctx context.Context, parsed *record.ParsedRun) (int64, map[db.BenchmarkKey]int64, error) {
+	if parsed.Meta.Purpose == db.PurposeInvestigation || parsed.Meta.AttemptKey != "" || parsed.Meta.AttemptRole != "" {
+		return 0, nil, fmt.Errorf("investigation measurements must be published together with RecordInvestigation")
+	}
 	if parsed.Meta.BenchmarkKind == string(BenchmarkJS) {
 		if err := r.requireJavaScriptRunsCapability(ctx); err != nil {
 			return 0, nil, err
@@ -156,6 +162,9 @@ func (r *RemoteRecorder) RecordRun(ctx context.Context, parsed *record.ParsedRun
 		ZigVersion:      parsed.Meta.ZigVersion,
 		ManifestHash:    parsed.Meta.ManifestHash,
 		ManifestJSON:    parsed.Meta.ManifestJSON,
+		Purpose:         parsed.Meta.Purpose,
+		AttemptKey:      parsed.Meta.AttemptKey,
+		AttemptRole:     parsed.Meta.AttemptRole,
 	}
 
 	for _, pr := range parsed.Results {
@@ -266,6 +275,74 @@ func isAmbiguousRunResponse(err error) bool {
 	return errors.As(err, &urlErr)
 }
 
+func (r *RemoteRecorder) RecordInvestigation(ctx context.Context, investigationID int64, recording record.InvestigationRecording) (int64, error) {
+	if investigationID <= 0 {
+		return 0, fmt.Errorf("investigation ID is required")
+	}
+	if err := recording.Validate(); err != nil {
+		return 0, err
+	}
+	body, err := json.Marshal(recording)
+	if err != nil {
+		return 0, fmt.Errorf("marshal investigation recording: %w", err)
+	}
+	if len(body) > record.MaxInvestigationRecordingBytes {
+		return 0, fmt.Errorf("investigation recording exceeds %d bytes", record.MaxInvestigationRecordingBytes)
+	}
+	path := fmt.Sprintf("/api/investigations/%d/record", investigationID)
+	requestCouldHaveReachedServer := ctx.Err() == nil
+	runID, err := r.postInvestigation(ctx, path, body)
+	if err != nil && requestCouldHaveReachedServer && isAmbiguousRunResponse(err) {
+		recoveryParent := ctx
+		if ctx.Err() != nil {
+			recoveryParent = context.WithoutCancel(ctx)
+		}
+		recoveryCtx, cancel := context.WithTimeout(recoveryParent, remoteRunRecoveryTimeout)
+		defer cancel()
+		runID, err = r.postInvestigation(recoveryCtx, path, body)
+		if err != nil {
+			if recoveryCtx.Err() != nil && ctx.Err() != nil {
+				return 0, errors.Join(ctx.Err(), err)
+			}
+			return 0, fmt.Errorf("recover POST %s after ambiguous response: %w", path, err)
+		}
+	}
+	return runID, err
+}
+
+func (r *RemoteRecorder) postInvestigation(ctx context.Context, path string, body []byte) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.BaseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.doRequest(req)
+	if err != nil {
+		return 0, fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return 0, &remoteHTTPError{method: http.MethodPost, path: path, status: resp.StatusCode, body: string(respBody)}
+	}
+	var result struct {
+		RunID         int64 `json:"run_id"`
+		BaselineRunID int64 `json:"baseline_run_id"`
+		TargetRunID   int64 `json:"target_run_id"`
+	}
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(&result); err != nil {
+		return 0, &remoteResponseError{method: http.MethodPost, path: path, err: err}
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return 0, &remoteResponseError{method: http.MethodPost, path: path, err: errors.New("response must contain exactly one JSON value")}
+	}
+	if result.RunID <= 0 || result.BaselineRunID <= 0 || result.TargetRunID <= 0 {
+		return 0, &remoteResponseError{method: http.MethodPost, path: path, err: errors.New("response has no complete investigation run IDs")}
+	}
+	return result.RunID, nil
+}
+
 func (r *RemoteRecorder) requireJavaScriptRunsCapability(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.BaseURL+"/api/capabilities", nil)
 	if err != nil {
@@ -341,6 +418,12 @@ func (r *RemoteRecorder) UploadArtifact(ctx context.Context, runID, resultID int
 	return nil
 }
 
+type finalizeArtifactsResponse struct {
+	Complete     bool  `json:"complete"`
+	ResultCount  int64 `json:"result_count"`
+	ProfileCount int64 `json:"profile_count"`
+}
+
 // FinalizeArtifacts applies server-side retention after a run's complete
 // profile set has been uploaded.
 func (r *RemoteRecorder) FinalizeArtifacts(ctx context.Context, runID int64) error {
@@ -358,9 +441,19 @@ func (r *RemoteRecorder) FinalizeArtifacts(ctx context.Context, runID int64) err
 		return fmt.Errorf("finalize artifacts: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("finalize artifacts: read body: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("finalize artifacts: status %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("finalize artifacts: status %d: %s", resp.StatusCode, string(body))
+	}
+	var result finalizeArtifactsResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("finalize artifacts: decode response: %w", err)
+	}
+	if result.ProfileCount == 0 && result.ResultCount > 0 {
+		return fmt.Errorf("finalize artifacts: run %d retained 0 profiles of %d results", runID, result.ResultCount)
 	}
 	return nil
 }
@@ -456,6 +549,7 @@ func (r *RemoteRecorder) ClaimJob(ctx context.Context, benchmarkKind string) (*J
 	if benchmarkKind != "" {
 		params.Set("benchmark_kind", benchmarkKind)
 	}
+	params.Set("investigation_jobs", "1")
 	u += "?" + params.Encode()
 	var lastErr error
 	for attempt := 1; attempt <= remoteJobMaxAttempts; attempt++ {
@@ -508,22 +602,29 @@ func (r *RemoteRecorder) claimJobOnce(ctx context.Context, target string, body [
 
 // JobClaimResponse matches the job JSON response from the API.
 type JobClaimResponse struct {
-	ID              int64  `json:"id"`
-	Status          string `json:"status"`
-	Kind            string `json:"kind"`
-	Branch          string `json:"branch"`
-	CommitHash      string `json:"commit_hash"`
-	RepoURL         string `json:"repo_url"`
-	Samples         int    `json:"samples"`
-	Profile         string `json:"profile"`
-	Notes           string `json:"notes"`
-	BenchmarkKind   string `json:"benchmark_kind"`
-	BenchmarkSuite  string `json:"benchmark_suite"`
-	ProtocolVersion int64  `json:"protocol_version"`
-	ManifestHash    string `json:"manifest_hash"`
-	JSRuntime       string `json:"js_runtime"`
-	RuntimeVersion  string `json:"runtime_version"`
-	ClaimToken      string `json:"-"`
+	ID               int64  `json:"id"`
+	Status           string `json:"status"`
+	Kind             string `json:"kind"`
+	Branch           string `json:"branch"`
+	CommitHash       string `json:"commit_hash"`
+	RepoURL          string `json:"repo_url"`
+	Samples          int    `json:"samples"`
+	Profile          string `json:"profile"`
+	Notes            string `json:"notes"`
+	BenchmarkKind    string `json:"benchmark_kind"`
+	BenchmarkSuite   string `json:"benchmark_suite"`
+	ProtocolVersion  int64  `json:"protocol_version"`
+	ManifestHash     string `json:"manifest_hash"`
+	JSRuntime        string `json:"js_runtime"`
+	RuntimeVersion   string `json:"runtime_version"`
+	Category         string `json:"category"`
+	Name             string `json:"name"`
+	AttemptKey       string `json:"attempt_key"`
+	InvestigationID  int64  `json:"investigation_id"`
+	BaselineCommit   string `json:"baseline_commit"`
+	ComparisonCommit string `json:"comparison_commit"`
+	Role             string `json:"role"`
+	ClaimToken       string `json:"-"`
 }
 
 // UpdateJob sends PATCH /api/jobs/{id} to update job status/commit/run_id.

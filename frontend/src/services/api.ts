@@ -1,3 +1,5 @@
+import { refreshAuthSession } from "./auth";
+
 export type BenchmarkKind = "zig" | "js";
 export type JSRuntime = "bun" | "node";
 export type JSRuntimeFilter = JSRuntime | "all";
@@ -51,8 +53,17 @@ export interface BenchmarkResult {
   mem_stats?: { name: string; bytes: number }[];
 }
 
+export interface CaptureStatus {
+  result_count: number;
+  profile_count: number;
+  complete: boolean;
+  missing_reason?: string;
+}
+
 export interface RunDetails extends Run {
   results: BenchmarkResult[];
+  purpose?: string;
+  capture?: CaptureStatus;
 }
 
 export interface TrendPoint extends RunIdentity {
@@ -160,6 +171,95 @@ export interface Job extends Partial<RunIdentity> {
   completed_at?: string;
   run_id?: number;
   requested_by?: string;
+  category?: string;
+  name?: string;
+  attempt_key?: string;
+  investigation_id?: number;
+  baseline_commit?: string;
+  role?: string;
+}
+
+export interface Investigation {
+  id: number;
+  identity_key: string;
+  trigger_result_id?: number;
+  category: string;
+  name: string;
+  benchmark_kind: string;
+  baseline_commit: string;
+  target_commit: string;
+  statistical_reference_run_id?: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InvestigationAttempt {
+  id: number;
+  attempt_key: string;
+  role: string;
+  commit_hash: string;
+  branch: string;
+  samples: number;
+  profile: string;
+  job_id?: number;
+  run_id?: number;
+  baseline_run_id?: number;
+  target_run_id?: number;
+  status: string;
+  recipe_json?: string;
+  error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InvestigationEvidence {
+  investigation: Investigation;
+  attempts: InvestigationAttempt[];
+  timing: {
+    metric: string;
+    quantity: string;
+    lower_is_better: boolean;
+    baseline_ns?: number;
+    target_ns?: number;
+    candidate_ns?: number;
+    change_percent?: number;
+    reproduced?: boolean;
+    comparison_status?: string;
+    comparison_attempt_id?: number;
+    comparison_attempt_role?: string;
+    insufficient_reason?: string;
+    candidate_improved?: boolean;
+    candidate_comparison_status?: string;
+    candidate_change_percent?: number;
+    candidate_baseline_change_percent?: number;
+    baseline_run_id?: number;
+    target_run_id?: number;
+    candidate_run_id?: number;
+  };
+  profiles: {
+    quantity: string;
+    unit: string;
+    capture_scope: string;
+    meaning: string;
+    status?: string;
+    missing_reason?: string;
+    error?: string;
+    baseline?: { insufficient_reason?: string; sample_type: string; sample_unit: string };
+    target?: { insufficient_reason?: string; sample_type: string; sample_unit: string };
+    functions?: {
+      name: string;
+      baseline_samples: number;
+      target_samples: number;
+      baseline_share: number;
+      target_share: number;
+      sample_delta: number;
+      share_delta: number;
+      quantity: string;
+    }[];
+  };
+  actions: string[];
+  uncalibrated_regression_score: boolean;
 }
 
 function withBenchmarkKind(path: string, kind: BenchmarkKind): string {
@@ -289,6 +389,26 @@ async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) {
     throw new ApiError(`API call failed: ${res.status} ${res.statusText}`, res.status);
+  }
+  return (await res.json()) as T;
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    if (res.status === 401) await refreshAuthSession();
+    throw new ApiError(
+      res.status === 401
+        ? "Sign in with GitHub, then retry. Your pending submission is kept."
+        : text || `API call failed: ${res.status}`,
+      res.status,
+    );
   }
   return (await res.json()) as T;
 }
@@ -445,5 +565,43 @@ export const api = {
     if (status) params.set("status", status);
     if (requestedBy) params.set("requested_by", requestedBy);
     return fetchJson<Job[]>(`/api/jobs?${params}`);
+  },
+  getInvestigations: async (limit = 50) => {
+    return fetchJson<Investigation[]>(`/api/investigations?limit=${limit}`);
+  },
+  getInvestigationEvidence: async (id: number) => {
+    return fetchJson<InvestigationEvidence>(`/api/investigations/${id}/evidence`);
+  },
+  createInvestigation: async (body: {
+    trigger_result_id: number;
+    statistical_reference_run_id?: number;
+    baseline_commit?: string;
+    target_commit?: string;
+    requested_by?: string;
+  }) => {
+    return postJson<{
+      investigation: Investigation;
+      created: boolean;
+      attempt?: InvestigationAttempt;
+      job?: Job;
+    }>("/api/investigations", body);
+  },
+  createInvestigationAttempt: async (
+    investigationId: number,
+    body: { attempt_key: string; samples?: number; profile?: string },
+  ) => {
+    return postJson<{ attempt: InvestigationAttempt; job: Job; created: boolean }>(
+      `/api/investigations/${investigationId}/attempts`,
+      body,
+    );
+  },
+  submitCandidate: async (
+    investigationId: number,
+    body: { commit_hash: string; branch?: string; attempt_key?: string },
+  ) => {
+    return postJson<{ attempt: InvestigationAttempt; job: Job; created: boolean }>(
+      `/api/investigations/${investigationId}/candidates`,
+      body,
+    );
   },
 };

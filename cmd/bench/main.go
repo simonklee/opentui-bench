@@ -19,6 +19,7 @@ import (
 	"opentui-bench/internal/db"
 	"opentui-bench/internal/joblease"
 	"opentui-bench/internal/jsbench"
+	"opentui-bench/internal/record"
 	"opentui-bench/internal/runner"
 	"opentui-bench/internal/web"
 )
@@ -71,6 +72,7 @@ func main() {
 	rootCmd.AddCommand(flamegraphCmd())
 	rootCmd.AddCommand(workerCmd())
 	rootCmd.AddCommand(triggerCmd())
+	rootCmd.AddCommand(investigateCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -1184,6 +1186,9 @@ func updateRemoteJobAfterExecution(ctx context.Context, remote *runner.RemoteRec
 
 // runWorkerLocal is the existing local-DB worker loop.
 func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollInterval time.Duration, once bool, benchmarkKind string) error {
+	if err := runner.CleanupInvestigationWorkspaces(ctx, repoPath, ""); err != nil {
+		return err
+	}
 	zigDir := runner.ZigDir(repoPath)
 	if _, err := os.Stat(zigDir); os.IsNotExist(err) {
 		return fmt.Errorf("zig directory not found: %s", zigDir)
@@ -1200,7 +1205,7 @@ func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollI
 		if err != nil {
 			return fmt.Errorf("generate job claim token: %w", err)
 		}
-		job, err := database.ClaimNextPendingJobWithToken(benchmarkKind, claimToken, javascriptRuntimes...)
+		job, err := database.ClaimNextPendingJobIncludingInvestigation(benchmarkKind, claimToken, javascriptRuntimes...)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error claiming job: %v\n", err)
 			if once {
@@ -1256,6 +1261,11 @@ func runWorkerLocal(ctx context.Context, database *db.DB, repoPath string, pollI
 }
 
 func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath string) (bool, error) {
+	if job.Kind == db.JobKindInvestigate {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, runner.MaxInvestigationDuration)
+		defer cancel()
+	}
 	repoURL := job.RepoURL
 	if repoURL == "" {
 		repoURL = "origin"
@@ -1272,6 +1282,7 @@ func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath
 	if job.CommitHash == "" {
 		fmt.Printf("  Resolved %s/%s to %s\n", repoURL, job.Branch, shortHash(checkoutRef))
 	}
+	job.CommitHash = checkoutRef
 
 	// Save current HEAD so we can restore after
 	origHead, err := runGitCommand(ctx, repoPath, "rev-parse", "HEAD")
@@ -1308,6 +1319,18 @@ func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath
 		profileMode = runner.ProfileNone
 	}
 
+	if job.Kind == db.JobKindInvestigate {
+		runID, err := executeInvestigationLocal(ctx, database, job, repoPath)
+		if err != nil {
+			return false, err
+		}
+		if err := completeLocalJob(ctx, database, job, runID); err != nil {
+			return true, fmt.Errorf("complete job: %w", err)
+		}
+		fmt.Printf("  Job #%d completed (Run #%d)\n", job.ID, runID)
+		return true, nil
+	}
+
 	cfg := runner.RunConfig{
 		RepoPath:        repoPath,
 		ZigOptimize:     "ReleaseFast",
@@ -1322,6 +1345,8 @@ func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath
 		ManifestHash:    job.ManifestHash,
 		JSRuntime:       runner.JavaScriptRuntime(job.JSRuntime),
 		RuntimeVersion:  job.RuntimeVersion,
+		Filter:          job.Category,
+		FilterBenchmark: job.Name,
 	}
 
 	// Run benchmarks
@@ -1342,6 +1367,9 @@ func executeJobLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath
 
 // runWorkerRemote is the remote-API worker loop.
 func runWorkerRemote(ctx context.Context, remote *runner.RemoteRecorder, repoPath string, pollInterval time.Duration, once bool, benchmarkKind string) error {
+	if err := runner.CleanupInvestigationWorkspaces(ctx, repoPath, ""); err != nil {
+		return err
+	}
 	zigDir := runner.ZigDir(repoPath)
 	if _, err := os.Stat(zigDir); os.IsNotExist(err) {
 		return fmt.Errorf("zig directory not found: %s", zigDir)
@@ -1415,6 +1443,11 @@ func runWorkerRemote(ctx context.Context, remote *runner.RemoteRecorder, repoPat
 }
 
 func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *runner.JobClaimResponse, repoPath string) (int64, error) {
+	if job.Kind == db.JobKindInvestigate {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, runner.MaxInvestigationDuration)
+		defer cancel()
+	}
 	// Fetch the branch/remote
 	repoURL := job.RepoURL
 	if repoURL == "" {
@@ -1435,6 +1468,7 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 	if job.CommitHash == "" {
 		fmt.Printf("  Resolved %s/%s to %s\n", repoURL, job.Branch, shortHash(checkoutRef))
 	}
+	job.CommitHash = checkoutRef
 
 	// Save current HEAD so we can restore after
 	origHead, err := runGitCommand(ctx, repoPath, "rev-parse", "HEAD")
@@ -1471,6 +1505,10 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 		profileMode = runner.ProfileNone
 	}
 
+	if job.Kind == db.JobKindInvestigate {
+		return executeInvestigationRemote(ctx, remote, job, repoPath)
+	}
+
 	cfg := runner.RunConfig{
 		RepoPath:        repoPath,
 		ZigOptimize:     "ReleaseFast",
@@ -1485,6 +1523,8 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 		ManifestHash:    job.ManifestHash,
 		JSRuntime:       runner.JavaScriptRuntime(job.JSRuntime),
 		RuntimeVersion:  job.RuntimeVersion,
+		Filter:          job.Category,
+		FilterBenchmark: job.Name,
 	}
 
 	// Run benchmarks (collect results without writing to any DB)
@@ -1536,8 +1576,70 @@ func executeJobRemote(ctx context.Context, remote *runner.RemoteRecorder, job *r
 	return runID, nil
 }
 
+func pairConfigFromJob(repoPath, branch, notes, benchmarkKind, benchmarkSuite string, protocolVersion int64, samples int, profile, category, name, attemptKey, baselineCommit, commit, comparisonCommit, role string) runner.PairConfig {
+	cfg := runner.PairConfig{
+		RunConfig: runner.RunConfig{
+			RepoPath:        repoPath,
+			ZigOptimize:     "ReleaseFast",
+			Samples:         samples,
+			Profile:         runner.ProfileMode(profile),
+			PerfFreq:        997,
+			Notes:           notes,
+			Branch:          branch,
+			BenchmarkKind:   runner.BenchmarkKind(benchmarkKind),
+			BenchmarkSuite:  benchmarkSuite,
+			ProtocolVersion: protocolVersion,
+		},
+		BaselineCommit: baselineCommit,
+		TargetCommit:   commit,
+		Category:       category,
+		Name:           name,
+		AttemptKey:     attemptKey,
+		Role:           role,
+	}
+	if role == db.AttemptRoleCandidate {
+		cfg.TargetCommit = comparisonCommit
+		cfg.CandidateCommit = commit
+	}
+	return cfg
+}
+
+func executeInvestigationLocal(ctx context.Context, database *db.DB, job *db.Job, repoPath string) (int64, error) {
+	cfg := pairConfigFromJob(repoPath, job.Branch, job.Notes, job.BenchmarkKind, job.BenchmarkSuite, job.ProtocolVersion,
+		job.Samples, job.Profile, job.Category, job.Name, job.AttemptKey, job.BaselineCommit, job.CommitHash, job.ComparisonCommit, job.Role)
+	result, err := runner.RunInvestigation(ctx, cfg, runner.OSRunner{})
+	if err != nil {
+		return 0, err
+	}
+	recording, err := result.Recording()
+	if err != nil {
+		return 0, err
+	}
+	attempt, _, err := record.StoreInvestigation(database, recording, db.ProfileRetention{
+		MaxRuns: db.DefaultProfileRunsMax, MaxBytes: db.DefaultProfileBytesMax,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return attempt.RunID, nil
+}
+
+func executeInvestigationRemote(ctx context.Context, remote *runner.RemoteRecorder, job *runner.JobClaimResponse, repoPath string) (int64, error) {
+	cfg := pairConfigFromJob(repoPath, job.Branch, job.Notes, job.BenchmarkKind, job.BenchmarkSuite, job.ProtocolVersion,
+		job.Samples, job.Profile, job.Category, job.Name, job.AttemptKey, job.BaselineCommit, job.CommitHash, job.ComparisonCommit, job.Role)
+	result, err := runner.RunInvestigation(ctx, cfg, runner.OSRunner{})
+	if err != nil {
+		return 0, err
+	}
+	recording, err := result.Recording()
+	if err != nil {
+		return 0, err
+	}
+	return remote.RecordInvestigation(ctx, job.InvestigationID, recording)
+}
+
 func triggerCmd() *cobra.Command {
-	var branch, commitHash, notes, requestedBy, profile, benchmarkKind, benchmarkSuite, manifestHash, jsRuntime string
+	var branch, commitHash, notes, requestedBy, profile, benchmarkKind, benchmarkSuite, manifestHash, jsRuntime, category, name string
 	var samples int
 	var protocolVersion int64
 
@@ -1601,6 +1703,8 @@ Example:
 				ManifestHash:    manifestHash,
 				JSRuntime:       jsRuntime,
 				RuntimeVersion:  jsbench.RuntimeVersion(jsRuntime),
+				Category:        category,
+				Name:            name,
 			}
 
 			id, err := database.InsertJob(job)
@@ -1627,11 +1731,99 @@ Example:
 	cmd.Flags().StringVar(&jsRuntime, "runtime", jsbench.RuntimeBun, "JavaScript runtime (bun, node)")
 	cmd.Flags().StringVar(&notes, "notes", "", "optional notes")
 	cmd.Flags().StringVar(&requestedBy, "requested-by", "", "who requested this job")
+	cmd.Flags().StringVar(&category, "category", "", "optional Zig benchmark category filter")
+	cmd.Flags().StringVar(&name, "bench", "", "optional Zig benchmark name filter")
 
 	if err := cmd.MarkFlagRequired("branch"); err != nil {
 		panic(err)
 	}
 
+	return cmd
+}
+
+func investigateCmd() *cobra.Command {
+	var resultID, referenceRunID int64
+	var baseline, target, attemptKey, branch, requestedBy, profile string
+	var samples int
+	cmd := &cobra.Command{
+		Use:   "investigate",
+		Short: "Queue a paired investigation for one Zig benchmark",
+		Long: `Create an investigation from a stored result and queue a pair attempt.
+
+Example:
+  bench investigate --result-id 123 --baseline abcdef --target 012345`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			database, cleanup, err := openDB()
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			if attemptKey == "" {
+				attemptKey = fmt.Sprintf("cli-%d", time.Now().UnixNano())
+			}
+			create := db.InvestigationCreate{
+				TriggerResultID:           resultID,
+				BaselineCommit:            baseline,
+				TargetCommit:              target,
+				StatisticalReferenceRunID: referenceRunID,
+				AttemptKey:                attemptKey,
+				Branch:                    branch,
+				Samples:                   samples,
+				Profile:                   profile,
+				RequestedBy:               requestedBy,
+			}
+			if resultID != 0 {
+				result, err := database.GetResult(resultID)
+				if err != nil {
+					return err
+				}
+				create.Category = result.Category
+				create.Name = result.Name
+				run, err := database.GetRun(result.RunID)
+				if err != nil {
+					return err
+				}
+				if create.TargetCommit == "" {
+					create.TargetCommit = run.CommitHashFull
+					if create.TargetCommit == "" {
+						create.TargetCommit = run.CommitHash
+					}
+				}
+				if create.Branch == "" {
+					create.Branch = run.Branch
+				}
+			}
+			inv, attempt, job, created, err := database.CreateInvestigationIfAbsent(create)
+			if err != nil {
+				return err
+			}
+			if !created {
+				attempt, job, _, err = database.CreatePairAttempt(inv.ID, create)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("Reused investigation #%d (%s/%s)\n", inv.ID, inv.Category, inv.Name)
+			} else {
+				fmt.Printf("Created investigation #%d (%s/%s)\n", inv.ID, inv.Category, inv.Name)
+			}
+			if attempt != nil {
+				fmt.Printf("  attempt %s role=%s\n", attempt.AttemptKey, attempt.Role)
+			}
+			if job != nil {
+				fmt.Printf("  job #%d status=%s\n", job.ID, job.Status)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().Int64Var(&resultID, "result-id", 0, "triggering result id")
+	cmd.Flags().Int64Var(&referenceRunID, "reference-run", 0, "statistical reference run id")
+	cmd.Flags().StringVar(&baseline, "baseline", "", "explicit baseline commit")
+	cmd.Flags().StringVar(&target, "target", "", "explicit target commit")
+	cmd.Flags().StringVar(&attemptKey, "attempt-key", "", "stable attempt identity (retry-safe)")
+	cmd.Flags().StringVar(&branch, "branch", "main", "git branch name recorded on the job")
+	cmd.Flags().IntVar(&samples, "samples", 3, "timing samples per revision")
+	cmd.Flags().StringVar(&profile, "profile", "cpu", "profile mode (none, cpu)")
+	cmd.Flags().StringVar(&requestedBy, "requested-by", "", "who requested this investigation")
 	return cmd
 }
 
@@ -1823,13 +2015,9 @@ func restoreRepository(ctx context.Context, repoPath, origHead string) error {
 func runGitCommand(ctx context.Context, repoPath string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repoPath
-	out, err := cmd.CombinedOutput()
+	out, err := (runner.OSRunner{}).CombinedOutput(ctx, cmd)
 	output := strings.TrimSpace(string(out))
 	if err != nil {
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) && ctx.Err() != nil {
-			err = errors.Join(err, ctx.Err())
-		}
 		if output != "" {
 			return string(out), fmt.Errorf("git %s: %w (%s)", strings.Join(args, " "), err, output)
 		}

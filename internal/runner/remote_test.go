@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,65 @@ import (
 	"opentui-bench/internal/jsbench"
 	"opentui-bench/internal/record"
 )
+
+func TestRecordInvestigationRetriesCompleteIdenticalPayload(t *testing.T) {
+	fake, cfg := newInvestigationExecutor(t)
+	cfg.CandidateCommit = "candidate-ref"
+	result, err := RunInvestigation(context.Background(), cfg, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recording, err := result.Recording()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var firstBody []byte
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/investigations/17/record" || r.Header.Get("Authorization") != "Bearer secret" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		if requests.Add(1) == 1 {
+			firstBody = body
+			var received record.InvestigationRecording
+			if err := json.Unmarshal(body, &received); err != nil || len(received.Runs) != 3 || received.AttemptKey != cfg.AttemptKey || !bytes.Equal(received.Recipe, recording.Recipe) {
+				t.Errorf("incomplete investigation payload: %+v (%v)", received, err)
+			}
+			for _, side := range received.Runs {
+				if len(side.Artifacts) != 1 || len(side.Artifacts[0].Data) == 0 {
+					t.Error("artifact omitted from atomic recording")
+				}
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"run_id":`)
+			return
+		}
+		if !bytes.Equal(firstBody, body) {
+			t.Error("retry changed serialized measurements, artifacts, or recipes")
+		}
+		_, _ = fmt.Fprint(w, `{"run_id":43,"baseline_run_id":41,"target_run_id":42,"created":false}`)
+	}))
+	defer server.Close()
+	remote := &RemoteRecorder{BaseURL: server.URL, APIKey: "secret"}
+	runID, err := remote.RecordInvestigation(context.Background(), 17, recording)
+	if err != nil || runID != 43 || requests.Load() != 2 {
+		t.Fatalf("runID = %d, err = %v, requests = %d", runID, err, requests.Load())
+	}
+}
+
+func TestRecordRunRejectsIndependentInvestigationSide(t *testing.T) {
+	remote := &RemoteRecorder{}
+	_, _, err := remote.RecordRun(context.Background(), &record.ParsedRun{Meta: record.RunMetadata{
+		Purpose: db.PurposeInvestigation, AttemptKey: "attempt", AttemptRole: db.AttemptRoleBaseline,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "RecordInvestigation") {
+		t.Fatalf("error = %v", err)
+	}
+}
 
 func TestRecordRunSendsPrecisionFieldsToLegacyCompatibleServer(t *testing.T) {
 	var request createRunRequest
@@ -110,13 +170,26 @@ func TestFinalizeArtifactsUsesAuthenticatedRunEndpoint(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
 			t.Errorf("authorization = %q", got)
 		}
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"complete":true,"result_count":1,"profile_count":1}`)
 	}))
 	defer server.Close()
 
 	recorder := &RemoteRecorder{BaseURL: server.URL, APIKey: "secret"}
 	if err := recorder.FinalizeArtifacts(context.Background(), 7); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFinalizeArtifactsRejectsEmptyRetainedProfiles(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"complete":false,"result_count":10,"profile_count":0}`)
+	}))
+	defer server.Close()
+	err := (&RemoteRecorder{BaseURL: server.URL}).FinalizeArtifacts(context.Background(), 7)
+	if err == nil || !strings.Contains(err.Error(), "retained 0 profiles") {
+		t.Fatalf("error = %v, want retained 0 profiles", err)
 	}
 }
 

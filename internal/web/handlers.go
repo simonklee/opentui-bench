@@ -154,15 +154,24 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		MemStats             []memStatResponse `json:"mem_stats,omitempty"`
 	}
 
+	type captureStatusResponse struct {
+		ResultCount   int64  `json:"result_count"`
+		ProfileCount  int64  `json:"profile_count"`
+		Complete      bool   `json:"complete"`
+		MissingReason string `json:"missing_reason,omitempty"`
+	}
+
 	type runDetailResponse struct {
 		runIdentityResponse
-		ID            int64            `json:"id"`
-		CommitHash    string           `json:"commit_hash"`
-		CommitMessage string           `json:"commit_message"`
-		Branch        string           `json:"branch"`
-		RunDate       string           `json:"run_date"`
-		Notes         string           `json:"notes"`
-		Results       []resultResponse `json:"results"`
+		ID            int64                 `json:"id"`
+		CommitHash    string                `json:"commit_hash"`
+		CommitMessage string                `json:"commit_message"`
+		Branch        string                `json:"branch"`
+		RunDate       string                `json:"run_date"`
+		Notes         string                `json:"notes"`
+		Purpose       string                `json:"purpose,omitempty"`
+		Results       []resultResponse      `json:"results"`
+		Capture       captureStatusResponse `json:"capture"`
 	}
 
 	var resultResponses []resultResponse
@@ -194,6 +203,11 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		resultResponses = append(resultResponses, rr)
 	}
 
+	capture, err := s.db.CaptureStatus(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	response := runDetailResponse{
 		runIdentityResponse: identityResponse(run),
 		ID:                  run.ID,
@@ -202,7 +216,14 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		Branch:              run.Branch,
 		RunDate:             run.RunDate,
 		Notes:               run.Notes,
+		Purpose:             run.Purpose,
 		Results:             resultResponses,
+		Capture: captureStatusResponse{
+			ResultCount:   capture.ResultCount,
+			ProfileCount:  capture.ProfileCount,
+			Complete:      capture.Complete,
+			MissingReason: db.CaptureMissingReason(capture),
+		},
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -451,10 +472,14 @@ func (s *Server) handleRuntimeCompare(w http.ResponseWriter, r *http.Request) {
 		Comparisons []runtimeComparison `json:"comparisons"`
 	}{
 		Metric: "p50_ns", LowerBetter: true,
-		Baseline: runtimeRun{runIdentityResponse: identityResponse(baselineRun), ID: baselineRun.ID,
-			CommitHash: baselineRun.CommitHash, CommitHashFull: baselineRun.CommitHashFull},
-		Compared: runtimeRun{runIdentityResponse: identityResponse(comparedRun), ID: comparedRun.ID,
-			CommitHash: comparedRun.CommitHash, CommitHashFull: comparedRun.CommitHashFull},
+		Baseline: runtimeRun{
+			runIdentityResponse: identityResponse(baselineRun), ID: baselineRun.ID,
+			CommitHash: baselineRun.CommitHash, CommitHashFull: baselineRun.CommitHashFull,
+		},
+		Compared: runtimeRun{
+			runIdentityResponse: identityResponse(comparedRun), ID: comparedRun.ID,
+			CommitHash: comparedRun.CommitHash, CommitHashFull: comparedRun.CommitHashFull,
+		},
 		Comparisons: comparisons,
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -2004,21 +2029,28 @@ func (s *Server) handleBranches(w http.ResponseWriter, r *http.Request) {
 
 type jobResponse struct {
 	runIdentityResponse
-	ID          int64  `json:"id"`
-	Status      string `json:"status"`
-	Kind        string `json:"kind"`
-	Branch      string `json:"branch"`
-	CommitHash  string `json:"commit_hash,omitempty"`
-	RepoURL     string `json:"repo_url"`
-	Samples     int    `json:"samples"`
-	Profile     string `json:"profile"`
-	Notes       string `json:"notes,omitempty"`
-	CreatedAt   string `json:"created_at"`
-	StartedAt   string `json:"started_at,omitempty"`
-	CompletedAt string `json:"completed_at,omitempty"`
-	Error       string `json:"error,omitempty"`
-	RunID       *int64 `json:"run_id,omitempty"`
-	RequestedBy string `json:"requested_by,omitempty"`
+	ID               int64  `json:"id"`
+	Status           string `json:"status"`
+	Kind             string `json:"kind"`
+	Branch           string `json:"branch"`
+	CommitHash       string `json:"commit_hash,omitempty"`
+	RepoURL          string `json:"repo_url"`
+	Samples          int    `json:"samples"`
+	Profile          string `json:"profile"`
+	Notes            string `json:"notes,omitempty"`
+	CreatedAt        string `json:"created_at"`
+	StartedAt        string `json:"started_at,omitempty"`
+	CompletedAt      string `json:"completed_at,omitempty"`
+	Error            string `json:"error,omitempty"`
+	RunID            *int64 `json:"run_id,omitempty"`
+	RequestedBy      string `json:"requested_by,omitempty"`
+	Category         string `json:"category,omitempty"`
+	Name             string `json:"name,omitempty"`
+	AttemptKey       string `json:"attempt_key,omitempty"`
+	InvestigationID  *int64 `json:"investigation_id,omitempty"`
+	BaselineCommit   string `json:"baseline_commit,omitempty"`
+	ComparisonCommit string `json:"comparison_commit,omitempty"`
+	Role             string `json:"role,omitempty"`
 }
 
 func jobToResponse(j *db.Job) jobResponse {
@@ -2028,21 +2060,28 @@ func jobToResponse(j *db.Job) jobResponse {
 			ProtocolVersion: j.ProtocolVersion, ManifestHash: j.ManifestHash,
 			JSRuntime: j.JSRuntime, RuntimeVersion: j.RuntimeVersion,
 		},
-		ID:          j.ID,
-		Status:      j.Status,
-		Kind:        j.Kind,
-		Branch:      j.Branch,
-		CommitHash:  j.CommitHash,
-		RepoURL:     j.RepoURL,
-		Samples:     j.Samples,
-		Profile:     j.Profile,
-		Notes:       j.Notes,
-		CreatedAt:   j.CreatedAt,
-		StartedAt:   j.StartedAt,
-		CompletedAt: j.CompletedAt,
-		Error:       j.Error,
-		RunID:       j.RunID,
-		RequestedBy: j.RequestedBy,
+		ID:               j.ID,
+		Status:           j.Status,
+		Kind:             j.Kind,
+		Branch:           j.Branch,
+		CommitHash:       j.CommitHash,
+		RepoURL:          j.RepoURL,
+		Samples:          j.Samples,
+		Profile:          j.Profile,
+		Notes:            j.Notes,
+		CreatedAt:        j.CreatedAt,
+		StartedAt:        j.StartedAt,
+		CompletedAt:      j.CompletedAt,
+		Error:            j.Error,
+		RunID:            j.RunID,
+		RequestedBy:      j.RequestedBy,
+		Category:         j.Category,
+		Name:             j.Name,
+		AttemptKey:       j.AttemptKey,
+		InvestigationID:  j.InvestigationID,
+		BaselineCommit:   j.BaselineCommit,
+		ComparisonCommit: j.ComparisonCommit,
+		Role:             j.Role,
 	}
 }
 
@@ -2065,6 +2104,8 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		ManifestHash    string `json:"manifest_hash"`
 		JSRuntime       string `json:"js_runtime"`
 		RuntimeVersion  string `json:"runtime_version"`
+		Category        string `json:"category"`
+		Name            string `json:"name"`
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
@@ -2165,6 +2206,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		BenchmarkKind: req.BenchmarkKind, BenchmarkSuite: req.BenchmarkSuite,
 		ProtocolVersion: req.ProtocolVersion, ManifestHash: req.ManifestHash,
 		JSRuntime: req.JSRuntime, RuntimeVersion: req.RuntimeVersion,
+		Category: req.Category, Name: req.Name,
 	}
 
 	id, err := s.db.InsertJob(job)
@@ -2349,6 +2391,9 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		ZigVersion      string            `json:"zig_version"`
 		ManifestHash    string            `json:"manifest_hash"`
 		ManifestJSON    string            `json:"manifest_json"`
+		Purpose         string            `json:"purpose"`
+		AttemptKey      string            `json:"attempt_key"`
+		AttemptRole     string            `json:"attempt_role"`
 		Results         []createRunResult `json:"results"`
 	}
 
@@ -2416,7 +2461,18 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		ProtocolVersion: req.ProtocolVersion, BunVersion: req.BunVersion,
 		JSRuntime: req.JSRuntime, RuntimeVersion: req.RuntimeVersion,
 		ZigVersion: req.ZigVersion, ManifestHash: req.ManifestHash, ManifestJSON: req.ManifestJSON,
+		Purpose: req.Purpose, AttemptKey: req.AttemptKey, AttemptRole: req.AttemptRole,
 		LegacyJSIdentity: legacyJSIdentity,
+	}
+	if req.Purpose != "" && req.Purpose != db.PurposeHistory && req.Purpose != db.PurposeInvestigation {
+		writeJSONError(w, "purpose must be history or investigation", http.StatusBadRequest)
+		return
+	}
+	if req.AttemptKey != "" {
+		if err := db.ValidateAttemptKey(req.AttemptKey); err != nil {
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	if err := validateCreateRun(run, req.Results); err != nil {
 		writeJSONError(w, err.Error(), http.StatusBadRequest)
@@ -2462,8 +2518,18 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 
 	storedRun, resultIDs, created, err := s.db.InsertRunWithResultsIfAbsent(run, results)
 	if err != nil {
+		if strings.Contains(err.Error(), "attempt_key") || strings.Contains(err.Error(), "investigation") {
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		writeJSONError(w, "insert run: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if req.AttemptKey != "" {
+		if err := s.db.AttachRunToAttempt(req.AttemptKey, req.AttemptRole, storedRun.ID); err != nil {
+			writeJSONError(w, "attach attempt: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2653,14 +2719,16 @@ func (s *Server) handleFinalizeArtifacts(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	pruned, complete, err := s.db.FinalizeProfileData(runID, s.profileRetentionConfig())
+	pruned, status, err := s.db.FinalizeProfileData(runID, s.profileRetentionConfig())
 	if err != nil {
 		writeJSONError(w, "prune profiles: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"complete":       complete,
+		"complete":       status.Complete,
+		"result_count":   status.ResultCount,
+		"profile_count":  status.ProfileCount,
 		"deleted":        pruned.BlobsDeleted,
 		"bytes_deleted":  pruned.BytesDeleted,
 		"retained_runs":  pruned.ProfileRunsRetained,
@@ -2781,7 +2849,13 @@ func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
 	if len(runtimes) == 1 && runtimes[0] == "" {
 		runtimes = nil
 	}
-	job, err := s.db.ClaimNextPendingJobWithToken(benchmarkKind, claimRequest.ClaimToken, runtimes...)
+	var job *db.Job
+	var err error
+	if r.URL.Query().Get("investigation_jobs") == "1" {
+		job, err = s.db.ClaimNextPendingJobIncludingInvestigation(benchmarkKind, claimRequest.ClaimToken, runtimes...)
+	} else {
+		job, err = s.db.ClaimNextPendingJobWithToken(benchmarkKind, claimRequest.ClaimToken, runtimes...)
+	}
 	if err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return

@@ -15,6 +15,8 @@ import TrendIndicator from "./TrendIndicator";
 import type { RegressionNavigationContext } from "../hooks/useBenchmarkDetail";
 import RunIdentitySummary from "./RunIdentity";
 import RuntimeTrendChart from "./RuntimeTrendChart";
+import AuthControl from "./AuthControl";
+import { canWriteInvestigations } from "../services/auth";
 
 const GITHUB_REPO_URL = "https://github.com/anomalyco/opentui";
 
@@ -51,6 +53,10 @@ interface BenchmarkDetailModalProps {
   onClose: () => void;
   onDownloadCpu: () => void;
   onOpenPProf: () => void;
+  onInvestigate?: () => void;
+  investigateBusy?: boolean;
+  investigateError?: string;
+  captureMissingReason?: string;
   onTrendClick?: (runId: number, resultId: number) => void;
 }
 
@@ -198,7 +204,7 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
           </Show>
           <RunIdentitySummary identity={props.runIdentity} compact />
         </div>
-        <div class="flex-none ml-4">
+        <div class="flex-none ml-4 flex items-center gap-2">
           <Button
             onClick={props.onClose}
             class="!border-transparent hover:!bg-transparent hover:!text-black hover:underline whitespace-nowrap"
@@ -207,6 +213,25 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
           </Button>
         </div>
       </div>
+      <Show when={props.onInvestigate && !isJavaScript()}>
+        <div class="flex-none border-b border-border px-4 py-2 md:px-8">
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            <AuthControl />
+            <Button
+              variant="primary"
+              disabled={props.investigateBusy || !canWriteInvestigations()}
+              onClick={props.onInvestigate}
+            >
+              {props.investigateBusy ? "Opening investigation…" : "Investigate"}
+            </Button>
+          </div>
+          <Show when={props.investigateError}>
+            <p role="alert" class="mt-2 text-[12px] text-danger">
+              {props.investigateError}
+            </p>
+          </Show>
+        </div>
+      </Show>
       <div class="flex-1 overflow-auto p-4 md:p-8 bg-white">
         {/* Stats Grid */}
         <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-y-4 gap-x-2 md:gap-8 mb-4 md:mb-12 pb-4 md:pb-8 border-b border-border">
@@ -579,7 +604,11 @@ const BenchmarkDetailModal: Component<BenchmarkDetailModalProps> = (props) => {
                 when={props.hasCpuProfile}
                 fallback={
                   <div class="flex h-full items-center justify-center text-xs font-mono text-text-muted">
-                    No CPU profile recorded
+                    {props.captureMissingReason === "unknown"
+                      ? "No CPU profile recorded. The reason is unknown for this historical run."
+                      : props.captureMissingReason === "not_captured"
+                        ? "No CPU profile for this result. Other profiles from the run may still exist."
+                        : "No CPU profile recorded"}
                   </div>
                 }
               >

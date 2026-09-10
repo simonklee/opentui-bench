@@ -158,7 +158,7 @@ func TestPruneProfileDataEnforcesByteBound(t *testing.T) {
 	}
 }
 
-func TestPruneProfileDataDropsIncompleteProfileRuns(t *testing.T) {
+func TestPruneProfileDataRetainsPartialProfileRuns(t *testing.T) {
 	database := openTestDB(t)
 	_, completeResultID := insertProfileTestRun(t, database, "2026-01-01T00:00:00Z", []byte("complete"))
 	partialRunID, partialResultID := insertProfileTestRun(t, database, "2026-01-02T00:00:00Z", []byte("partial"))
@@ -168,14 +168,14 @@ func TestPruneProfileDataDropsIncompleteProfileRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pruned.ProfileRunsRetained != 1 || pruned.BytesRetained != int64(len("complete")) {
-		t.Fatalf("retained runs/bytes = %d/%d, want 1/%d", pruned.ProfileRunsRetained, pruned.BytesRetained, len("complete"))
+	if pruned.ProfileRunsRetained != 1 || pruned.BytesRetained != int64(len("partial")) {
+		t.Fatalf("retained runs/bytes = %d/%d, want 1/%d", pruned.ProfileRunsRetained, pruned.BytesRetained, len("partial"))
 	}
-	if _, err := database.GetArtifact(completeResultID, "cpu.pprof"); err != nil {
-		t.Fatalf("complete profile set was pruned: %v", err)
+	if _, err := database.GetArtifact(partialResultID, "cpu.pprof"); err != nil {
+		t.Fatalf("partial profile was pruned: %v", err)
 	}
-	if _, err := database.GetArtifact(partialResultID, "cpu.pprof"); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("partial profile error = %v, want sql.ErrNoRows", err)
+	if _, err := database.GetArtifact(completeResultID, "cpu.pprof"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("older complete profile error = %v, want sql.ErrNoRows", err)
 	}
 	results, err := database.GetResultsForRun(partialRunID)
 	if err != nil {
@@ -191,13 +191,13 @@ func TestFinalizeProfileDataPreservesOtherIncompleteRuns(t *testing.T) {
 	completeRunID, completeResultID := insertProfileTestRun(t, database, "2026-01-01T00:00:00Z", []byte("complete"))
 	partialRunID, partialResultID := insertProfileTestRun(t, database, "2026-01-02T00:00:00Z", []byte("partial"))
 	insertTestResult(t, database, partialRunID, "render", "still-uploading")
-	retention := ProfileRetention{MaxRuns: 1, MaxBytes: 100}
+	retention := ProfileRetention{MaxRuns: 2, MaxBytes: 100}
 
-	_, complete, err := database.FinalizeProfileData(completeRunID, retention)
+	_, status, err := database.FinalizeProfileData(completeRunID, retention)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !complete {
+	if !status.Complete {
 		t.Fatal("complete target reported incomplete")
 	}
 	if _, err := database.GetArtifact(completeResultID, "cpu.pprof"); err != nil {
@@ -207,15 +207,21 @@ func TestFinalizeProfileDataPreservesOtherIncompleteRuns(t *testing.T) {
 		t.Fatalf("concurrent partial profile was pruned: %v", err)
 	}
 
-	_, complete, err = database.FinalizeProfileData(partialRunID, retention)
+	_, status, err = database.FinalizeProfileData(partialRunID, retention)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if complete {
+	if status.Complete {
 		t.Fatal("partial target reported complete")
 	}
-	if _, err := database.GetArtifact(partialResultID, "cpu.pprof"); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("finalized partial profile error = %v, want sql.ErrNoRows", err)
+	if status.ProfileCount != 1 || status.ResultCount != 2 {
+		t.Fatalf("partial finalize counts = %d/%d, want 1/2", status.ProfileCount, status.ResultCount)
+	}
+	if _, err := database.GetArtifact(partialResultID, "cpu.pprof"); err != nil {
+		t.Fatalf("finalized partial profile was deleted: %v", err)
+	}
+	if _, err := database.GetArtifact(completeResultID, "cpu.pprof"); err != nil {
+		t.Fatalf("complete profile was pruned while retaining the partial run: %v", err)
 	}
 }
 
@@ -228,6 +234,48 @@ func TestPruneProfileDataRejectsInvalidBounds(t *testing.T) {
 		if _, err := database.PruneProfileData(retention); err == nil {
 			t.Errorf("PruneProfileData(%+v) succeeded, want error", retention)
 		}
+	}
+}
+
+func TestFinalizedPartialProfilesStayWithinRetentionBounds(t *testing.T) {
+	for _, retention := range []ProfileRetention{
+		{MaxRuns: 2, MaxBytes: 100},
+		{MaxRuns: 10, MaxBytes: 9},
+	} {
+		t.Run(fmt.Sprintf("%d-runs-%d-bytes", retention.MaxRuns, retention.MaxBytes), func(t *testing.T) {
+			database := openTestDB(t)
+			for i := 1; i <= 6; i++ {
+				runID, _ := insertProfileTestRun(t, database, fmt.Sprintf("2026-01-%02dT00:00:00Z", i), []byte("part"))
+				insertTestResult(t, database, runID, "render", "skipped")
+				pruned, status, err := database.FinalizeProfileData(runID, retention)
+				if err != nil || status.Complete || status.ProfileCount != 1 || status.ResultCount != 2 {
+					t.Fatalf("partial finalization: %+v %v", status, err)
+				}
+				if pruned.ProfileRunsRetained > retention.MaxRuns || pruned.BytesRetained > retention.MaxBytes {
+					t.Fatalf("partial captures bypassed bounds: %+v", pruned)
+				}
+				var count, size int64
+				if err := database.QueryRow(`SELECT COUNT(DISTINCT r.run_id), COALESCE(SUM(length(a.data_blob)), 0)
+					FROM artifacts a JOIN results r ON r.id = a.result_id WHERE a.kind = 'cpu.pprof'`).Scan(&count, &size); err != nil {
+					t.Fatal(err)
+				}
+				if count > int64(retention.MaxRuns) || size > retention.MaxBytes {
+					t.Fatalf("actual profile storage exceeded bounds: %d runs/%d bytes", count, size)
+				}
+			}
+			if _, err := database.PruneProfileData(retention); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestFinalizeReportsCaptureStatusAfterPruning(t *testing.T) {
+	database := openTestDB(t)
+	runID, _ := insertProfileTestRun(t, database, "2026-01-01T00:00:00Z", []byte("too large"))
+	pruned, status, err := database.FinalizeProfileData(runID, ProfileRetention{MaxRuns: 1, MaxBytes: 1})
+	if err != nil || status.Complete || status.ResultCount != 1 || status.ProfileCount != 0 || pruned.BytesRetained != 0 {
+		t.Fatalf("pruned capture falsely reported available: %+v %+v %v", pruned, status, err)
 	}
 }
 
@@ -506,14 +554,18 @@ func TestListJobs(t *testing.T) {
 
 func TestListJobsFiltersBeforeLimit(t *testing.T) {
 	database := openTestDB(t)
-	_, err := database.InsertJob(&Job{Status: "failed", Kind: "benchmark", Branch: "main", Samples: 3, Profile: "none",
+	_, err := database.InsertJob(&Job{
+		Status: "failed", Kind: "benchmark", Branch: "main", Samples: 3, Profile: "none",
 		CreatedAt: "2026-08-03T00:00:00Z", RequestedBy: "worker", BenchmarkKind: "js", BenchmarkSuite: jsbench.Suite,
-		ProtocolVersion: jsbench.Protocol, ManifestHash: jsbench.ManifestDigest})
+		ProtocolVersion: jsbench.Protocol, ManifestHash: jsbench.ManifestDigest,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = database.InsertJob(&Job{Status: "failed", Kind: "benchmark", Branch: "main", Samples: 3, Profile: "cpu",
-		CreatedAt: "2026-08-04T00:00:00Z", RequestedBy: "other", BenchmarkKind: "zig"})
+	_, err = database.InsertJob(&Job{
+		Status: "failed", Kind: "benchmark", Branch: "main", Samples: 3, Profile: "cpu",
+		CreatedAt: "2026-08-04T00:00:00Z", RequestedBy: "other", BenchmarkKind: "zig",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2040,18 +2092,22 @@ func TestVersion8MigrationBackfillsJavaScriptRuntimeIdentity(t *testing.T) {
 
 func TestRuntimeIdentitySeparatesCohortsAndClaims(t *testing.T) {
 	database := openTestDB(t)
-	bun := &Run{BenchmarkKind: jsbench.Kind, BenchmarkSuite: jsbench.Suite, ProtocolVersion: jsbench.Protocol,
+	bun := &Run{
+		BenchmarkKind: jsbench.Kind, BenchmarkSuite: jsbench.Suite, ProtocolVersion: jsbench.Protocol,
 		JSRuntime: jsbench.RuntimeBun, RuntimeVersion: jsbench.BunVersion, BunVersion: jsbench.BunVersion,
-		ZigVersion: jsbench.ZigVersion, ManifestHash: jsbench.ManifestDigest, MachineID: "runner"}
+		ZigVersion: jsbench.ZigVersion, ManifestHash: jsbench.ManifestDigest, MachineID: "runner",
+	}
 	node := *bun
 	node.JSRuntime, node.RuntimeVersion, node.BunVersion = jsbench.RuntimeNode, jsbench.NodeVersion, ""
 	if SameRunCohort(bun, &node) || !CrossRuntimeCompatible(bun, &node) {
 		t.Fatalf("bun/node compatibility: same=%v cross=%v", SameRunCohort(bun, &node), CrossRuntimeCompatible(bun, &node))
 	}
-	jobID, err := database.InsertJob(&Job{Status: "pending", Kind: "benchmark", Branch: "main", Samples: 3,
+	jobID, err := database.InsertJob(&Job{
+		Status: "pending", Kind: "benchmark", Branch: "main", Samples: 3,
 		Profile: "none", CreatedAt: "2026-08-04T00:00:00Z", BenchmarkKind: jsbench.Kind,
 		BenchmarkSuite: jsbench.Suite, ProtocolVersion: jsbench.Protocol, ManifestHash: jsbench.ManifestDigest,
-		JSRuntime: jsbench.RuntimeNode, RuntimeVersion: jsbench.NodeVersion})
+		JSRuntime: jsbench.RuntimeNode, RuntimeVersion: jsbench.NodeVersion,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2213,9 +2269,11 @@ func TestJavaScriptComparableRunsRequireCompleteIdentityMatch(t *testing.T) {
 	database := openTestDB(t)
 	insert := func(date, kind, suite, bun, zig string, protocol int64, manifest string) (int64, int64) {
 		t.Helper()
-		id, err := database.InsertRun(&Run{CommitHash: date, Branch: "main", RunDate: date, MachineID: "runner",
+		id, err := database.InsertRun(&Run{
+			CommitHash: date, Branch: "main", RunDate: date, MachineID: "runner",
 			BenchmarkKind: kind, BenchmarkSuite: suite, ProtocolVersion: protocol, BunVersion: bun,
-			ZigVersion: zig, ManifestHash: manifest})
+			ZigVersion: zig, ManifestHash: manifest,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}

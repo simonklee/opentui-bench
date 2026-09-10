@@ -14,9 +14,15 @@ import (
 	"github.com/google/pprof/profile"
 
 	"opentui-bench/internal/db"
+	"opentui-bench/internal/profilediff"
 )
 
 func CaptureCPUProfile(ctx context.Context, r CmdRunner, benchBin, workingDir string, benchmark db.BenchmarkKey, freq int) ([]byte, string, error) {
+	args := []string{"--filter", benchmark.Category, "--bench", benchmark.Name, "--json"}
+	return captureCPUProfile(ctx, r, benchBin, workingDir, args, freq, nil)
+}
+
+func captureCPUProfile(ctx context.Context, r CmdRunner, benchBin, workingDir string, args []string, freq int, validate func([]byte) error) ([]byte, string, error) {
 	tmp, err := os.MkdirTemp("", "opentui-prof-")
 	if err != nil {
 		return nil, "", err
@@ -26,13 +32,18 @@ func CaptureCPUProfile(ctx context.Context, r CmdRunner, benchBin, workingDir st
 	perfData := filepath.Join(tmp, "perf.data")
 	pbGz := filepath.Join(tmp, "profile.pb.gz")
 
-	cmd1 := exec.CommandContext(ctx, "perf", "record", "-F", strconv.Itoa(freq), "-g", "-o", perfData, "--",
-		benchBin, "--filter", benchmark.Category, "--bench", benchmark.Name, "--json")
+	perfArgs := append([]string{"record", "-F", strconv.Itoa(freq), "-g", "-o", perfData, "--", benchBin}, args...)
+	cmd1 := exec.CommandContext(ctx, "perf", perfArgs...)
 	cmd1.Dir = workingDir
 
 	out1, err := r.CombinedOutput(ctx, cmd1)
 	if err != nil {
 		return nil, "", fmt.Errorf("perf record failed: %w\n%s", err, strings.TrimSpace(string(out1)))
+	}
+	if validate != nil {
+		if err := validate(out1); err != nil {
+			return nil, "", fmt.Errorf("profile workload: %w", err)
+		}
 	}
 
 	if _, err := exec.LookPath("perf_to_profile"); err == nil {
@@ -76,7 +87,7 @@ func hasSymbols(data []byte) bool {
 
 	valid := 0
 	for _, fn := range p.Function {
-		if fn.Name != "" && !strings.HasPrefix(fn.Name, "0x") {
+		if profilediff.IsResolvedFunction(fn.Name) {
 			valid++
 		}
 		if valid > 5 {

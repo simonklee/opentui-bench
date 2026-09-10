@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 // CmdRunner abstracts executing commands to allow for testing.
@@ -24,6 +26,17 @@ type OSRunner struct{}
 
 // CombinedOutput runs the command and returns combined stdout and stderr.
 func (OSRunner) CombinedOutput(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if cmd.Cancel != nil {
+		cmd.Cancel = func() error {
+			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+	}
+	cmd.WaitDelay = time.Second
 	output, err := cmd.CombinedOutput()
 	var exitError *exec.ExitError
 	if err != nil && errors.As(err, &exitError) && ctx.Err() != nil {

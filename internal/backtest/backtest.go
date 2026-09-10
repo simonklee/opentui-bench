@@ -247,10 +247,10 @@ func normalizeOptions(opts Options) Options {
 }
 
 func listReplayRunIDs(database *db.DB, branch string) ([]int64, error) {
-	query := "SELECT id FROM runs WHERE branch = ? ORDER BY julianday(run_date) ASC, id ASC"
+	query := "SELECT id FROM runs WHERE purpose = 'history' AND branch = ? ORDER BY julianday(run_date) ASC, id ASC"
 	args := []interface{}{branch}
 	if branch == "main" {
-		query = "SELECT id FROM runs WHERE branch = 'main' OR branch IS NULL OR branch = '' ORDER BY julianday(run_date) ASC, id ASC"
+		query = "SELECT id FROM runs WHERE purpose = 'history' AND (branch = 'main' OR branch IS NULL OR branch = '') ORDER BY julianday(run_date) ASC, id ASC"
 		args = nil
 	}
 
