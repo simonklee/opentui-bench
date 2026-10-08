@@ -46,17 +46,9 @@ const AuthControl: Component = () => {
                   </p>
                 }
               >
-                <a
-                  href={loginURL()}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="font-medium text-accent hover:underline"
-                >
+                <a href={loginURL()} rel="external" class="font-medium text-accent hover:underline">
                   Sign in with GitHub
                 </a>
-                <p class="mt-1 text-text-muted">
-                  Opens a new tab. After signing in, return here and retry your submission.
-                </p>
               </Show>
             }
           >
@@ -74,7 +66,7 @@ const AuthControl: Component = () => {
           {authError()}
         </p>
       </Show>
-      <Show when={authError() || (authSession()?.configured && !authSession()?.authenticated)}>
+      <Show when={authError()}>
         <Button
           type="button"
           class="mt-2"

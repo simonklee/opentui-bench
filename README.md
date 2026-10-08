@@ -45,8 +45,7 @@ noise. Each run records multiple iterations to average out variability.
 
 GitHub sign-in lets allowed users create investigations, rerun pairs, and submit
 candidate commits. Anyone can read benchmark results and investigation evidence.
-The sign-in control opens a new tab so you can return to a pending submission
-and retry it with the same attempt key.
+Sign-in redirects to GitHub and then returns to the page where you started.
 
 Create a [GitHub OAuth app](https://github.com/settings/developers). For the
 production site, register this **Authorization callback URL** exactly:
