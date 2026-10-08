@@ -206,6 +206,57 @@ func TestCandidateEvidenceUsesQualifiedFreshControls(t *testing.T) {
 			if tc.untimed >= 0 && (timing["reproduced"] == true || inv.Status == "improved") {
 				t.Fatalf("untimed evidence produced success: %v status=%s", timing, inv.Status)
 			}
+			profiles := bundle["profiles"].(map[string]any)
+			if tc.wantStatus == "insufficient" && profiles["status"] != "insufficient" {
+				t.Fatalf("insufficient attempt left profiles status as %v", profiles)
+			}
 		})
+	}
+}
+
+func TestEvidenceIgnoresAnyzigWorktreeDiagnosticsInZigVersion(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	commits := []string{strings.Repeat("a", 40), strings.Repeat("b", 40)}
+	inv, _, _, _, err := database.CreateInvestigationIfAbsent(db.InvestigationCreate{
+		Category: "render", Name: "work", BaselineCommit: commits[0], TargetCommit: commits[1], AttemptKey: "pair", Profile: "none",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recording := evidenceRecording(t, "pair", commits, [][]int64{{50765418, 50428159, 50685783}, {64400603, 61798597, 62281148}})
+	var recipes map[string]runner.Recipe
+	if err := json.Unmarshal(recording.Recipe, &recipes); err != nil {
+		t.Fatal(err)
+	}
+	for i, role := range []string{db.AttemptRoleBaseline, db.AttemptRoleTarget} {
+		version := fmt.Sprintf("anyzig: .minimum_zig_version '0.16.0' pulled from '/tmp/exec-%s-source/packages/native/build.zig.zon'\nanyzig: appdata '/home/bench/.local/share/anyzig'\n0.16.0", role)
+		recording.Runs[i].Run.Meta.ZigVersion = version
+		recipe := recipes[role]
+		recipe.ZigVersion = version
+		recipes[role] = recipe
+	}
+	recording.Recipe, err = json.Marshal(recipes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := record.StoreInvestigation(database, recording, db.ProfileRetention{MaxRuns: 10, MaxBytes: 1024}); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := database.ListAttempts(inv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{db: database}
+	bundle, err := server.buildEvidenceBundle(inv, attempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timing := bundle["timing"].(map[string]any)
+	if timing["comparison_status"] != "reproduced" || timing["reproduced"] != true || inv.Status != "reproduced" {
+		t.Fatalf("anyzig diagnostics blocked comparison: timing=%v status=%s", timing, inv.Status)
 	}
 }

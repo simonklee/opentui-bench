@@ -244,11 +244,15 @@ func buildRevision(ctx context.Context, cfg PairConfig, side *investigationRevis
 	side.workingDir = zigDir
 	versionCmd := exec.CommandContext(ctx, "zig", "version")
 	versionCmd.Dir = zigDir
-	version, err := executor.CombinedOutput(ctx, versionCmd)
-	if err != nil || len(bytes.TrimSpace(version)) == 0 {
+	version, stderr, err := executor.Output(ctx, versionCmd)
+	cleanedVersion := db.CleanZigVersion(string(version))
+	if err != nil || cleanedVersion == "" {
+		if msg := strings.TrimSpace(string(stderr)); msg != "" {
+			return fmt.Errorf("read effective Zig version: %v\n%s", err, msg)
+		}
 		return fmt.Errorf("read effective Zig version: %v", err)
 	}
-	meta.ZigVersion = strings.TrimSpace(string(version))
+	meta.ZigVersion = cleanedVersion
 	benchBin, err := BuildZigBench(ctx, zigDir, cfg.ZigOptimize, executor)
 	if err != nil {
 		return err

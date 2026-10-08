@@ -124,3 +124,16 @@ func TestSelectsCountMetricAndIgnoresUnresolvedFrames(t *testing.T) {
 		t.Fatalf("diff = %+v", diff)
 	}
 }
+
+func TestDiffNormalizesZigAnonymousInstantiationSuffixes(t *testing.T) {
+	baseline := testProfile(t, "text-buffer-view.UnifiedTextBufferView.calculateVirtualLinesGeneric__anon_79190.WrapContext.line_end_callback", "samples", "count", 104)
+	target := testProfile(t, "text-buffer-view.UnifiedTextBufferView.calculateVirtualLinesGeneric__anon_73384.WrapContext.line_end_callback", "samples", "count", 158)
+	diff, _, _, err := Diff(baseline, target, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "text-buffer-view.UnifiedTextBufferView.calculateVirtualLinesGeneric.WrapContext.line_end_callback"
+	if len(diff) != 1 || diff[0].Name != want || diff[0].BaselineSamples != 104 || diff[0].TargetSamples != 158 || diff[0].SampleDelta != 54 {
+		t.Fatalf("diff = %+v", diff)
+	}
+}

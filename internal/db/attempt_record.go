@@ -89,8 +89,20 @@ type attemptRecipe struct {
 	SelectorUnique   bool       `json:"selector_unique"`
 }
 
+func CleanZigVersion(raw string) string {
+	var kept []string
+	for line := range strings.Lines(raw) {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "anyzig:") {
+			continue
+		}
+		kept = append(kept, trimmed)
+	}
+	return strings.Join(kept, "\n")
+}
+
 func (r attemptRecipe) matchesRun(run *Run) bool {
-	return r.CommitHash == run.CommitHashFull && r.ZigOptimize == run.ZigOptimize && r.ZigVersion == run.ZigVersion
+	return r.CommitHash == run.CommitHashFull && r.ZigOptimize == run.ZigOptimize && CleanZigVersion(r.ZigVersion) == CleanZigVersion(run.ZigVersion)
 }
 
 func investigationOptimize(optimize string) bool {
@@ -111,7 +123,7 @@ func validateAttemptRecipe(recipeJSON string, inv *Investigation, a *Investigati
 	}
 	for _, role := range roles {
 		r, ok := recipes[role]
-		if !ok || r.Harness == "" || !investigationOptimize(r.ZigOptimize) || strings.TrimSpace(r.ZigVersion) == "" ||
+		if !ok || r.Harness == "" || !investigationOptimize(r.ZigOptimize) || CleanZigVersion(r.ZigVersion) == "" ||
 			!r.SelectorUnique || !requestedCommitMatches(attemptCommit(inv, a, role), r.CommitHash) ||
 			r.Filter != inv.Category || r.Bench != inv.Name || r.Samples != a.Samples || r.Profile != a.Profile {
 			return nil, fmt.Errorf("recipe for %s must describe the requested workload and execution options", role)
@@ -141,7 +153,7 @@ func validateAttemptRun(tx *sql.Tx, a *InvestigationAttempt, inv *Investigation,
 		(run.ID != 0 && run.ID != linkedID) || (run.Purpose != "" && run.Purpose != PurposeInvestigation) {
 		return fmt.Errorf("run request does not match its attempt key, role, or IDs")
 	}
-	if !investigationOptimize(run.ZigOptimize) || strings.TrimSpace(run.ZigVersion) == "" {
+	if !investigationOptimize(run.ZigOptimize) || CleanZigVersion(run.ZigVersion) == "" {
 		return fmt.Errorf("%s run requires an optimized build and effective Zig version", run.AttemptRole)
 	}
 	normalizeRunIdentity(run)

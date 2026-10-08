@@ -597,6 +597,14 @@ func (s *Server) buildEvidenceBundle(inv *db.Investigation, attempts []db.Invest
 	}
 
 	profiles := s.profileEvidence(baselineResult, targetResult)
+	if baselineResult == nil || targetResult == nil {
+		if reason, ok := timing["insufficient_reason"].(string); ok && reason != "" {
+			profiles["status"] = "insufficient"
+			profiles["missing_reason"] = reason
+		} else if comparison == nil && latest != nil && (latest.Status == "failed" || latest.Status == "cancelled") {
+			profiles["status"] = latest.Status
+		}
+	}
 	return map[string]any{
 		"investigation": investigationToResponse(inv),
 		"roles": map[string]string{
@@ -667,11 +675,12 @@ func (s *Server) comparisonMeasurements(inv *db.Investigation, attempt *db.Inves
 		if err != nil {
 			return nil, nil, "", err
 		}
-		if run.AttemptID != attempt.ID || run.Purpose != db.PurposeInvestigation || run.MachineID == "" || run.ZigVersion == "" || run.CommitHashFull == "" {
+		zigVersion := db.CleanZigVersion(run.ZigVersion)
+		if run.AttemptID != attempt.ID || run.Purpose != db.PurposeInvestigation || run.MachineID == "" || zigVersion == "" || run.CommitHashFull == "" {
 			return nil, nil, "measurement provenance is incomplete or belongs to another attempt", nil
 		}
 		recipe := recipes[roles[i]]
-		if recipe.CommitHash != run.CommitHashFull || recipe.ZigVersion != run.ZigVersion || recipe.ZigOptimize != run.ZigOptimize {
+		if recipe.CommitHash != run.CommitHashFull || db.CleanZigVersion(recipe.ZigVersion) != zigVersion || recipe.ZigOptimize != run.ZigOptimize {
 			return nil, nil, "recorded build recipe contradicts the measurement identity", nil
 		}
 		if run.ZigOptimize != "ReleaseFast" && run.ZigOptimize != "ReleaseSafe" && run.ZigOptimize != "ReleaseSmall" {
@@ -679,7 +688,7 @@ func (s *Server) comparisonMeasurements(inv *db.Investigation, attempt *db.Inves
 		}
 		if len(runs) > 0 {
 			base := runs[0]
-			if run.MachineID != base.MachineID || run.ZigOptimize != base.ZigOptimize || run.ZigVersion != base.ZigVersion ||
+			if run.MachineID != base.MachineID || run.ZigOptimize != base.ZigOptimize || zigVersion != db.CleanZigVersion(base.ZigVersion) ||
 				run.BenchmarkKind != base.BenchmarkKind || run.BenchmarkSuite != base.BenchmarkSuite || run.ProtocolVersion != base.ProtocolVersion {
 				return nil, nil, "paired measurements have different runner or build identities", nil
 			}

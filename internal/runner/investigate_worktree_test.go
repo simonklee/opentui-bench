@@ -17,6 +17,7 @@ import (
 const fixtureZig = `#!/bin/sh
 set -eu
 if [ "$1" = version ]; then
+  printf "anyzig: .minimum_zig_version pulled from '%s/build.zig.zon'\n" "$PWD" >&2
   cat toolchain-version
   exit
 fi
@@ -46,8 +47,13 @@ type worktreeExecutor struct {
 }
 
 func (f *worktreeExecutor) Output(ctx context.Context, cmd *exec.Cmd) ([]byte, []byte, error) {
-	out, err := f.CombinedOutput(ctx, cmd)
-	return out, nil, err
+	if cmd.Args[0] == "zig" {
+		args := append([]string{filepath.Join(cmd.Dir, "fixture-zig.sh")}, cmd.Args[1:]...)
+		script := exec.CommandContext(ctx, "sh", args...)
+		script.Dir = cmd.Dir
+		return (OSRunner{}).Output(ctx, script)
+	}
+	return (OSRunner{}).Output(ctx, cmd)
 }
 
 func (f *worktreeExecutor) CombinedOutput(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {

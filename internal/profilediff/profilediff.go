@@ -42,6 +42,35 @@ func IsResolvedFunction(name string) bool {
 	return name != "" && name != "[unknown]" && name != "??" && !strings.HasPrefix(name, "0x")
 }
 
+func NormalizeFunctionName(name string) string {
+	const marker = "__anon_"
+	if !strings.Contains(name, marker) {
+		return name
+	}
+	var b strings.Builder
+	b.Grow(len(name))
+	for i := 0; i < len(name); {
+		rel := strings.Index(name[i:], marker)
+		if rel < 0 {
+			b.WriteString(name[i:])
+			break
+		}
+		idx := i + rel
+		end := idx + len(marker)
+		for end < len(name) && name[end] >= '0' && name[end] <= '9' {
+			end++
+		}
+		if end > idx+len(marker) {
+			b.WriteString(name[i:idx])
+			i = end
+		} else {
+			b.WriteString(name[i : idx+len(marker)])
+			i = idx + len(marker)
+		}
+	}
+	return b.String()
+}
+
 func Inspect(data []byte) (Quality, error) {
 	_, quality, err := functionSamples(data)
 	return quality, err
@@ -107,7 +136,7 @@ func functionSamples(data []byte) (map[string]int64, Quality, error) {
 					continue
 				}
 				q.ResolvedFrameCount++
-				name := line.Function.Name
+				name := NormalizeFunctionName(line.Function.Name)
 				if weight > 0 && !seen[name] {
 					seen[name] = true
 					counts[name] += weight
