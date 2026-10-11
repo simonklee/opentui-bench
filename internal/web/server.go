@@ -200,6 +200,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		"javascript_runtimes":       []string{"bun", "node"},
 		"javascript_protocol":       1,
 		"javascript_manifest_hash":  jsbench.ManifestDigest,
+		"javascript_manifest_since": jsbench.ManifestSince,
 		"job_lease_protocol":        joblease.Protocol,
 		"flamegraph_renderer":       renderer,
 		"flamegraph_renderer_error": rendererError,

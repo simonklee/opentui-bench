@@ -375,7 +375,7 @@ schedule_javascript_main_job() {
 	if [[ "$runtime" == node ]] && ! has_stable_javascript_node; then
 		return 0
 	fi
-	local capabilities manifest_hash
+	local capabilities manifest_hash manifest_since
 	if ! capabilities=$(curl --fail --silent --show-error --max-time 120 "$API_URL/api/capabilities") ||
 		! jq -e --arg runtime "$runtime" \
 			'.javascript_runs == 1 and .job_lease_protocol == 3 and (.javascript_runtimes | index($runtime) != null)' \
@@ -384,6 +384,7 @@ schedule_javascript_main_job() {
 		info "Server does not advertise $runtime JavaScript scheduling support; skipping automatic scheduling"
 		return 0
 	fi
+	manifest_since=$(jq -r '.javascript_manifest_since // empty' <<<"$capabilities")
 
 	local automatic_jobs
 	automatic_jobs=$(curl --fail --silent --show-error --max-time 120 --get "$API_URL/api/jobs" \
@@ -415,6 +416,18 @@ schedule_javascript_main_job() {
 
 	if [[ -n "$latest_attempt" ]]; then
 		for commit in $(git rev-list --reverse "${latest_attempt}..origin/main"); do
+			if javascript_harness_exists "$commit" "$script"; then
+				next_commit=$commit
+				break
+			fi
+		done
+	elif [[ -n "$manifest_since" ]]; then
+		# Earlier commits cannot produce the canonical manifest.
+		if ! git merge-base --is-ancestor "$manifest_since" origin/main 2>/dev/null; then
+			info "Manifest start ${manifest_since:0:7} is not on origin/main; skipping automatic $runtime scheduling"
+			return 0
+		fi
+		for commit in $(git rev-list --reverse "${manifest_since}^..origin/main"); do
 			if javascript_harness_exists "$commit" "$script"; then
 				next_commit=$commit
 				break
