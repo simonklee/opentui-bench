@@ -386,6 +386,16 @@ schedule_javascript_main_job() {
 	fi
 	manifest_since=$(jq -r '.javascript_manifest_since // empty' <<<"$capabilities")
 
+	# Earlier commits cannot produce the canonical manifest, so attempts on them do not count.
+	local history=origin/main
+	if [[ -n "$manifest_since" ]]; then
+		if ! git merge-base --is-ancestor "$manifest_since" origin/main 2>/dev/null; then
+			info "Manifest start ${manifest_since:0:7} is not on origin/main; skipping automatic $runtime scheduling"
+			return 0
+		fi
+		history="${manifest_since}^..origin/main"
+	fi
+
 	local automatic_jobs
 	automatic_jobs=$(curl --fail --silent --show-error --max-time 120 --get "$API_URL/api/jobs" \
 		--data-urlencode 'branch=main' --data-urlencode 'limit=1000000' \
@@ -406,7 +416,7 @@ schedule_javascript_main_job() {
 	terminal_commits=$(jq -r '.[] | select(.status == "completed" or .status == "failed" or .status == "cancelled") | .commit_hash | select(length > 0)' \
 		<<<"$automatic_jobs")
 	if [[ -n "$terminal_commits" ]]; then
-		for commit in $(git rev-list origin/main); do
+		for commit in $(git rev-list "$history"); do
 			if grep -Fxq "$commit" <<<"$terminal_commits"; then
 				latest_attempt="$commit"
 				break
@@ -422,12 +432,7 @@ schedule_javascript_main_job() {
 			fi
 		done
 	elif [[ -n "$manifest_since" ]]; then
-		# Earlier commits cannot produce the canonical manifest.
-		if ! git merge-base --is-ancestor "$manifest_since" origin/main 2>/dev/null; then
-			info "Manifest start ${manifest_since:0:7} is not on origin/main; skipping automatic $runtime scheduling"
-			return 0
-		fi
-		for commit in $(git rev-list --reverse "${manifest_since}^..origin/main"); do
+		for commit in $(git rev-list --reverse "$history"); do
 			if javascript_harness_exists "$commit" "$script"; then
 				next_commit=$commit
 				break
