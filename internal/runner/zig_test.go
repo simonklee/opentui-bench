@@ -34,16 +34,19 @@ func (r *buildOutputRunner) CombinedOutput(_ context.Context, cmd *exec.Cmd) ([]
 
 func TestBuildZigBenchReturnsBuiltBinary(t *testing.T) {
 	zigDir := "/repo/packages/native"
-	runner := &buildOutputRunner{
-		output: "compile output\n./.zig-cache/o/fast/opentui-bench --help\nUsage: bench [options]\n",
-	}
-	path, err := BuildZigBench(context.Background(), zigDir, "ReleaseFast", runner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Join(zigDir, ".zig-cache/o/fast/opentui-bench")
-	if path != want {
-		t.Fatalf("path = %q, want %q", path, want)
+	for _, output := range []string{
+		"compile output\n./.zig-cache/o/fast/opentui-bench --help\nUsage: bench [options]\n",
+		"info(verbose): zig build-exe\ninfo(verbose): ./.zig-cache/o/fast/opentui-bench --help\nUsage: bench [options]\n",
+	} {
+		runner := &buildOutputRunner{output: output}
+		path, err := BuildZigBench(context.Background(), zigDir, "ReleaseFast", runner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Join(zigDir, ".zig-cache/o/fast/opentui-bench")
+		if path != want {
+			t.Fatalf("output %q: path = %q, want %q", output, path, want)
+		}
 	}
 }
 

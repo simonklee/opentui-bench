@@ -45,6 +45,8 @@ func BuildZigBench(ctx context.Context, zigDir string, optimize string, r CmdRun
 	const suffix = "opentui-bench --help"
 	for line := range strings.Lines(string(out)) {
 		line = strings.TrimSpace(line)
+		// Zig 0.17 prefixes --verbose commands with a log tag.
+		line = strings.TrimPrefix(line, "info(verbose): ")
 		if !strings.HasSuffix(line, suffix) {
 			continue
 		}
