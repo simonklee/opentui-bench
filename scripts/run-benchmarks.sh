@@ -51,6 +51,8 @@ readonly JS_PROTOCOL_VERSION=1
 # so the worker never needs a script update when the benchmark workload changes.
 readonly JS_BUN_VERSION="1.4.1"
 readonly JS_NODE_VERSION="26.7.0"
+# Zig never evicts its local build cache and each commit adds ~250 MB.
+readonly ZIG_CACHE_BUDGET_KB=$((10 * 1024 * 1024))
 
 # API configuration - set these as environment variables
 : "${API_URL:=https://opentui-bench.fly.dev}"
@@ -294,6 +296,20 @@ reset_opentui() {
 		cd "$OPENTUI_REPO"
 		git reset --hard HEAD 2>/dev/null || true
 	fi
+}
+
+# prune_zig_caches removes local Zig caches over budget. Call it only between
+# builds.
+prune_zig_caches() {
+	local cache size_kb
+	for cache in "$OPENTUI_REPO/packages/native/.zig-cache" "$OPENTUI_REPO/packages/core/src/zig/.zig-cache"; do
+		[[ -d "$cache" ]] || continue
+		size_kb=$(du -sk "$cache" | cut -f1)
+		if ((size_kb > ZIG_CACHE_BUDGET_KB)); then
+			log "Removing ${cache#"$OPENTUI_REPO/"} ($((size_kb / 1024)) MiB)"
+			rm -rf "$cache"
+		fi
+	done
 }
 
 run_benchmarks() {
@@ -597,6 +613,7 @@ main() {
 	setup_repos "$@"
 	while true; do
 		did_work=false
+		prune_zig_caches
 		run_benchmarks
 		schedule_javascript_main_job bun
 		schedule_javascript_main_job node
