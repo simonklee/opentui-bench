@@ -17,12 +17,12 @@ const (
 	RuntimeNode    = "node"
 	BunVersion     = "1.4.1"
 	NodeVersion    = "26.7.0"
-	ZigVersion     = "0.17.0"
+	ZigVersion     = "0.17.1"
 	ManifestDigest = "sha256:41cc6f0856b059d6b77f0575f7cdd7c297ddd9e59b55185f3b7fc1ef4ce7e1d7"
 	// ManifestSince is the first opentui main commit whose default suite has
 	// ManifestDigest and builds with ZigVersion. Automatic scheduling starts
 	// there for a new identity because earlier commits cannot produce it.
-	ManifestSince  = "269db3ee43519e7a334f8569588d55ffdca9954b"
+	ManifestSince  = "ec2de51eb32fe65f56ab3f18c2e6069e1bd20aa0"
 	Samples        = 3
 	MaxSafeInteger = int64(1<<53 - 1)
 )
